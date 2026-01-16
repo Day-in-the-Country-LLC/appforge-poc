@@ -41,7 +41,7 @@ pip install git+https://github.com/Day-in-the-Country-LLC/appforge-poc.git
 
 ## Setup
 
-1. Ensure `appforge-creds.json` exists in your repo root (should already be there)
+1. Ensure a credentials file matching `<project>-creds.json` exists in your repo root (e.g., `appforge-creds.json`)
 
 2. Ensure your GCP project has the GitHub token in Secret Manager:
 
@@ -71,10 +71,12 @@ See `docs/agent-issue-sdk.md` for complete documentation, examples, and API refe
 
 ## Credentials
 
-The SDK uses the `appforge-creds.json` file in your repo root to:
+The SDK automatically detects and uses a credentials file matching `<project>-creds.json` in your repo root to:
 1. Extract the GCP project ID
 2. Authenticate with GCP Secret Manager
 3. Fetch the GitHub token
+
+Examples: `appforge-creds.json`, `frontend-creds.json`, `backend-creds.json`
 
 ## License
 

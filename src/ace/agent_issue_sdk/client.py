@@ -1,4 +1,4 @@
-"""Issue creation client for agents to create issues in DITC TODO project."""
+"""Issue creation client for agents to create issues in DITC TODO project using GitHub MCP server."""
 
 import json
 import os
@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import httpx
 import structlog
 from google.cloud import secretmanager
 
 logger = structlog.get_logger(__name__)
+
+# Note: This SDK is designed to work with GitHub's MCP server
+# The MCP server handles all GitHub API interactions
 
 
 @dataclass
@@ -23,6 +25,8 @@ class IssueContent:
     acceptance_criteria: list[str]
     implementation_notes: Optional[str] = None
     related_issues: Optional[list[str]] = None
+    dependencies: Optional[list[str]] = None
+    blocks: Optional[list[str]] = None
 
 
 class IssueCreator:
@@ -54,7 +58,9 @@ class IssueCreator:
         credentials_file = credentials_file or "appforge-creds.json"
         gcp_project_id = self._get_project_id_from_credentials(credentials_file)
 
-        self.github_token = self._fetch_secret(gcp_project_id, secret_name, credentials_file)
+        self.github_token = self._fetch_secret(
+            gcp_project_id, secret_name, credentials_file
+        )
         self.headers = {
             "Authorization": f"token {self.github_token}",
             "Accept": "application/vnd.github.v3+json",
@@ -111,7 +117,7 @@ class IssueCreator:
             client = secretmanager.SecretManagerServiceClient()
             name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
             response = client.access_secret_version(request={"name": name})
-            return response.payload.data.decode("UTF-8")
+            return response.payload.data.decode("UTF-8").strip()
         except Exception as e:
             logger.error("secret_fetch_failed", secret=secret_name, error=str(e))
             raise
@@ -122,7 +128,10 @@ class IssueCreator:
         difficulty: str = "medium",
         labels: Optional[list[str]] = None,
     ) -> dict:
-        """Create an issue in the DITC TODO project.
+        """Create an issue in the DITC TODO project using GitHub MCP server.
+
+        This method returns instructions for the agent to use the GitHub MCP server
+        to create the issue. The agent will handle the actual GitHub operations.
 
         Args:
             content: IssueContent with title, description, criteria, etc.
@@ -130,14 +139,15 @@ class IssueCreator:
             labels: Additional labels to add (agent label added automatically)
 
         Returns:
-            Issue data from GitHub API
+            Dict with MCP server instructions for creating the issue
 
         Raises:
             ValueError: If difficulty is invalid
-            httpx.HTTPError: If API call fails
         """
         if difficulty not in ("easy", "medium", "hard"):
-            raise ValueError(f"Invalid difficulty: {difficulty}. Must be easy, medium, or hard.")
+            raise ValueError(
+                f"Invalid difficulty: {difficulty}. Must be easy, medium, or hard."
+            )
 
         logger.info(
             "creating_issue",
@@ -149,30 +159,30 @@ class IssueCreator:
         issue_body = self._format_issue_body(content)
         issue_labels = self._build_labels(difficulty, labels)
 
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.api_url}/repos/{self.github_org}/{self.github_org}/issues",
-                    headers=self.headers,
-                    json={
-                        "title": content.title,
-                        "body": issue_body,
-                        "labels": issue_labels,
-                    },
-                )
-                response.raise_for_status()
+        # Return MCP server instructions for the agent to execute
+        mcp_instructions = {
+            "mcp_server": "github",
+            "operation": "create_issue",
+            "parameters": {
+                "owner": self.github_org,
+                "repo": content.target_repository,
+                "title": content.title,
+                "body": issue_body,
+                "labels": issue_labels,
+            },
+            "post_actions": {
+                "dependencies": content.dependencies or [],
+                "blocks": content.blocks or [],
+            },
+        }
 
-            issue_data = response.json()
-            logger.info(
-                "issue_created",
-                issue_number=issue_data["number"],
-                url=issue_data["html_url"],
-            )
-            return issue_data
+        logger.info(
+            "issue_creation_delegated_to_mcp",
+            repo=content.target_repository,
+            title=content.title,
+        )
 
-        except httpx.HTTPError as e:
-            logger.error("issue_creation_failed", error=str(e))
-            raise
+        return mcp_instructions
 
     def _format_issue_body(self, content: IssueContent) -> str:
         """Format issue body in standard format.
@@ -204,7 +214,9 @@ class IssueCreator:
 
         return body
 
-    def _build_labels(self, difficulty: str, additional_labels: Optional[list[str]]) -> list[str]:
+    def _build_labels(
+        self, difficulty: str, additional_labels: Optional[list[str]]
+    ) -> list[str]:
         """Build label list.
 
         Args:
@@ -244,7 +256,9 @@ class IssueCreatorSync:
             credentials_file: Path to GCP credentials JSON file (default: appforge-creds.json)
             secret_name: Secret name in Secret Manager (default: github-control-api-key)
         """
-        self.client = IssueCreator(github_org, project_name, api_url, credentials_file, secret_name)
+        self.client = IssueCreator(
+            github_org, project_name, api_url, credentials_file, secret_name
+        )
 
     def create_issue(
         self,
@@ -269,4 +283,6 @@ class IssueCreatorSync:
         import asyncio
 
         loop = asyncio.get_event_loop()
-        return loop.run_until_complete(self.client.create_issue(content, difficulty, labels))
+        return loop.run_until_complete(
+            self.client.create_issue(content, difficulty, labels)
+        )

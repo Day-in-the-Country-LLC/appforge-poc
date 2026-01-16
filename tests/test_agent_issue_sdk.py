@@ -46,13 +46,40 @@ def test_issue_creator_initialization(mock_fetch_secret):
         )
 
 
+def test_issue_creator_auto_detect_credentials():
+    """Test IssueCreator auto-detects credentials file with *-creds.json pattern."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        import os
+
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(tmpdir)
+            creds_file = Path(tmpdir) / "test-creds.json"
+            creds_file.write_text(json.dumps({"project_id": "test-project"}))
+
+            with patch("ace.agent_issue_sdk.client.IssueCreator._fetch_secret") as mock_fetch:
+                mock_fetch.return_value = "test_token"
+                creator = IssueCreator()
+                assert creator.github_token == "test_token"
+        finally:
+            os.chdir(original_cwd)
+
+
 def test_issue_creator_credentials_file_not_found():
-    """Test IssueCreator raises error when credentials file not found."""
-    try:
-        IssueCreator(credentials_file="/nonexistent/creds.json")
-        assert False, "Should have raised FileNotFoundError"
-    except FileNotFoundError as e:
-        assert "Credentials file not found" in str(e)
+    """Test IssueCreator raises error when no credentials file found."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        import os
+
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(tmpdir)
+            try:
+                IssueCreator()
+                assert False, "Should have raised FileNotFoundError"
+            except FileNotFoundError as e:
+                assert "No credentials file found" in str(e)
+        finally:
+            os.chdir(original_cwd)
 
 
 def test_issue_creator_invalid_credentials_json():
