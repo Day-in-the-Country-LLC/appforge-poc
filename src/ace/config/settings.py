@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     github_webhook_secret: Optional[str] = os.getenv("GITHUB_WEBHOOK_SECRET")
     github_ready_status: str = os.getenv("GITHUB_READY_STATUS", "Ready")
     github_agent_label: str = os.getenv("GITHUB_AGENT_LABEL", "agent")
+    github_local_agent_label: str = os.getenv("GITHUB_LOCAL_AGENT_LABEL", "agent:local")
+    github_remote_agent_label: str = os.getenv("GITHUB_REMOTE_AGENT_LABEL", "agent:remote")
 
     # OpenAI / Codex
     openai_api_key: str = os.getenv("APPFORGE_OPENAI_API_KEY", "")

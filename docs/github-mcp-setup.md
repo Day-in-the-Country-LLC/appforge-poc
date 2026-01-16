@@ -1,16 +1,29 @@
 # GitHub MCP Server Setup
 
-This guide explains how to set up the GitHub MCP (Model Context Protocol) server in your development environment to enable agents and LLMs to create and manage GitHub issues directly.
+This guide explains how to set up the GitHub MCP (Model Context Protocol) server for **coding agents** to interact with GitHub directly.
 
-## Overview
+## Architecture Overview
 
-The GitHub MCP server provides a standardized interface for AI tools (Copilot, Cascade, Codex, Claude) to interact with GitHub. Instead of using a custom SDK, we leverage the MCP server's built-in tools for issue creation, updates, and project management.
+The ACE framework uses a **layered approach** for GitHub access:
+
+| Component | GitHub Access Method | Purpose |
+|-----------|---------------------|---------|
+| **ACE Framework** | REST/GraphQL API (`api_client.py`, `projects_v2.py`) | Read project board, manage issue status, orchestration |
+| **Coding Agents** | Official GitHub MCP Server | Create PRs, comment on issues, push code |
+
+This separation ensures:
+- The framework can query project board status (requires GraphQL, not available in MCP)
+- Agents have scoped, secure access to GitHub operations they need
+- No custom MCP server needed—agents use GitHub's official implementation
+
+## GitHub MCP Server (For Agents)
+
+The GitHub MCP server provides a standardized interface for AI tools (Codex CLI, Claude, etc.) to interact with GitHub.
 
 **Benefits:**
-- Works seamlessly in Windsurf, VSCode, Copilot, and other MCP-compatible tools
-- No custom code needed in agent repos
-- Standardized GitHub operations
-- Better IDE integration
+- Works seamlessly in agent execution environments
+- Standardized GitHub operations (issues, PRs, comments)
+- Scoped permissions via PAT
 
 ## Installation
 
@@ -153,12 +166,22 @@ Labels: agent, difficulty:medium, performance, backend
 
 Use these labels for agent-driven issues:
 
+### Agent Labels
+
 - **`agent`** - Issue is ready for agent automation
+- **`agent:local`** - Issue requires local machine access (e.g., local databases, file migrations)
+- **`agent:remote`** - Issue can be processed by cloud VM agents
+
+**Note:** If neither `agent:local` nor `agent:remote` is specified, the issue will be processed by any available agent (backwards compatible behavior).
+
+### Difficulty Labels
+
 - **`difficulty:easy`** - Simple changes, well-defined scope
 - **`difficulty:medium`** - Moderate complexity, some research needed
 - **`difficulty:hard`** - Complex changes, significant refactoring
 
-Additional labels:
+### Category Labels
+
 - `performance` - Performance optimization
 - `backend` - Backend service
 - `frontend` - Frontend application

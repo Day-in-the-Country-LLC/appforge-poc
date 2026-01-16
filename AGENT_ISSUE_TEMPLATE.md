@@ -1,15 +1,23 @@
 # Agent Issue Creation Guide for LLMs
 
-This guide is for AI assistants (Copilot, Cascade, Codex, Claude) to help create well-formatted issues for agent automation using the **GitHub MCP server**.
+This guide is for AI assistants (Copilot, Cascade, Codex, Claude) to help generate well-formatted issues that can be submitted to the **DITC TODO** org project in **Day-in-the-Country-LLC** for agent automation.
 
 ## Your Role
 
-You are helping create an issue that will be processed by an autonomous coding agent. You will:
-1. Use the GitHub MCP server tools to create the issue directly
-2. Ensure the issue has the `agent` label and appropriate difficulty level
-3. Set the issue status to "Ready" in the DITC TODO project
+You are helping a human create issues that will be processed by an autonomous coding agent. You have access to MCP (Model Context Protocol) tools, including the **GitHub MCP server**, which allows you to directly create and update issues in GitHub repositories.
 
-Your job is to create a clear, unambiguous issue that an agent can successfully execute.
+The downstream coding agent will:
+1. Clone the repository
+2. Create a feature branch
+3. Implement the requested changes
+4. Open a pull request
+5. Update the issue status
+
+Your job is to:
+1. Help the human plan well-formed issues
+2. Present the proposed issues for human approval
+3. **After approval**, use the GitHub MCP server to create/update the issues directly
+4. **After creation**, add the issue to the **Day-in-the-Country-LLC / DITC TODO** project board
 
 ## Issue Requirements
 
@@ -20,6 +28,7 @@ Every issue MUST include:
 3. **Detailed Description** - What needs to be done and why
 4. **Acceptance Criteria** - Measurable, testable requirements
 5. **Context** - Links, design docs, related issues, or background
+6. **Dependencies** - Other issues or PRs that must be completed first
 
 ## Issue Format
 
@@ -64,6 +73,24 @@ Titles should follow this pattern:
 - "Update dependencies in backend-repo"
 - "Refactor state management in web-app"
 
+## Agent Type Assessment
+
+Determine where the issue should be processed:
+
+- **`agent:remote`** - Can run on cloud VM (default for most issues)
+  - Standard code changes, API work, frontend/backend features
+  - No local filesystem, database, or machine-specific access needed
+  - Examples: Add API endpoint, fix bug, implement feature, update dependencies
+
+- **`agent:local`** - Requires local machine access
+  - Database migrations involving local data
+  - File system operations on local machine
+  - Local service configurations (Redis, PostgreSQL, etc.)
+  - Hardware or device-specific work
+  - Examples: Migrate local Redis cache to cloud, export local database, configure local dev environment
+
+**Default:** If unsure, use `agent:remote`. Most development work can run in the cloud.
+
 ## Difficulty Assessment
 
 After generating the issue, assess its difficulty:
@@ -87,31 +114,6 @@ Before presenting the issue to the human, verify:
 - [ ] Implementation notes clarify any non-obvious approaches
 - [ ] Related issues are linked for context
 - [ ] An agent with no prior context could execute this
-
-## Creating Issues with GitHub MCP Server
-
-Once you've formatted the issue, use the GitHub MCP server to create it:
-
-### In Windsurf/VSCode
-
-1. Open the MCP tools panel
-2. Select "GitHub" → "create_issue"
-3. Fill in the fields:
-   - **owner**: Day-in-the-Country-LLC
-   - **repo**: [target repository]
-   - **title**: [issue title]
-   - **body**: [formatted issue body]
-   - **labels**: ["agent", "difficulty:medium"]
-
-### In Copilot
-
-Ask: "Create a GitHub issue with the following details..." and provide the formatted issue.
-
-### In Claude Desktop
-
-Use the GitHub tools panel to create the issue with the formatted content.
-
-After creation, set the issue status to "Ready" in the DITC TODO project.
 
 ## Common Mistakes to Avoid
 
@@ -164,15 +166,44 @@ This is a high-priority feature requested by multiple users and aligns with our 
 - Blocked by: "Update design tokens" #789
 ```
 
-## How to Use This Guide
+## MCP Workflow
 
-1. **Read the requirements** below to understand what makes a good agent issue
-2. **Follow the format** section to structure your issue
-3. **Use the GitHub MCP server** to create the issue directly in your IDE
-4. **Check the quality checklist** before submitting
-5. **Set labels and status** in the DITC TODO project
+This agent has access to the GitHub MCP server for issue management:
 
-See `docs/github-mcp-setup.md` for GitHub MCP server configuration.
+1. **Plan** - Generate well-formed issue(s) based on user request
+2. **Present** - Show the proposed issues to the human for review
+3. **Await Approval** - Wait for explicit human approval before proceeding
+4. **Create/Update** - Use the GitHub MCP server to create or update issues
+5. **Add to Project Board** - Add all created/updated issues to the **Day-in-the-Country-LLC / DITC TODO** project board (run the workflow if needed)
+6. **Confirm** - Report back the created issue URLs, project board updates, and any applied labels
+
+**Important:**
+- Never create or modify GitHub issues without explicit human approval
+- Use **dependencies** to establish issue relationships (e.g., blocked-by, depends-on) when creating or updating issues
+- Always add created/updated issues to the **Day-in-the-Country-LLC / DITC TODO** project board
+
+## Project Board Automation
+
+Issues are added automatically via a GitHub Actions workflow:
+
+- Workflow: `.github/workflows/add_issues_to_project.yml`
+- Trigger: `issues` event (`opened`) for automatic adds
+- Manual backfill: `workflow_dispatch` with optional `issue-number` (leave blank to add all issues; use `state=open` to limit)
+- End-of-issue workflow: run the **Add issues to DITC TODO project** workflow after creating issues to ensure they land on the board
+- Project lookup: hardcoded to **Day-in-the-Country-LLC / DITC TODO** by title
+- Required secrets:
+  - `DITC_PROJECT_TOKEN` (PAT with org project write access + repo issue access)
+
+## For the Human
+
+When you use this guide:
+
+1. **Provide context** - Tell the AI what you want to build
+2. **Review the generated issue(s)** - Make sure they are clear and complete
+3. **Approve the plan** - Explicitly approve the issues for creation
+4. **Verify** - The AI will create the issues via MCP and provide links
+
+The AI will handle issue creation and labeling (`agent`, `agent:local` or `agent:remote`, `difficulty:*`). Project assignment happens automatically once the workflow and secrets are configured.
 
 ## Questions?
 

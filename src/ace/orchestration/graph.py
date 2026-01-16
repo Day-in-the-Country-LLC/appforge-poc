@@ -6,7 +6,9 @@ import structlog
 from langgraph.graph import StateGraph
 
 from ace.agents.model_selector import ModelSelector
+from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import IssueQueue
+from ace.github.projects_v2 import ProjectsV2Client
 from ace.github.status_manager import StatusManager
 from ace.orchestration.state import WorkerState
 
@@ -31,7 +33,9 @@ async def claim_issue(state: WorkerState) -> WorkerState:
             from ace.config.settings import get_settings
 
             settings = get_settings()
-            issue_queue = IssueQueue(None, settings.github_org, "")
+            api_client = GitHubAPIClient(settings.github_token)
+            projects_client = ProjectsV2Client(api_client)
+            issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
             status_manager = StatusManager(issue_queue)
 
             repo_name = state.metadata.get("repo", "unknown")
@@ -108,7 +112,9 @@ async def handle_blocked(state: WorkerState) -> WorkerState:
             from ace.config.settings import get_settings
 
             settings = get_settings()
-            issue_queue = IssueQueue(None, settings.github_org, "")
+            api_client = GitHubAPIClient(settings.github_token)
+            projects_client = ProjectsV2Client(api_client)
+            issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
             status_manager = StatusManager(issue_queue)
 
             await status_manager.mark_blocked(
@@ -162,7 +168,9 @@ async def post_failure(state: WorkerState) -> WorkerState:
             from ace.config.settings import get_settings
 
             settings = get_settings()
-            issue_queue = IssueQueue(None, settings.github_org, "")
+            api_client = GitHubAPIClient(settings.github_token)
+            projects_client = ProjectsV2Client(api_client)
+            issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
             status_manager = StatusManager(issue_queue)
 
             await status_manager.mark_failed(state.issue_number, state.error)
@@ -183,7 +191,9 @@ async def mark_done(state: WorkerState) -> WorkerState:
             from ace.config.settings import get_settings
 
             settings = get_settings()
-            issue_queue = IssueQueue(None, settings.github_org, "")
+            api_client = GitHubAPIClient(settings.github_token)
+            projects_client = ProjectsV2Client(api_client)
+            issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
             status_manager = StatusManager(issue_queue)
 
             await status_manager.mark_done(state.issue_number, state.pr_number, state.pr_url)
