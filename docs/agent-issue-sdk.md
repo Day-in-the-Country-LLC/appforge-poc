@@ -27,26 +27,19 @@ dependencies = [
 ]
 ```
 
-2. **Set environment variable** with your GitHub token:
+2. **Ensure credentials file exists**:
 
-```bash
-export GITHUB_TOKEN=ghp_your_token_here
-```
+The SDK automatically fetches the GitHub token from GCP Secret Manager using the `<project>-creds.json` file in your repo root. This file should already exist in your repo.
 
 ## Quick Start
 
 ### Async Usage (Recommended)
 
 ```python
-import os
 from ace.agent_issue_sdk import IssueCreator, IssueContent
 
-# Initialize
-creator = IssueCreator(
-    github_token=os.getenv("GITHUB_TOKEN"),
-    github_org="Day-in-the-Country-LLC",
-    project_name="DITC TODO",
-)
+# Initialize (fetches GitHub token from GCP Secret Manager using appforge-creds.json)
+creator = IssueCreator()
 
 # Create issue content
 issue = IssueContent(
@@ -77,13 +70,10 @@ print(f"Issue created: {issue_data['html_url']}")
 ### Synchronous Usage
 
 ```python
-import os
 from ace.agent_issue_sdk import IssueCreatorSync, IssueContent
 
-# Initialize
-creator = IssueCreatorSync(
-    github_token=os.getenv("GITHUB_TOKEN"),
-)
+# Initialize (fetches GitHub token from GCP Secret Manager using appforge-creds.json)
+creator = IssueCreatorSync()
 
 # Create issue (same as async)
 issue = IssueContent(...)
@@ -103,10 +93,11 @@ issue_data = creator.create_issue(
 class IssueCreator:
     def __init__(
         self,
-        github_token: str,
         github_org: str = "Day-in-the-Country-LLC",
         project_name: str = "DITC TODO",
         api_url: str = "https://api.github.com",
+        credentials_file: Optional[str] = None,  # Defaults to appforge-creds.json
+        secret_name: str = "github-control-api-key",
     )
 
     async def create_issue(
@@ -120,6 +111,8 @@ class IssueCreator:
 ### IssueCreatorSync (Synchronous)
 
 Same API as `IssueCreator` but `create_issue()` is synchronous (blocking).
+
+**Note:** GitHub token is automatically fetched from GCP Secret Manager using the credentials file on initialization.
 
 ### IssueContent
 
@@ -286,13 +279,60 @@ async def handle_agent_work():
         await creator.create_issue(error_issue, difficulty="medium")
 ```
 
-## Environment Variables
+## Credentials
 
-- `GITHUB_TOKEN` - GitHub Personal Access Token (required)
-- `GITHUB_ORG` - GitHub organization (optional, default: Day-in-the-Country-LLC)
-- `GITHUB_PROJECT_NAME` - Project name (optional, default: DITC TODO)
+**Required:**
+- `appforge-creds.json` - GCP service account credentials file (must exist in repo root)
+
+**GCP Secret Manager:**
+- `github-control-api-key` - GitHub Personal Access Token (stored in Secret Manager)
+
+The SDK extracts the GCP project ID from the credentials file and uses it to fetch the GitHub token from Secret Manager.
 
 ## Troubleshooting
+
+### "Credentials file not found" error
+
+```
+FileNotFoundError: Credentials file not found: appforge-creds.json. Ensure appforge-creds.json exists in the repo root.
+```
+
+**Solution:** Ensure `appforge-creds.json` exists in your repo root. This file should be committed to your repo.
+
+### "project_id not found in credentials file" error
+
+```
+ValueError: project_id not found in credentials file
+```
+
+**Solution:** Verify the credentials file is valid JSON and contains a `project_id` field:
+```bash
+cat appforge-creds.json | jq .project_id
+```
+
+### "Secret not found" error
+
+```
+google.api_core.exceptions.NotFound: 404 Secret [projects/xxx/secrets/github-control-api-key] not found
+```
+
+**Solution:** Ensure the secret exists in your GCP project:
+```bash
+gcloud secrets create github-control-api-key --data-file=- <<< "ghp_your_token"
+```
+
+### "Permission denied" error
+
+```
+google.api_core.exceptions.PermissionDenied: 403 Permission denied
+```
+
+**Solution:** Ensure your service account (from credentials file) has `secretmanager.secretAccessor` role:
+```bash
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member=serviceAccount:SA_EMAIL \
+  --role=roles/secretmanager.secretAccessor
+```
 
 ### "Invalid difficulty" error
 
@@ -308,16 +348,7 @@ ValueError: Invalid difficulty: hard. Must be easy, medium, or hard.
 httpx.HTTPStatusError: 401 Unauthorized
 ```
 
-**Solution:** Verify `GITHUB_TOKEN` is set and has correct permissions
-
-### Issue not appearing in project
-
-**Possible causes:**
-- Token doesn't have `repo` and `read:org` scopes
-- Organization name is incorrect
-- Project name is incorrect
-
-**Solution:** Verify token scopes and org/project names in initialization
+**Solution:** Verify the GitHub token in Secret Manager has correct permissions (`repo` and `read:org` scopes)
 
 ## For Developers
 
