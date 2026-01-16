@@ -5,6 +5,7 @@ from datetime import datetime
 import structlog
 from langgraph.graph import StateGraph
 
+from ace.agents.model_selector import ModelSelector
 from ace.orchestration.state import WorkerState
 
 logger = structlog.get_logger(__name__)
@@ -35,10 +36,32 @@ async def hydrate_context(state: WorkerState) -> WorkerState:
 
 
 async def select_backend(state: WorkerState) -> WorkerState:
-    """Select execution backend (Codex vs Claude)."""
+    """Select execution backend based on issue difficulty."""
     logger.info("step_select_backend", issue=state.issue_number)
     state.current_step = "select_backend"
-    state.backend = "codex"
+
+    if not state.issue:
+        logger.warning("no_issue_in_state", issue=state.issue_number)
+        state.backend = "codex"
+        state.metadata["model"] = "gpt-5.1-codex"
+    else:
+        selector = ModelSelector()
+        try:
+            model_config = selector.select_model(state.issue.labels)
+            state.backend = model_config.backend
+            state.metadata["model"] = model_config.model
+            logger.info(
+                "backend_selected",
+                issue=state.issue_number,
+                backend=state.backend,
+                model=model_config.model,
+            )
+        except ValueError as e:
+            logger.warning("difficulty_selection_failed", issue=state.issue_number, error=str(e))
+            default_config = selector.get_default_model()
+            state.backend = default_config.backend
+            state.metadata["model"] = default_config.model
+
     state.last_update = datetime.now()
     return state
 

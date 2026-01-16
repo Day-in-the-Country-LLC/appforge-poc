@@ -14,17 +14,18 @@ class Settings(BaseSettings):
     debug: bool = environment == "development"
 
     # GitHub
-    github_token: str = os.getenv("GITHUB_TOKEN", "")
+    github_token: str = os.getenv("GITHUB_CONTROL_API_KEY", "")
     github_repo_owner: str = os.getenv("GITHUB_REPO_OWNER", "")
     github_repo_name: str = os.getenv("GITHUB_REPO_NAME", "")
     github_webhook_secret: Optional[str] = os.getenv("GITHUB_WEBHOOK_SECRET")
 
     # OpenAI / Codex
     openai_api_key: str = os.getenv("APPFORGE_OPENAI_API_KEY", "")
-    codex_model: str = os.getenv("CODEX_MODEL", "gpt-4")
+    codex_model: str = os.getenv("CODEX_MODEL", "gpt-5.1-codex")
 
     # Claude
     claude_api_key: str = os.getenv("CLAUDE_CODE_ADMIN_API_KEY", "")
+    claude_model: str = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
 
     # GCP
     gcp_project_id: str = os.getenv("GCP_PROJECT_ID", "")
@@ -42,6 +43,14 @@ class Settings(BaseSettings):
 
     # Polling
     polling_interval_seconds: int = int(os.getenv("POLLING_INTERVAL_SECONDS", "60"))
+
+    # Difficulty-based model mapping
+    difficulty_easy_backend: str = os.getenv("DIFFICULTY_EASY_BACKEND", "codex")
+    difficulty_easy_model: str = os.getenv("DIFFICULTY_EASY_MODEL", "gpt-5.1-codex")
+    difficulty_medium_backend: str = os.getenv("DIFFICULTY_MEDIUM_BACKEND", "claude")
+    difficulty_medium_model: str = os.getenv("DIFFICULTY_MEDIUM_MODEL", "claude-haiku-4-5")
+    difficulty_hard_backend: str = os.getenv("DIFFICULTY_HARD_BACKEND", "claude")
+    difficulty_hard_model: str = os.getenv("DIFFICULTY_HARD_MODEL", "claude-opus-4-5")
 
     class Config:
         env_file = ".env"

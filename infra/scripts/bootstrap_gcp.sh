@@ -37,10 +37,10 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --role="roles/run.invoker"
 
 echo "Creating secrets in Secret Manager..."
-read -sp "GitHub Token: " GITHUB_TOKEN
+read -sp "GitHub Control API Key: " GITHUB_CONTROL_API_KEY
 echo
-gcloud secrets create github-token --data-file=- <<< "$GITHUB_TOKEN" 2>/dev/null || \
-    gcloud secrets versions add github-token --data-file=- <<< "$GITHUB_TOKEN"
+gcloud secrets create github-control-api-key --data-file=- <<< "$GITHUB_CONTROL_API_KEY" 2>/dev/null || \
+    gcloud secrets versions add github-control-api-key --data-file=- <<< "$GITHUB_CONTROL_API_KEY"
 
 read -sp "GitHub Webhook Secret: " WEBHOOK_SECRET
 echo
