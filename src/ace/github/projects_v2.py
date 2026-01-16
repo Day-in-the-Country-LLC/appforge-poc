@@ -156,6 +156,7 @@ class ProjectsV2Client:
                                 }
                             }
                             content {
+                                __typename
                                 ... on Issue {
                                     id
                                     title
@@ -222,7 +223,7 @@ class ProjectsV2Client:
                 if not content:
                     continue
 
-                content_type = "Issue" if "Issue" in str(type(content)) else "PullRequest"
+                content_type = content.get("__typename", "Issue")
                 if content.get("number") is None:
                     continue
 
