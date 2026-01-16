@@ -57,6 +57,26 @@ echo
 gcloud secrets create claude-api-key --data-file=- <<< "$CLAUDE_KEY" 2>/dev/null || \
     gcloud secrets versions add claude-api-key --data-file=- <<< "$CLAUDE_KEY"
 
+read -sp "Twilio Account SID: " TWILIO_ACCOUNT_SID
+echo
+gcloud secrets create twilio-account-sid --data-file=- <<< "$TWILIO_ACCOUNT_SID" 2>/dev/null || \
+    gcloud secrets versions add twilio-account-sid --data-file=- <<< "$TWILIO_ACCOUNT_SID"
+
+read -sp "Twilio Auth Token: " TWILIO_AUTH_TOKEN
+echo
+gcloud secrets create twilio-auth-token --data-file=- <<< "$TWILIO_AUTH_TOKEN" 2>/dev/null || \
+    gcloud secrets versions add twilio-auth-token --data-file=- <<< "$TWILIO_AUTH_TOKEN"
+
+read -sp "Twilio Messaging Service SID (e.g., MGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx): " TWILIO_MESSAGING_SERVICE_SID
+echo
+gcloud secrets create twilio-messaging-service-sid --data-file=- <<< "$TWILIO_MESSAGING_SERVICE_SID" 2>/dev/null || \
+    gcloud secrets versions add twilio-messaging-service-sid --data-file=- <<< "$TWILIO_MESSAGING_SERVICE_SID"
+
+read -sp "Twilio To Number (your phone, e.g., +1234567890): " TWILIO_TO_NUMBER
+echo
+gcloud secrets create twilio-to-number --data-file=- <<< "$TWILIO_TO_NUMBER" 2>/dev/null || \
+    gcloud secrets versions add twilio-to-number --data-file=- <<< "$TWILIO_TO_NUMBER"
+
 echo "Bootstrap complete!"
 echo "Service Account: $SA_EMAIL"
 echo "Next steps:"
