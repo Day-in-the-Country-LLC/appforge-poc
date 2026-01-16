@@ -123,27 +123,26 @@ Continue with the task based on this answer. Respond with SUCCESS, BLOCKED, or F
             )
 
     async def _call_openai(self, prompt: str, max_tokens: int = 1000) -> str:
-        """Call OpenAI API."""
+        """Call OpenAI API using the responses endpoint."""
         if not self.api_key:
             raise ValueError("OpenAI API key not configured")
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
-                "https://api.openai.com/v1/chat/completions",
+                "https://api.openai.com/v1/responses",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
                 json={
                     "model": self.model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": max_tokens,
-                    "temperature": 0.2,
+                    "input": prompt,
+                    "max_output_tokens": max_tokens,
                 },
             )
             response.raise_for_status()
             data = response.json()
-            return data["choices"][0]["message"]["content"]
+            return data["output"][0]["content"][0]["text"]
 
     def _parse_response(self, response: str) -> AgentResult:
         """Parse agent response into AgentResult."""
