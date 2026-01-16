@@ -29,7 +29,7 @@ dependencies = [
 
 2. **Ensure credentials file exists**:
 
-The SDK automatically fetches the GitHub token from GCP Secret Manager using the `<project>-creds.json` file in your repo root. This file should already exist in your repo.
+The SDK automatically fetches the GitHub token from GCP Secret Manager using a credentials file matching the pattern `<project>-creds.json` in your repo root (e.g., `appforge-creds.json`, `frontend-creds.json`). This file should already exist in your repo.
 
 ## Quick Start
 
@@ -96,7 +96,7 @@ class IssueCreator:
         github_org: str = "Day-in-the-Country-LLC",
         project_name: str = "DITC TODO",
         api_url: str = "https://api.github.com",
-        credentials_file: Optional[str] = None,  # Defaults to appforge-creds.json
+        credentials_file: Optional[str] = None,  # Defaults to auto-detect *-creds.json
         secret_name: str = "github-control-api-key",
     )
 
@@ -282,22 +282,100 @@ async def handle_agent_work():
 ## Credentials
 
 **Required:**
-- `appforge-creds.json` - GCP service account credentials file (must exist in repo root)
+- `<project>-creds.json` - GCP service account credentials file (e.g., `appforge-creds.json`, `frontend-creds.json`)
+  - Must exist in repo root
+  - SDK auto-detects the file using glob pattern `*-creds.json`
+  - If multiple files match, the first one is used (with a warning logged)
 
 **GCP Secret Manager:**
 - `github-control-api-key` - GitHub Personal Access Token (stored in Secret Manager)
 
 The SDK extracts the GCP project ID from the credentials file and uses it to fetch the GitHub token from Secret Manager.
 
+## GitHub PAT Permissions
+
+The GitHub Personal Access Token (PAT) stored in Secret Manager as `github-control-api-key` requires the following scopes and permissions:
+
+### Required Scopes
+
+- **`repo`** - Full control of private repositories
+  - Enables reading and writing to repository content
+  - Required for creating issues and pull requests
+  - Allows access to repository metadata
+
+- **`read:org`** - Read access to organization data
+  - Required to access organization projects
+  - Allows reading project information and status
+
+### Specific Permissions Enabled
+
+With these scopes, agents can:
+
+- **Create issues** in any repository within the organization
+- **Read and update issue details** (title, description, labels, assignees)
+- **Add and remove labels** from issues
+- **Add comments** to issues
+- **Manage issue status** in organization projects
+- **Read organization project information** and structure
+- **Update project fields** and issue status within projects
+
+### Creating the PAT
+
+To create a PAT with the required permissions:
+
+```bash
+# Using GitHub CLI
+gh auth token --scopes repo,read:org
+
+# Or manually via GitHub UI:
+# 1. Go to Settings > Developer settings > Personal access tokens > Tokens (classic)
+# 2. Click "Generate new token (classic)"
+# 3. Select scopes:
+#    - repo (all sub-options)
+#    - read:org
+# 4. Generate and store securely
+```
+
+### Storing in GCP Secret Manager
+
+```bash
+gcloud secrets create github-control-api-key --data-file=- <<< "ghp_your_token_here"
+```
+
+### Verification
+
+To verify the token has correct permissions:
+
+```bash
+# Check token scopes
+curl -H "Authorization: token YOUR_PAT" https://api.github.com/user
+
+# Look for "X-OAuth-Scopes" header in response
+# Should include: repo, read:org
+```
+
+### Security Best Practices
+
+- **Rotate regularly** - Regenerate the PAT periodically (e.g., quarterly)
+- **Limit scope** - Only grant `repo` and `read:org` scopes (no admin access needed)
+- **Monitor usage** - Review token activity in GitHub audit logs
+- **Use in Secret Manager** - Never commit the token to version control
+- **Restrict to organization** - If possible, use organization-scoped tokens
+
 ## Troubleshooting
 
 ### "Credentials file not found" error
 
 ```
-FileNotFoundError: Credentials file not found: appforge-creds.json. Ensure appforge-creds.json exists in the repo root.
+FileNotFoundError: No credentials file found matching pattern '*-creds.json'. Ensure a file like 'project-creds.json' exists in the repo root.
 ```
 
-**Solution:** Ensure `appforge-creds.json` exists in your repo root. This file should be committed to your repo.
+**Solution:** Ensure a credentials file matching `<project>-creds.json` exists in your repo root. Examples:
+- `appforge-creds.json`
+- `frontend-creds.json`
+- `backend-creds.json`
+
+This file should be committed to your repo.
 
 ### "project_id not found in credentials file" error
 
