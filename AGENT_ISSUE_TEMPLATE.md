@@ -174,7 +174,7 @@ This agent has access to the GitHub MCP server for issue management:
 2. **Present** - Show the proposed issues to the human for review
 3. **Await Approval** - Wait for explicit human approval before proceeding
 4. **Create/Update** - Use the GitHub MCP server to create or update issues
-5. **Add to Project Board** - Add all created/updated issues to the **Day-in-the-Country-LLC / DITC TODO** project board (run the workflow if needed)
+5. **Add to Project Board** - Add all created/updated issues to the **Day-in-the-Country-LLC / DITC TODO** project board and set status to **Ready** (run the workflow if needed)
 6. **Confirm** - Report back the created issue URLs, project board updates, and any applied labels
 
 **Important:**
@@ -189,10 +189,11 @@ Issues are added automatically via a GitHub Actions workflow:
 - Workflow: `.github/workflows/add_issues_to_project.yml`
 - Trigger: `issues` event (`opened`) for automatic adds
 - Manual backfill: `workflow_dispatch` with optional `issue-number` (leave blank to add all issues; use `state=open` to limit)
-- End-of-issue workflow: run the **Add issues to DITC TODO project** workflow after creating issues to ensure they land on the board
 - Project lookup: hardcoded to **Day-in-the-Country-LLC / DITC TODO** by title
+- Status updates: workflow sets the **Status** field to **Ready**
 - Required secrets:
-  - `DITC_PROJECT_TOKEN` (PAT with org project write access + repo issue access)
+  - `DITC_PROJECT_TOKEN` (PAT with org project write access + repo issue access + `read:project`)
+- End-of-issue workflow: run the **Add issues to DITC TODO project** workflow after creating issues to ensure status is **Ready**
 
 ## For the Human
 
