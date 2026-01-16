@@ -271,11 +271,18 @@ class AgentPool:
             self._completed_count += 1
             self._session_processed += 1
 
+            # Handle both dict and WorkerState return types from graph
+            pr_number = (
+                final_state.get("pr_number")
+                if isinstance(final_state, dict)
+                else final_state.pr_number
+            )
+
             logger.info(
                 "agent_completed",
                 slot=slot.slot_id,
                 issue=issue.number,
-                pr_number=final_state.pr_number,
+                pr_number=pr_number,
                 duration_seconds=(slot.completed_at - slot.started_at).total_seconds(),
             )
 
