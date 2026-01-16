@@ -1,17 +1,15 @@
 # Agent Issue Creation Guide for LLMs
 
-This guide is for AI assistants (Copilot, Cascade, Codex, Claude) to help generate well-formatted issues that can be submitted to the **DITC TODO** org project for agent automation.
+This guide is for AI assistants (Copilot, Cascade, Codex, Claude) to help create well-formatted issues for agent automation using the **GitHub MCP server**.
 
 ## Your Role
 
-You are helping a human create an issue that will be processed by an autonomous coding agent. The agent will:
-1. Clone the repository
-2. Create a feature branch
-3. Implement the requested changes
-4. Open a pull request
-5. Update the issue status
+You are helping create an issue that will be processed by an autonomous coding agent. You will:
+1. Use the GitHub MCP server tools to create the issue directly
+2. Ensure the issue has the `agent` label and appropriate difficulty level
+3. Set the issue status to "Ready" in the DITC TODO project
 
-Your job is to help the human write a clear, unambiguous issue that an agent can successfully execute.
+Your job is to create a clear, unambiguous issue that an agent can successfully execute.
 
 ## Issue Requirements
 
@@ -90,6 +88,31 @@ Before presenting the issue to the human, verify:
 - [ ] Related issues are linked for context
 - [ ] An agent with no prior context could execute this
 
+## Creating Issues with GitHub MCP Server
+
+Once you've formatted the issue, use the GitHub MCP server to create it:
+
+### In Windsurf/VSCode
+
+1. Open the MCP tools panel
+2. Select "GitHub" → "create_issue"
+3. Fill in the fields:
+   - **owner**: Day-in-the-Country-LLC
+   - **repo**: [target repository]
+   - **title**: [issue title]
+   - **body**: [formatted issue body]
+   - **labels**: ["agent", "difficulty:medium"]
+
+### In Copilot
+
+Ask: "Create a GitHub issue with the following details..." and provide the formatted issue.
+
+### In Claude Desktop
+
+Use the GitHub tools panel to create the issue with the formatted content.
+
+After creation, set the issue status to "Ready" in the DITC TODO project.
+
 ## Common Mistakes to Avoid
 
 ❌ **Don't:**
@@ -141,17 +164,15 @@ This is a high-priority feature requested by multiple users and aligns with our 
 - Blocked by: "Update design tokens" #789
 ```
 
-## For the Human
+## How to Use This Guide
 
-When you use this guide:
+1. **Read the requirements** below to understand what makes a good agent issue
+2. **Follow the format** section to structure your issue
+3. **Use the GitHub MCP server** to create the issue directly in your IDE
+4. **Check the quality checklist** before submitting
+5. **Set labels and status** in the DITC TODO project
 
-1. **Provide context** - Tell the AI what you want to build
-2. **Review the generated issue** - Make sure it's clear and complete
-3. **Add labels** - Include `agent` and `difficulty:*` labels
-4. **Set status** - Mark as "Ready" in the DITC TODO project
-5. **Copy and paste** - Submit the issue to the project
-
-The AI will help you write issues that agents can execute successfully.
+See `docs/github-mcp-setup.md` for GitHub MCP server configuration.
 
 ## Questions?
 

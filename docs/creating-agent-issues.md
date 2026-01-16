@@ -1,4 +1,8 @@
-# Creating Issues for Agents
+# Creating Agent Issues
+
+This guide is for humans creating issues that will be automated by coding agents using the GitHub MCP server.
+
+**Quick Start:** See `docs/github-mcp-setup.md` to configure the GitHub MCP server, then use `AGENT_ISSUE_TEMPLATE.md` for issue format guidance.
 
 This guide walks you through creating and labeling issues in the **DITC TODO** org project so agents can pick them up and execute work.
 
