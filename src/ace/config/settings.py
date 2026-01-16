@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     github_agent_label: str = os.getenv("GITHUB_AGENT_LABEL", "agent")
     github_local_agent_label: str = os.getenv("GITHUB_LOCAL_AGENT_LABEL", "agent:local")
     github_remote_agent_label: str = os.getenv("GITHUB_REMOTE_AGENT_LABEL", "agent:remote")
+    github_base_branch: str = os.getenv("GITHUB_BASE_BRANCH", "main")
+    github_token_secret_name: str = os.getenv("GITHUB_TOKEN_SECRET_NAME", "")
+    github_token_secret_version: str = os.getenv("GITHUB_TOKEN_SECRET_VERSION", "latest")
+    github_mcp_token_env: str = os.getenv("GITHUB_MCP_TOKEN_ENV", "GITHUB_TOKEN")
 
     # OpenAI / Codex
     openai_api_key: str = os.getenv("APPFORGE_OPENAI_API_KEY", "")
@@ -40,6 +44,11 @@ class Settings(BaseSettings):
     # Agent workspace
     agent_workspace_root: str = os.getenv("AGENT_WORKSPACE_ROOT", "/tmp/agent-hq")
     agent_id: str = os.getenv("AGENT_ID", "ace-default")
+    agent_execution_mode: str = os.getenv("AGENT_EXECUTION_MODE", "tmux")
+
+    # CLI agent commands
+    codex_cli_command: str = os.getenv("CODEX_CLI_COMMAND", "codex --model {model}")
+    claude_cli_command: str = os.getenv("CLAUDE_CLI_COMMAND", "claude --model {model}")
 
     # Service
     service_port: int = int(os.getenv("SERVICE_PORT", "8080"))
@@ -55,6 +64,9 @@ class Settings(BaseSettings):
     difficulty_medium_model: str = os.getenv("DIFFICULTY_MEDIUM_MODEL", "claude-haiku-4-5")
     difficulty_hard_backend: str = os.getenv("DIFFICULTY_HARD_BACKEND", "claude")
     difficulty_hard_model: str = os.getenv("DIFFICULTY_HARD_MODEL", "claude-opus-4-5")
+
+    # Blocked handling
+    blocked_assignee: str = os.getenv("BLOCKED_ASSIGNEE", "kristinday")
 
     # Twilio SMS notifications
     twilio_enabled: bool = os.getenv("TWILIO_ENABLED", "false").lower() == "true"

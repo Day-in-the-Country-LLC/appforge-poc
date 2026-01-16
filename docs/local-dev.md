@@ -27,10 +27,16 @@ Create a `.env` file in the repo root:
 ENVIRONMENT=development
 DEBUG=true
 
-GITHUB_TOKEN=ghp_your_token_here
-GITHUB_REPO_OWNER=your-org
-GITHUB_REPO_NAME=your-repo
+GITHUB_CONTROL_API_KEY=ghp_your_token_here
+GITHUB_ORG=your-org
+GITHUB_PROJECT_NAME=DITC TODO
 GITHUB_WEBHOOK_SECRET=your_webhook_secret
+GITHUB_READY_STATUS=Ready
+GITHUB_AGENT_LABEL=agent
+GITHUB_BASE_BRANCH=main
+GITHUB_TOKEN_SECRET_NAME=github-control-api-key
+GITHUB_TOKEN_SECRET_VERSION=latest
+GITHUB_MCP_TOKEN_ENV=GITHUB_TOKEN
 
 APPFORGE_OPENAI_API_KEY=sk-...
 CLAUDE_CODE_ADMIN_API_KEY=sk-...
@@ -40,6 +46,10 @@ GCP_SECRET_MANAGER_ENABLED=false
 
 AGENT_WORKSPACE_ROOT=/tmp/agent-hq
 AGENT_ID=ace-dev
+AGENT_EXECUTION_MODE=tmux
+CODEX_CLI_COMMAND=codex --model {model}
+CLAUDE_CLI_COMMAND=claude --model {model}
+BLOCKED_ASSIGNEE=your-github-username
 
 SERVICE_PORT=8080
 SERVICE_HOST=0.0.0.0
@@ -144,7 +154,7 @@ Or set `DEBUG=true` in `.env`.
 
 Check the logs:
 ```bash
-tail -f /tmp/agent-hq/logs/issue-*.log
+tail -f /tmp/agent-hq/logs/issue-*.jsonl
 ```
 
 Manually inspect the workspace:
@@ -155,12 +165,12 @@ ls -la /tmp/agent-hq/worktrees/
 ## Troubleshooting
 
 ### "GitHub token invalid"
-- Verify `GITHUB_TOKEN` in `.env`
+- Verify `GITHUB_CONTROL_API_KEY` in `.env` or Secret Manager
 - Check token has `repo` and `issues` scopes
 
 ### "MCP server unreachable"
 - Ensure MCP server is running (if using local MCP)
-- Check `mcp_server_url` configuration
+- Verify MCP configuration for Codex/Claude CLI and `GITHUB_MCP_TOKEN_ENV` is set
 
 ### "Webhook not received"
 - Verify ngrok is running

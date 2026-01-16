@@ -30,11 +30,13 @@ The ACE framework communicates with GitHub via REST/GraphQL APIs for orchestrati
 - **`policy.py`** - Safety constraints and execution rules injected into every task
 
 Agents are pluggable implementations (Codex CLI, Claude, etc.) that conform to this interface.
+The CLI path runs inside tmux and reads `ACE_TASK.md` for detailed task instructions.
 
 ### 3. Orchestration (`src/ace/orchestration/`)
 
 - **`state.py`** - Pydantic state model for the workflow
 - **`graph.py`** - LangGraph workflow definition
+- **`task_manager.py`** - Sequential task planning, instruction generation, and task tracking
 
 The workflow is a state machine with these nodes:
 
@@ -57,6 +59,10 @@ evaluate_result
 mark_done
 ```
 
+In CLI/tmux mode, `run_agent` coordinates sequential tasks inside a single worktree.
+Each task writes `ACE_TASK.md` for the coding CLI and completes by dropping
+`ACE_TASK_DONE.json`. When all tasks are complete, the manager opens the PR.
+
 ### 4. Service Layer (`src/ace/runners/`)
 
 - **`service.py`** - FastAPI service with:
@@ -69,7 +75,7 @@ mark_done
 ### 5. Workspace Management (`src/ace/workspaces/`)
 
 - **`git_ops.py`** - Git operations (clone, worktree, branch, push)
-- **`tmux_ops.py`** - (Optional) tmux session/window management
+- **`tmux_ops.py`** - tmux session/window management (used in CLI/tmux mode)
 
 ### 6. Configuration (`src/ace/config/`)
 
@@ -91,7 +97,11 @@ Worker spawned with issue_number
     ↓
 LangGraph executes workflow
     ↓
-Agent executes in workspace
+Worktree + branch created
+    ↓
+Task plan + instructions written (ACE_TASK.md)
+    ↓
+CLI agent executes in tmux (sequential tasks)
     ↓
 PR opened, labels updated
     ↓

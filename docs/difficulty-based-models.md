@@ -103,7 +103,7 @@ Check logs to see which models are being selected:
 
 ```bash
 # Local development
-tail -f /tmp/agent-hq/logs/issue-*.log | grep backend_selected
+tail -f /tmp/agent-hq/logs/issue-*.jsonl | grep backend_selected
 
 # GCP Cloud Run
 gcloud run services logs read agentic-coding-engine --region us-central1 | grep backend_selected
