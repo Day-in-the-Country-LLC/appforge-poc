@@ -1,5 +1,6 @@
 """Issue creation client for agents to create issues in DITC TODO project using GitHub MCP server."""
 
+import glob
 import json
 import os
 from dataclasses import dataclass
@@ -55,7 +56,7 @@ class IssueCreator:
         self.project_name = project_name
         self.api_url = api_url
 
-        credentials_file = credentials_file or "appforge-creds.json"
+        credentials_file = credentials_file or self._find_credentials_file()
         gcp_project_id = self._get_project_id_from_credentials(credentials_file)
 
         self.github_token = self._fetch_secret(
@@ -65,6 +66,29 @@ class IssueCreator:
             "Authorization": f"token {self.github_token}",
             "Accept": "application/vnd.github.v3+json",
         }
+
+    @staticmethod
+    def _find_credentials_file() -> str:
+        """Auto-detect credentials file matching *-creds.json pattern.
+
+        Returns:
+            Path to credentials file
+
+        Raises:
+            FileNotFoundError: If no credentials file found
+        """
+        pattern = "*-creds.json"
+        matches = glob.glob(pattern)
+        if not matches:
+            raise FileNotFoundError(
+                f"No credentials file found matching pattern '{pattern}'. "
+                "Ensure a file like 'belleandsuds-creds.json' exists in the repo root."
+            )
+        if len(matches) > 1:
+            logger.warning(
+                "multiple_credentials_files_found", files=matches, using=matches[0]
+            )
+        return matches[0]
 
     @staticmethod
     def _get_project_id_from_credentials(credentials_file: str) -> str:
@@ -173,6 +197,7 @@ class IssueCreator:
             "post_actions": {
                 "dependencies": content.dependencies or [],
                 "blocks": content.blocks or [],
+                "add_to_project": True,
             },
         }
 
