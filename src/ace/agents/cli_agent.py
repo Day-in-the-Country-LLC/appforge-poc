@@ -14,7 +14,7 @@ from ace.config.secrets import resolve_github_token
 from ace.workspaces.tmux_ops import TmuxOps
 
 from .base import AgentResult, AgentStatus, BaseAgent
-from .policy import get_policy_prompt
+from .mcp_config import ensure_mcp_config
 
 logger = structlog.get_logger(__name__)
 
@@ -44,11 +44,13 @@ class CliAgent(BaseAgent):
         if prompt_file.exists():
             prompt = prompt_file.read_text(encoding="utf-8")
         else:
-            prompt = self._build_prompt(task, context, workspace_path)
-            try:
-                prompt_file.write_text(prompt, encoding="utf-8")
-            except Exception as e:
-                logger.warning("prompt_write_failed", error=str(e), path=str(prompt_file))
+            return AgentResult(
+                status=AgentStatus.FAILED,
+                output="",
+                files_changed=[],
+                commands_run=[],
+                error="ACE_TASK.md missing; instructions must be generated before spawn.",
+            )
 
         try:
             command, command_display, template_has_prompt = self._build_command(prompt)
@@ -59,6 +61,9 @@ class CliAgent(BaseAgent):
                 env[self.settings.github_mcp_token_env] = token
                 if self.settings.github_mcp_token_env != "GITHUB_CONTROL_API_KEY":
                     env["GITHUB_CONTROL_API_KEY"] = token
+
+            if token:
+                ensure_mcp_config(workdir, self.backend, token, self.settings)
 
             created = self.tmux.start_session(session_name, workdir, command, env=env)
             if created and not template_has_prompt:
@@ -145,65 +150,6 @@ class CliAgent(BaseAgent):
             display += f" --model {model_value}"
 
         return command, display, template_has_prompt
-
-    def _build_prompt(self, task: str, context: dict[str, Any], workspace_path: str) -> str:
-        policy = get_policy_prompt()
-        repo_name = context.get("repo_name", "unknown")
-        repo_owner = context.get("repo_owner", "unknown")
-        issue_number = context.get("issue_number", "unknown")
-        agent_label = self.settings.github_agent_label
-        blocked_assignee = self.settings.blocked_assignee
-        task_id = context.get("task_id", "task-1")
-        branch_name = context.get("branch_name", "agent-branch")
-
-        return (
-            f"{policy}\n\n"
-            "You are a coding agent working on a GitHub issue.\n\n"
-            f"Task:\n{task}\n\n"
-            "Context:\n"
-            f"- Repository: {repo_owner}/{repo_name}\n"
-            f"- Issue: #{issue_number}\n"
-            f"- Workspace: {workspace_path}\n"
-            f"- Branch: {branch_name}\n"
-            "\n"
-            "## GitHub MCP Access\n"
-            "GitHub MCP is configured for this session. Use it for issue comments/metadata as needed.\n\n"
-            "## CLI Blocked Protocol (No Questions in Session)\n"
-            "If you need clarification or approval:\n"
-            "1. Do NOT ask questions in this tmux session.\n"
-            "2. Post a GitHub comment with your questions (prefix with BLOCKED).\n"
-            f"3. Assign the issue to {blocked_assignee} and remove the '{agent_label}' label.\n"
-            "4. Exit the session after posting the comment.\n\n"
-            "Preferred (gh CLI):\n"
-            f"  gh issue comment {issue_number} -R {repo_owner}/{repo_name} "
-            f"-b \"**BLOCKED - Agent Needs Input**\\n\\n1. <question>\"\n"
-            f"  gh issue edit {issue_number} -R {repo_owner}/{repo_name} "
-            f"--add-assignee {blocked_assignee} --remove-label {agent_label}\n\n"
-            "Fallback (curl with $GITHUB_CONTROL_API_KEY):\n"
-            f"  curl -s -X POST -H \"Authorization: token $GITHUB_CONTROL_API_KEY\" "
-            f"https://api.github.com/repos/{repo_owner}/{repo_name}/issues/{issue_number}/comments "
-            f"-d '{{\"body\":\"**BLOCKED - Agent Needs Input**\\\\n\\\\n1. <question>\"}}'\n"
-            f"  curl -s -X POST -H \"Authorization: token $GITHUB_CONTROL_API_KEY\" "
-            f"https://api.github.com/repos/{repo_owner}/{repo_name}/issues/{issue_number}/assignees "
-            f"-d '{{\"assignees\":[\"{blocked_assignee}\"]}}'\n"
-            f"  curl -s -X DELETE -H \"Authorization: token $GITHUB_CONTROL_API_KEY\" "
-            f"https://api.github.com/repos/{repo_owner}/{repo_name}/issues/{issue_number}/labels/{agent_label}\n"
-            "\n"
-            "## Completion Protocol\n"
-            "When finished:\n"
-            f"1. Commit changes on `{branch_name}` with a message that includes the task name.\n"
-            f"2. Push the branch: `git push origin {branch_name}`.\n"
-            "3. Write a JSON file named `ACE_TASK_DONE.json` in the repo root:\n\n"
-            "```json\n"
-            "{\n"
-            f"  \"task_id\": \"{task_id}\",\n"
-            "  \"summary\": \"<summary>\",\n"
-            "  \"files_changed\": [\"...\"],\n"
-            "  \"commands_run\": [\"...\"]\n"
-            "}\n"
-            "```\n"
-            "Do NOT open a PR; the manager will open it after all tasks are complete.\n"
-        )
 
     def _session_name(self, context: dict[str, Any]) -> str:
         repo = context.get("repo_name", "repo")

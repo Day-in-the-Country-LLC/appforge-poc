@@ -36,6 +36,11 @@ def _build_repo_url(owner: str, repo: str, token: str) -> str:
     return f"https://github.com/{owner}/{repo}.git"
 
 
+def _get_api_client(settings) -> GitHubAPIClient:
+    token = resolve_github_token(settings)
+    return GitHubAPIClient(token)
+
+
 def _format_task_plan_comment(tasks) -> str:
     lines = [
         "**Task Plan (ACE)**",
@@ -72,7 +77,7 @@ async def claim_issue(state: WorkerState) -> WorkerState:
             from ace.config.settings import get_settings
 
             settings = get_settings()
-            api_client = GitHubAPIClient(settings.github_token)
+            api_client = _get_api_client(settings)
             projects_client = ProjectsV2Client(api_client)
             issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
             status_manager = StatusManager(issue_queue)
@@ -178,7 +183,7 @@ async def run_agent(state: WorkerState) -> WorkerState:
         )
         if plan_created:
             try:
-                api_client = GitHubAPIClient(github_token or settings.github_token)
+                api_client = GitHubAPIClient(github_token)
                 issue_queue = IssueQueue(
                     api_client,
                     repo_owner,
@@ -196,7 +201,7 @@ async def run_agent(state: WorkerState) -> WorkerState:
         completed_task = task_manager.apply_done_marker(plan)
         if completed_task:
             try:
-                api_client = GitHubAPIClient(github_token or settings.github_token)
+                api_client = GitHubAPIClient(github_token)
                 issue_queue = IssueQueue(
                     api_client,
                     repo_owner,
@@ -234,7 +239,7 @@ async def run_agent(state: WorkerState) -> WorkerState:
                 return state
 
             try:
-                api_client = GitHubAPIClient(github_token or settings.github_token)
+                api_client = GitHubAPIClient(github_token)
                 issue_queue = IssueQueue(
                     api_client,
                     repo_owner,
@@ -363,7 +368,7 @@ async def handle_blocked(state: WorkerState) -> WorkerState:
             from ace.config.settings import get_settings
 
             settings = get_settings()
-            api_client = GitHubAPIClient(settings.github_token)
+            api_client = _get_api_client(settings)
             projects_client = ProjectsV2Client(api_client)
             issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
             status_manager = StatusManager(issue_queue)
@@ -419,7 +424,7 @@ async def post_failure(state: WorkerState) -> WorkerState:
             from ace.config.settings import get_settings
 
             settings = get_settings()
-            api_client = GitHubAPIClient(settings.github_token)
+            api_client = _get_api_client(settings)
             projects_client = ProjectsV2Client(api_client)
             issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
             status_manager = StatusManager(issue_queue)
@@ -442,7 +447,7 @@ async def mark_done(state: WorkerState) -> WorkerState:
             from ace.config.settings import get_settings
 
             settings = get_settings()
-            api_client = GitHubAPIClient(settings.github_token)
+            api_client = _get_api_client(settings)
             projects_client = ProjectsV2Client(api_client)
             issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
             status_manager = StatusManager(issue_queue)

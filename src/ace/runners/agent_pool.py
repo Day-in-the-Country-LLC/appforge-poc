@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 
 from ace.config.settings import get_settings
+from ace.config.secrets import resolve_github_token
 from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import Issue, IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client
@@ -95,7 +96,8 @@ class AgentPool:
     def api_client(self) -> GitHubAPIClient:
         """Get or create the GitHub API client."""
         if self._api_client is None:
-            self._api_client = GitHubAPIClient(self.settings.github_token)
+            token = resolve_github_token(self.settings)
+            self._api_client = GitHubAPIClient(token)
         return self._api_client
 
     @property
