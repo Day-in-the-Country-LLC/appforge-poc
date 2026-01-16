@@ -159,11 +159,11 @@ class AgentPool:
         has_remote = remote_label in issue.labels
 
         if self.target == AgentTarget.LOCAL:
-            # Process if explicitly marked local, or if no target label (backwards compat)
-            return has_local or (not has_local and not has_remote)
+            # Process only if explicitly marked local
+            return has_local
         elif self.target == AgentTarget.REMOTE:
-            # Process if explicitly marked remote, or if no target label (backwards compat)
-            return has_remote or (not has_local and not has_remote)
+            # Process only if explicitly marked remote
+            return has_remote
 
         return True
 
