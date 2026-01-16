@@ -10,6 +10,8 @@ from pydantic import BaseModel
 
 from ace.config.logging import configure_logging
 from ace.config.settings import get_settings
+from ace.runners.agent_pool import AgentTarget, get_pool
+from ace.runners.scheduler import get_scheduler
 
 logger = structlog.get_logger(__name__)
 
@@ -127,6 +129,183 @@ async def trigger_poll(background_tasks: BackgroundTasks) -> dict[str, str]:
     return {"status": "polling"}
 
 
-async def poll_for_ready_issues() -> None:
+async def poll_for_ready_issues(target: str) -> None:
     """Poll for issues labeled agent:ready."""
-    logger.info("polling_for_ready_issues")
+    logger.info("polling_for_ready_issues", target=target)
+
+
+@app.get("/agents/status")
+async def agent_status(target: str = "any") -> dict[str, Any]:
+    """Get current agent pool status.
+
+    Args:
+        target: Which pool to check (local, remote, or any)
+    """
+    agent_target = AgentTarget(target)
+    pool = get_pool(agent_target)
+    status = pool.get_status()
+    return {
+        "target": target,
+        "total_slots": status.total_slots,
+        "active_agents": status.active_agents,
+        "idle_slots": status.idle_slots,
+        "completed_count": status.completed_count,
+        "failed_count": status.failed_count,
+    }
+
+
+@app.post("/agents/spawn")
+async def spawn_agents(
+    background_tasks: BackgroundTasks,
+    target: str = "any",
+) -> dict[str, Any]:
+    """Spawn agents for all ready issues (up to max concurrent).
+
+    Fetches issues with 'Ready' status from the project board and
+    spawns up to 5 concurrent agents to process them.
+
+    Args:
+        target: Which issues to process (local, remote, or any)
+    """
+    agent_target = AgentTarget(target)
+    logger.info("spawn_agents_triggered", target=target)
+    pool = get_pool(agent_target)
+
+    # Run in background so endpoint returns immediately
+    background_tasks.add_task(pool.process_ready_issues)
+
+    status = pool.get_status()
+    return {
+        "status": "spawning",
+        "message": f"Spawning agents for ready issues. {status.idle_slots} slots available.",
+        "pool_status": {
+            "active_agents": status.active_agents,
+            "idle_slots": status.idle_slots,
+        },
+    }
+
+
+@app.post("/agents/run")
+async def run_until_empty(
+    background_tasks: BackgroundTasks,
+    target: str = "remote",
+) -> dict[str, Any]:
+    """Run agents until all unblocked issues are processed.
+
+    This is the recommended daily trigger endpoint. It will:
+    1. Fetch all 'Ready' issues from the project board
+    2. Filter by target (local/remote) and open blockers
+    3. Spawn up to 5 concurrent agents
+    4. Continue checking and spawning until no unblocked issues remain
+    5. Stop automatically when done
+
+    Args:
+        target: Which issues to process (local, remote, or any). Default: remote
+
+    Ideal for morning scheduled runs via Cloud Scheduler.
+    """
+    agent_target = AgentTarget(target)
+    logger.info("run_until_empty_triggered", target=target)
+    pool = get_pool(agent_target)
+
+    # Check if already running
+    status = pool.get_status()
+    if status.active_agents > 0:
+        return {
+            "status": "already_running",
+            "message": f"{status.active_agents} agents already active",
+            "pool_status": {
+                "active_agents": status.active_agents,
+                "idle_slots": status.idle_slots,
+            },
+        }
+
+    # Run drain mode in background
+    background_tasks.add_task(pool.run_until_empty)
+
+    return {
+        "status": "started",
+        "message": "Processing all unblocked issues until queue is empty",
+    }
+
+
+@app.post("/agents/start")
+async def start_continuous_processing(
+    background_tasks: BackgroundTasks,
+    target: str = "any",
+) -> dict[str, str]:
+    """Start continuous agent pool processing.
+
+    The pool will poll for ready issues every 60 seconds and
+    spawn agents as slots become available. Runs indefinitely.
+
+    Args:
+        target: Which issues to process (local, remote, or any)
+    """
+    agent_target = AgentTarget(target)
+    logger.info("continuous_processing_started", target=target)
+    pool = get_pool(agent_target)
+    settings = get_settings()
+
+    background_tasks.add_task(
+        pool.run_continuous,
+        poll_interval=settings.polling_interval_seconds,
+    )
+
+    return {"status": "started", "message": "Agent pool running continuously"}
+
+
+@app.post("/agents/stop")
+async def stop_continuous_processing(target: str = "any") -> dict[str, str]:
+    """Stop continuous or drain mode processing.
+
+    Args:
+        target: Which pool to stop (local, remote, or any)
+    """
+    agent_target = AgentTarget(target)
+    logger.info("processing_stopped", target=target)
+    pool = get_pool(agent_target)
+    pool.stop()
+    return {"status": "stopped", "target": target, "message": "Agent pool stop requested"}
+
+
+@app.get("/scheduler/status")
+async def scheduler_status() -> dict[str, Any]:
+    """Get daily scheduler status."""
+    scheduler = get_scheduler()
+    return scheduler.get_status()
+
+
+@app.post("/scheduler/start")
+async def start_scheduler(background_tasks: BackgroundTasks) -> dict[str, Any]:
+    """Start the daily scheduler.
+
+    The scheduler will trigger agent runs at 8:00 AM Eastern daily.
+    Each run processes all unblocked issues until the queue is empty.
+    """
+    logger.info("daily_scheduler_start_requested")
+    scheduler = get_scheduler()
+
+    if scheduler._running:
+        return {
+            "status": "already_running",
+            "message": "Daily scheduler is already running",
+            **scheduler.get_status(),
+        }
+
+    background_tasks.add_task(scheduler.run_daily)
+
+    return {
+        "status": "started",
+        "message": "Daily scheduler started",
+        **scheduler.get_status(),
+    }
+
+
+@app.post("/scheduler/stop")
+async def stop_scheduler() -> dict[str, str]:
+    """Stop the daily scheduler."""
+    logger.info("daily_scheduler_stop_requested")
+    scheduler = get_scheduler()
+    scheduler.stop()
+    return {"status": "stopped", "message": "Daily scheduler stopped"}

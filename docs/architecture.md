@@ -14,10 +14,12 @@ The Agentic Coding Engine is a multi-repo orchestration system that:
 
 ### 1. GitHub Integration (`src/ace/github/`)
 
-- **`mcp_client.py`** - Wrapper around GitHub MCP server for tool invocation
+- **`api_client.py`** - GitHub REST and GraphQL API client using httpx
+- **`projects_v2.py`** - GitHub Projects V2 GraphQL operations (read/update project board status)
 - **`issue_queue.py`** - High-level API for issue operations (list, claim, comment, label, create PR)
+- **`status_manager.py`** - Manages issue status transitions and agent label handling
 
-The engine communicates with GitHub exclusively through the MCP server, which provides a secure, scoped interface.
+The ACE framework communicates with GitHub via REST/GraphQL APIs for orchestration tasks (reading project board, updating status). **Coding agents** spawned by ACE use the official GitHub MCP server directly for their GitHub operations.
 
 ### 2. Agent Layer (`src/ace/agents/`)
 
@@ -143,12 +145,13 @@ Cloud Run Job (per ticket)
 
 ## Security Model
 
-1. **No direct API calls** - All GitHub operations go through MCP server
+1. **Layered GitHub access**:
+   - ACE framework uses GitHub REST/GraphQL APIs with a service token for orchestration
+   - Coding agents use GitHub MCP server with scoped permissions for their operations
 2. **Secrets in Secret Manager** - Never in code or environment
-3. **Scoped MCP toolsets** - Only allow necessary operations
-4. **Branch protection** - Agents never push to main
-5. **PR-only workflow** - All changes go through review
-6. **Policy injection** - Safety rules prepended to every task
+3. **Branch protection** - Agents never push to main
+4. **PR-only workflow** - All changes go through review
+5. **Policy injection** - Safety rules prepended to every task
 
 ## Multi-Repo Orchestration
 

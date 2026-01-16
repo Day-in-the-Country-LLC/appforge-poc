@@ -49,7 +49,9 @@ class StatusManager:
 - Heartbeat: Updates posted at major milestones
 """
         await self.issue_queue.post_comment(issue_number, claim_comment)
-        await self.issue_queue.set_project_status(issue_number, IssueStatus.IN_PROGRESS)
+        await self.issue_queue.set_project_status(
+            issue_number, IssueStatus.IN_PROGRESS.value, self.settings.github_project_name
+        )
         logger.info("issue_claimed", issue=issue_number)
 
     async def mark_blocked(
@@ -77,7 +79,9 @@ class StatusManager:
         await self.issue_queue.remove_labels(issue_number, [self.settings.github_agent_label])
         await self.issue_queue.assign_issue(issue_number, assignee)
         await self.issue_queue.post_comment(issue_number, blocked_comment)
-        await self.issue_queue.set_project_status(issue_number, IssueStatus.BLOCKED)
+        await self.issue_queue.set_project_status(
+            issue_number, IssueStatus.BLOCKED.value, self.settings.github_project_name
+        )
         logger.info("issue_blocked", issue=issue_number, assignee=assignee)
 
     async def mark_done(
@@ -104,7 +108,9 @@ Status: Done
 """
         await self.issue_queue.remove_labels(issue_number, [self.settings.github_agent_label])
         await self.issue_queue.post_comment(issue_number, done_comment)
-        await self.issue_queue.set_project_status(issue_number, IssueStatus.DONE)
+        await self.issue_queue.set_project_status(
+            issue_number, IssueStatus.DONE.value, self.settings.github_project_name
+        )
         logger.info("issue_marked_done", issue=issue_number, pr=pr_number)
 
     async def mark_failed(
@@ -131,7 +137,9 @@ Status: Blocked - Please review and re-add the `agent` label to retry.
 """
         await self.issue_queue.remove_labels(issue_number, [self.settings.github_agent_label])
         await self.issue_queue.post_comment(issue_number, failed_comment)
-        await self.issue_queue.set_project_status(issue_number, IssueStatus.BLOCKED)
+        await self.issue_queue.set_project_status(
+            issue_number, IssueStatus.BLOCKED.value, self.settings.github_project_name
+        )
         logger.info("issue_marked_failed", issue=issue_number)
 
     async def resume_from_blocked(self, issue_number: int) -> None:
@@ -147,7 +155,9 @@ Status: Blocked - Please review and re-add the `agent` label to retry.
         resume_comment = "**Agent Resuming**\n\nContinuing with provided answers."
         await self.issue_queue.add_labels(issue_number, [self.settings.github_agent_label])
         await self.issue_queue.post_comment(issue_number, resume_comment)
-        await self.issue_queue.set_project_status(issue_number, IssueStatus.IN_PROGRESS)
+        await self.issue_queue.set_project_status(
+            issue_number, IssueStatus.IN_PROGRESS.value, self.settings.github_project_name
+        )
         logger.info("issue_resumed", issue=issue_number)
 
     def _get_timestamp(self) -> str:
