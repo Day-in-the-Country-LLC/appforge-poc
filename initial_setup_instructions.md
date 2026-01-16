@@ -418,5 +418,6 @@ Either is fine—multi-repo just changes the “workspace hydration” and branc
 
 Claude Code API Key stored in the GCP project appforge-483920 as CLAUDE_CODE_ADMIN_API_KEY
 OpenAI API Key stored in the GCP project appforge-483920 as APPFORGE_OPENAI_API_KEY
+GitHub Token stored in the GCP project appforge-483920 as GITHUB_CONTROL_API_KEY
 
 GCP credentials file in repo and named appforge-creds.json
