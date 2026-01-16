@@ -142,7 +142,27 @@ Continue with the task based on this answer. Respond with SUCCESS, BLOCKED, or F
             )
             response.raise_for_status()
             data = response.json()
-            return data["output"][0]["content"][0]["text"]
+            # Log response structure for debugging
+            logger.debug("openai_response", data=data)
+            # Handle responses endpoint format
+            if "output" in data:
+                output = data["output"]
+                if isinstance(output, list) and len(output) > 0:
+                    item = output[0]
+                    if isinstance(item, dict):
+                        if "content" in item:
+                            content = item["content"]
+                            if isinstance(content, list) and len(content) > 0:
+                                return content[0].get("text", str(content[0]))
+                            return str(content)
+                        if "text" in item:
+                            return item["text"]
+                    return str(item)
+                return str(output)
+            # Fallback for other formats
+            if "choices" in data:
+                return data["choices"][0]["message"]["content"]
+            return str(data)
 
     def _parse_response(self, response: str) -> AgentResult:
         """Parse agent response into AgentResult."""
