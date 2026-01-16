@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentic-coding-engine"
+version = "0.1.0"
+description = "Orchestrates agents to handle GitHub issues and open PRs"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Day in the Country LLC", email = "dev@dayinthecountry.com"}
+]
+
+dependencies = [
+    "langgraph>=0.1.0",
+    "langchain>=0.1.0",
+    "langchain-openai>=0.1.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "httpx>=0.25.0",
+    "python-dotenv>=1.0.0",
+    "google-cloud-secret-manager>=2.16.0",
+    "PyGithub>=2.1.1",
+    "gitpython>=3.1.40",
+    "pyyaml>=6.0",
+    "structlog>=24.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.7.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ace"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "W", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false

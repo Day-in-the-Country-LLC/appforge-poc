@@ -1,0 +1,165 @@
+# Architecture Overview
+
+## High-Level Design
+
+The Agentic Coding Engine is a multi-repo orchestration system that:
+
+1. **Monitors GitHub issues** for tasks labeled `agent:ready`
+2. **Orchestrates agents** to execute work in isolated workspaces
+3. **Manages state** through GitHub labels and comments
+4. **Opens PRs** with completed work
+5. **Handles blockers** via a human-in-the-loop protocol
+
+## Core Components
+
+### 1. GitHub Integration (`src/ace/github/`)
+
+- **`mcp_client.py`** - Wrapper around GitHub MCP server for tool invocation
+- **`issue_queue.py`** - High-level API for issue operations (list, claim, comment, label, create PR)
+
+The engine communicates with GitHub exclusively through the MCP server, which provides a secure, scoped interface.
+
+### 2. Agent Layer (`src/ace/agents/`)
+
+- **`base.py`** - Abstract base class defining the agent interface
+  - `plan()` - Generate execution plan
+  - `run()` - Execute task in workspace
+  - `respond_to_answer()` - Resume after blocked question answered
+- **`policy.py`** - Safety constraints and execution rules injected into every task
+
+Agents are pluggable implementations (Codex CLI, Claude, etc.) that conform to this interface.
+
+### 3. Orchestration (`src/ace/orchestration/`)
+
+- **`state.py`** - Pydantic state model for the workflow
+- **`graph.py`** - LangGraph workflow definition
+
+The workflow is a state machine with these nodes:
+
+```
+fetch_candidates
+    ↓
+claim_issue
+    ↓
+hydrate_context
+    ↓
+select_backend
+    ↓
+run_agent
+    ↓
+evaluate_result
+    ├→ handle_blocked (if questions)
+    ├→ open_pr (if success)
+    └→ post_failure (if error)
+    ↓
+mark_done
+```
+
+### 4. Service Layer (`src/ace/runners/`)
+
+- **`service.py`** - FastAPI service with:
+  - Health check endpoint
+  - GitHub webhook receiver
+  - Manual poll trigger
+- **`worker.py`** - Entrypoint for processing a single ticket
+- **`scheduler.py`** - (Optional) Polling loop for Cloud Scheduler
+
+### 5. Workspace Management (`src/ace/workspaces/`)
+
+- **`git_ops.py`** - Git operations (clone, worktree, branch, push)
+- **`tmux_ops.py`** - (Optional) tmux session/window management
+
+### 6. Configuration (`src/ace/config/`)
+
+- **`settings.py`** - Environment-based configuration
+- **`logging.py`** - Structured logging setup
+
+## Data Flow
+
+### Ticket Pickup Flow
+
+```
+GitHub Issue (agent:ready)
+    ↓
+Webhook / Polling
+    ↓
+Service receives event
+    ↓
+Worker spawned with issue_number
+    ↓
+LangGraph executes workflow
+    ↓
+Agent executes in workspace
+    ↓
+PR opened, labels updated
+    ↓
+GitHub Issue (agent:done)
+```
+
+### Blocked Flow
+
+```
+Agent encounters question
+    ↓
+Posts BLOCKED: comment
+    ↓
+Sets agent:blocked label
+    ↓
+Assigns to human
+    ↓
+Human replies ANSWER:
+    ↓
+Webhook detects ANSWER:
+    ↓
+Worker resumes with answer
+    ↓
+Agent continues execution
+```
+
+## Deployment Model
+
+### Local Development
+
+```
+FastAPI service (uvicorn)
+    ↓
+GitHub webhook (via ngrok or similar)
+    ↓
+Worker processes issues locally
+```
+
+### GCP Cloud Run
+
+```
+Cloud Run Service
+    ├→ Webhook receiver (always running)
+    └→ Polling trigger (Cloud Scheduler every 1-5 min)
+    ↓
+Cloud Run Job (per ticket)
+    ├→ Secrets from Secret Manager
+    ├→ Workspace in ephemeral storage
+    └→ Agent execution
+```
+
+## Security Model
+
+1. **No direct API calls** - All GitHub operations go through MCP server
+2. **Secrets in Secret Manager** - Never in code or environment
+3. **Scoped MCP toolsets** - Only allow necessary operations
+4. **Branch protection** - Agents never push to main
+5. **PR-only workflow** - All changes go through review
+6. **Policy injection** - Safety rules prepended to every task
+
+## Multi-Repo Orchestration
+
+The engine is repo-agnostic:
+
+- Issues are tracked in a central "orchestration repo"
+- Agents receive context about target repos
+- Agents handle cloning and working in project-specific repos
+- Engine only manages state and coordination
+
+This allows:
+- Single orchestration point for multiple projects
+- Agents to work on different repos in parallel
+- Flexible agent implementations per project type

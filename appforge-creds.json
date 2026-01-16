@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "appforge-483920",
+  "private_key_id": "e5920c91d0f0132882093c82a04c6479d3f433e8",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDo8ODMy4B44ljg\nWiWjgend7lAXiloHbzhPIpiPkV/ywloqpHVx0q2IEdgziW/9pishRMJv+uBrhUTD\nQwb46n5tTS4Zy9Zw1DC3zgiWsFQ7OqQvatA+ryw7AI/IfYBzYHvh2dlPZ3zcd6Xr\nSxrx4Qi8iuMo+yn2JEpVr1c75xxDBRear0Fz8QAmL+F0PeFmWjlXxAEI2RGdjY+v\n6qpyZU7GWY0CV7iUuvD1Rr+hrjYqHVEwRM0BqazX410I8WAYFsvfG890iJzghW7w\njBOlMqdsOYrXWztM01FVuP+1K7lmFXITUBjHHLzdeFifjWyepY/HYDsKt+AfoUTW\nMcloKtE5AgMBAAECggEAcoOIX+VjIQpVGuX2Pu1s5Rd09D2liKYajny5d0rGWndF\nEFWNDwm9GXl8Scm07oM0DMTauWYh0XnQlhVrZg8RW/ZnRXM51nnaAWIeQsYogn2P\nnWfrPAWtvsvF45AfB5lVDXClLi336gI/5O4lLuer/dRhXBItTL4GdR0fy2kQMbls\n4SqyGXutFj/jmvd8ewl1RTkd/q/2lr4AwFiyY0iSDCfnHuv9fN9J+tB5U4u0e2oh\nS5QfIZTJT0tb+3CLInBHlN7dsgdCpxf5DNEjVgn3ORStbIP75/O3Cb4n/JU5TFBf\nA1r1FrJNOQAl+Ipn9PN/Go2nMk9Im3vt4liJRRfyKQKBgQD9Oo6R5dsHdi9uG9DG\ngFmWbQksOETDjFxv1GYkv+YYYFMBwlYc0PO2/xJi/impJG1oDxE/bc/jfJKXxRSU\nPUNjUdD7AdVv+uZ3GFg720hYbLZ4Wjbhyo1Ws6W452W/RM7VHzazadB8ft8/aOfo\nrOVzFXNp/Pg3vesLaZ5r7uJlCwKBgQDrfXur+lum9PbSQozsupIjgeei5n6ODr1n\noz/ZJRm7sVItsFYNzAknitos1hO8Njc1EA8PWhGrs7tYp5Q21IV9teh0nR+NNsZt\nGng1PRqoOM1xCQKHV1Y+ivWPqVsTBSZr+jOtZ4l3kSupBzj8nYtiA66aOj3g5woK\n19+RrloFSwKBgHn11eyW0+LIHRfe9bJk5sD4Ss6tWxEDbRG/LmLMublLyy6xtl+y\nk26zctuSpeX80WSovRnbfaCGwuOt27d5uhb/tLLvsyh3osABTZ2mgzVzRn64lG4y\n69eyNkLTz8FLFoK2wdWvROZxBHy5vdfmTawbzLZjS/ks0yNv/wjkyMz5AoGAfKKX\nV/hTldPE5peueoRsYDqa3E7d4FXQzQ9L9aN7MSmyctgHU5oPpkwJGP3cyBpxsbXk\nIp3rCFNB7rQS78ofNN+YPlACqPy6nHgL8zF58FrP8Olx2yvQS53ERdq+hxyMr01n\nGHnZ+dxtnTJjaOABK0kDmkEFCwl8+Swz+airoG0CgYBbKUV2Cf3Cpe2v0WXVG5+4\nFExIkGsPzT7cUqYyw726/4jExmLrAz+No18IfXwFbbKxhxBODZWzVJvLvutvfmhP\ncLuR+VF4AnZNshLj60IBtY6QH5S/uxk7TS+zycODauKjHuKXM4kD5tGJU0JTeAND\nhTzddHW3TKjvcIE9rQtsOA==\n-----END PRIVATE KEY-----\n",
+  "client_email": "appforge@appforge-483920.iam.gserviceaccount.com",
+  "client_id": "110529965840033702592",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/appforge%40appforge-483920.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
