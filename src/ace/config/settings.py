@@ -26,6 +26,17 @@ class Settings(BaseSettings):
     github_token_secret_name: str = os.getenv("GITHUB_TOKEN_SECRET_NAME", "")
     github_token_secret_version: str = os.getenv("GITHUB_TOKEN_SECRET_VERSION", "latest")
     github_mcp_token_env: str = os.getenv("GITHUB_MCP_TOKEN_ENV", "GITHUB_TOKEN")
+    mcp_config_filename: str = os.getenv("MCP_CONFIG_FILENAME", ".mcp.json")
+    mcp_server_name: str = os.getenv("MCP_SERVER_NAME", "github")
+    claude_mcp_url: str = os.getenv(
+        "CLAUDE_MCP_URL", "https://api.githubcopilot.com/mcp"
+    )
+    codex_mcp_url: str = os.getenv(
+        "CODEX_MCP_URL", "https://api.githubcopilot.com/mcp/"
+    )
+    codex_config_path: str = os.getenv(
+        "CODEX_CONFIG_PATH", "~/.codex/config.toml"
+    )
 
     # OpenAI / Codex
     openai_api_key: str = os.getenv("APPFORGE_OPENAI_API_KEY", "")

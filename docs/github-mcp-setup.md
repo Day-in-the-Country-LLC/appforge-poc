@@ -101,6 +101,16 @@ environment. Configure the MCP server in the CLI tool itself using the GitHub
 MCP install guides, and ensure the token env var matches `GITHUB_MCP_TOKEN_ENV`
 (default: `GITHUB_TOKEN`).
 
+By default, ACE writes a project-scoped `.mcp.json` in the worktree for Claude CLI
+using the remote HTTP MCP server (`https://api.githubcopilot.com/mcp`) and a PAT
+from Secret Manager or `GITHUB_CONTROL_API_KEY`. This file is added to
+`.git/info/exclude` to avoid accidental commits.
+
+For Codex CLI, ACE writes `~/.codex/config.toml` with:
+- `[mcp_servers.github]`
+- `url = "https://api.githubcopilot.com/mcp/"`
+- `bearer_token_env_var = "<GITHUB_MCP_TOKEN_ENV>"`
+
 Key env vars used by ACE:
 - `GITHUB_MCP_TOKEN_ENV` (default `GITHUB_TOKEN`)
 - `GITHUB_CONTROL_API_KEY` (fallback for REST operations)
