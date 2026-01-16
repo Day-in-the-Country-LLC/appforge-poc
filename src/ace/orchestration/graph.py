@@ -1,18 +1,57 @@
 """LangGraph orchestration graph definition."""
 
 from datetime import datetime
+import re
+from urllib.parse import quote
 
 import structlog
 from langgraph.graph import StateGraph
 
+from ace.agents.base import AgentResult, AgentStatus
 from ace.agents.model_selector import ModelSelector
+from ace.config.settings import get_settings
+from ace.config.secrets import resolve_github_token
 from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client
 from ace.github.status_manager import StatusManager
 from ace.orchestration.state import WorkerState
+from ace.workspaces.git_ops import GitOps
+from ace.orchestration.task_manager import InstructionBuilder, TaskManager
 
 logger = structlog.get_logger(__name__)
+
+
+def _slugify_title(title: str, max_length: int = 40) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    if not slug:
+        return "issue"
+    return slug[:max_length]
+
+
+def _build_repo_url(owner: str, repo: str, token: str) -> str:
+    if token:
+        safe_token = quote(token, safe="")
+        return f"https://x-access-token:{safe_token}@github.com/{owner}/{repo}.git"
+    return f"https://github.com/{owner}/{repo}.git"
+
+
+def _format_task_plan_comment(plan: TaskManager, tasks) -> str:
+    lines = [
+        "**Task Plan (ACE)**",
+        "",
+        "Sequential tasks for this issue:",
+    ]
+    for task in tasks:
+        lines.append(f"- [ ] {task.task_id}: {task.title}")
+        if task.description:
+            lines.append(f"  - {task.description}")
+        if task.acceptance_criteria:
+            criteria = "; ".join(task.acceptance_criteria)
+            lines.append(f"  - Acceptance: {criteria}")
+    lines.append("")
+    lines.append("Progress will be posted as tasks complete.")
+    return "\n".join(lines)
 
 
 async def fetch_candidates(state: WorkerState) -> WorkerState:
@@ -97,6 +136,8 @@ async def run_agent(state: WorkerState) -> WorkerState:
         return state
 
     try:
+        settings = get_settings()
+        github_token = resolve_github_token(settings)
         # Build task from issue
         task = f"{state.issue.title}\n\n{state.issue.body}"
         context = {
@@ -105,18 +146,171 @@ async def run_agent(state: WorkerState) -> WorkerState:
             "issue_number": state.issue_number,
             "labels": state.issue.labels,
         }
-        workspace_path = state.workspace_path or "/tmp/agent-workspace"
+
+        repo_owner = state.metadata.get("repo_owner") or state.issue.repo_owner
+        repo_name = state.metadata.get("repo_name") or state.issue.repo_name
+        if not repo_owner or not repo_name:
+            raise ValueError("missing repo owner/name for worktree creation")
+
+        git_ops = GitOps(settings.agent_workspace_root)
+        worktree_path = git_ops.get_worktree_path(repo_name, state.issue_number)
+        if not worktree_path.exists():
+            repo_url = _build_repo_url(repo_owner, repo_name, github_token)
+            await git_ops.clone_repo(repo_url, repo_name, state.issue_number)
+
+        branch_slug = _slugify_title(state.issue.title)
+        branch_name = git_ops.get_branch_name(state.issue_number, branch_slug)
+        await git_ops.ensure_branch(worktree_path, branch_name)
+
+        state.workspace_path = str(worktree_path)
+        state.branch_name = branch_name
+        workspace_path = state.workspace_path
+        context["repo_name"] = repo_name
+        context["repo_owner"] = repo_owner
+        context["branch_name"] = branch_name
+        context["workspace_path"] = workspace_path
+
+        task_manager = TaskManager(worktree_path)
+        plan, plan_created = await task_manager.load_or_create_plan(
+            state.issue,
+            state.backend,
+            state.metadata.get("model"),
+        )
+        if plan_created:
+            try:
+                api_client = GitHubAPIClient(github_token or settings.github_token)
+                issue_queue = IssueQueue(
+                    api_client,
+                    repo_owner,
+                    repo_name,
+                )
+                comment = _format_task_plan_comment(task_manager, plan.tasks)
+                await issue_queue.post_comment(
+                    state.issue.number,
+                    comment,
+                    repo_owner=repo_owner,
+                    repo_name=repo_name,
+                )
+            except Exception as e:
+                logger.warning("task_plan_comment_failed", error=str(e))
+        completed_task = task_manager.apply_done_marker(plan)
+        if completed_task:
+            try:
+                api_client = GitHubAPIClient(github_token or settings.github_token)
+                issue_queue = IssueQueue(
+                    api_client,
+                    repo_owner,
+                    repo_name,
+                )
+                summary = ""
+                if completed_task.completion:
+                    summary = completed_task.completion.get("summary", "")
+                comment = (
+                    f"**Task Complete**\n\n"
+                    f"- Task: {completed_task.task_id} - {completed_task.title}\n"
+                )
+                if summary:
+                    comment += f"- Summary: {summary}\n"
+                await issue_queue.post_comment(
+                    state.issue.number,
+                    comment,
+                    repo_owner=repo_owner,
+                    repo_name=repo_name,
+                )
+            except Exception as e:
+                logger.warning("task_completion_comment_failed", error=str(e))
+        current_task = task_manager.current_task(plan)
+        if not current_task:
+            if plan.pr_url:
+                state.pr_number = plan.pr_number
+                state.pr_url = plan.pr_url
+                state.agent_result = AgentResult(
+                    status=AgentStatus.SUCCESS,
+                    output=f"All tasks complete. PR already created: {plan.pr_url}",
+                    files_changed=[],
+                    commands_run=[],
+                )
+                state.last_update = datetime.now()
+                return state
+
+            try:
+                api_client = GitHubAPIClient(github_token or settings.github_token)
+                issue_queue = IssueQueue(
+                    api_client,
+                    repo_owner,
+                    repo_name,
+                )
+                pr_title = f"Agent: {state.issue.title}"
+                task_lines = "\n".join(
+                    f"- {t.title}" for t in plan.tasks
+                ) or "- N/A"
+                pr_body = (
+                    f"Closes #{state.issue.number}\n\n"
+                    "Tasks completed:\n"
+                    f"{task_lines}\n"
+                )
+                head = f"{repo_owner}:{branch_name}"
+                pr = await issue_queue.create_pull_request(
+                    title=pr_title,
+                    body=pr_body,
+                    head=head,
+                    base=settings.github_base_branch,
+                    repo_owner=repo_owner,
+                    repo_name=repo_name,
+                )
+                state.pr_number = pr.get("number")
+                state.pr_url = pr.get("html_url")
+                plan.pr_number = state.pr_number
+                plan.pr_url = state.pr_url
+                task_manager.save_plan(plan)
+                output = f"All tasks complete. PR created: {state.pr_url}"
+                status = AgentStatus.SUCCESS
+                error = None
+            except Exception as e:
+                output = "All tasks complete, but PR creation failed."
+                status = AgentStatus.FAILED
+                error = str(e)
+
+            state.agent_result = AgentResult(
+                status=status,
+                output=output,
+                files_changed=[],
+                commands_run=[],
+                error=error,
+            )
+            state.last_update = datetime.now()
+            return state
+
+        task_manager.mark_in_progress(plan, current_task.task_id)
+        context["task_id"] = current_task.task_id
+        context["task_title"] = current_task.title
+
+        instruction_builder = InstructionBuilder(
+            backend=state.backend,
+            model=state.metadata.get("model"),
+        )
+        instructions = await instruction_builder.build(state.issue, current_task)
+        task_manager.write_instructions(state.issue, current_task, instructions, branch_name)
+
+        if settings.agent_execution_mode.lower() not in {"tmux", "cli"}:
+            task = instructions
 
         # Select and run the appropriate agent
-        if state.backend == "claude":
-            from ace.agents.claude_agent import ClaudeAgent
+        if settings.agent_execution_mode.lower() in {"tmux", "cli"}:
+            from ace.agents.cli_agent import CliAgent
 
             model = state.metadata.get("model")
-            agent = ClaudeAgent(model=model)
+            agent = CliAgent(backend=state.backend, model=model)
         else:
-            from ace.agents.codex_agent import CodexAgent
+            if state.backend == "claude":
+                from ace.agents.claude_agent import ClaudeAgent
 
-            agent = CodexAgent()
+                model = state.metadata.get("model")
+                agent = ClaudeAgent(model=model)
+            else:
+                from ace.agents.codex_agent import CodexAgent
+
+                agent = CodexAgent()
 
         logger.info(
             "executing_agent",
