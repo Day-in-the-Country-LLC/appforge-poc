@@ -1,5 +1,5 @@
-resource "google_secret_manager_secret" "github_token" {
-  secret_id = "github-token"
+resource "google_secret_manager_secret" "github_control_api_key" {
+  secret_id = "github-control-api-key"
 
   replication {
     automatic = true
@@ -33,7 +33,7 @@ resource "google_secret_manager_secret" "claude_api_key" {
 output "secrets" {
   description = "Secret names for reference"
   value = {
-    github_token           = google_secret_manager_secret.github_token.id
+    github_control_api_key = google_secret_manager_secret.github_control_api_key.id
     github_webhook_secret  = google_secret_manager_secret.github_webhook_secret.id
     openai_api_key         = google_secret_manager_secret.openai_api_key.id
     claude_api_key         = google_secret_manager_secret.claude_api_key.id
