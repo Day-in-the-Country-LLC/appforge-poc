@@ -39,13 +39,20 @@ for SECRET in GITHUB_CONTROL_API_KEY APPFORGE_OPENAI_API_KEY CLAUDE_CODE_ADMIN_A
     fi
 done
 
+# Create VPC network if it doesn't exist
+if ! gcloud compute networks describe ace-network &>/dev/null 2>&1; then
+    echo "Creating VPC network..."
+    gcloud compute networks create ace-network --subnet-mode=auto
+fi
+
 # Create firewall rule if it doesn't exist
 if ! gcloud compute firewall-rules describe ace-allow-http &>/dev/null 2>&1; then
     echo "Creating firewall rule..."
     gcloud compute firewall-rules create ace-allow-http \
-        --allow=tcp:8080 \
+        --network=ace-network \
+        --allow=tcp:8080,tcp:22 \
         --target-tags=ace \
-        --description="Allow HTTP traffic to ACE service"
+        --description="Allow HTTP and SSH traffic to ACE service"
 fi
 
 # Create startup script
@@ -77,10 +84,10 @@ source /opt/ace/venv/bin/activate
 pip install --upgrade pip
 pip install -e .
 
-# Get secrets from Secret Manager
-export GITHUB_CONTROL_API_KEY=$(gcloud secrets versions access latest --secret=github-token 2>/dev/null || echo "")
-export APPFORGE_OPENAI_API_KEY=$(gcloud secrets versions access latest --secret=openai-api-key 2>/dev/null || echo "")
-export CLAUDE_CODE_ADMIN_API_KEY=$(gcloud secrets versions access latest --secret=claude-api-key 2>/dev/null || echo "")
+# Get secrets from Secret Manager (using correct secret names)
+export GITHUB_CONTROL_API_KEY=$(gcloud secrets versions access latest --secret=GITHUB_CONTROL_API_KEY 2>/dev/null || echo "")
+export APPFORGE_OPENAI_API_KEY=$(gcloud secrets versions access latest --secret=APPFORGE_OPENAI_API_KEY 2>/dev/null || echo "")
+export CLAUDE_CODE_ADMIN_API_KEY=$(gcloud secrets versions access latest --secret=CLAUDE_CODE_ADMIN_API_KEY 2>/dev/null || echo "")
 
 # Create systemd service
 cat > /etc/systemd/system/ace.service << 'SERVICEEOF'
@@ -95,9 +102,9 @@ WorkingDirectory=/opt/ace/appforge-poc
 Environment="PATH=/opt/ace/venv/bin:/usr/bin"
 Environment="ENVIRONMENT=production"
 ExecStart=/bin/bash -c 'source /opt/ace/venv/bin/activate && \
-    export GITHUB_CONTROL_API_KEY=$(gcloud secrets versions access latest --secret=github-token) && \
-    export APPFORGE_OPENAI_API_KEY=$(gcloud secrets versions access latest --secret=openai-api-key 2>/dev/null || echo "") && \
-    export CLAUDE_CODE_ADMIN_API_KEY=$(gcloud secrets versions access latest --secret=claude-api-key 2>/dev/null || echo "") && \
+    export GITHUB_CONTROL_API_KEY=$(gcloud secrets versions access latest --secret=GITHUB_CONTROL_API_KEY) && \
+    export APPFORGE_OPENAI_API_KEY=$(gcloud secrets versions access latest --secret=APPFORGE_OPENAI_API_KEY 2>/dev/null || echo "") && \
+    export CLAUDE_CODE_ADMIN_API_KEY=$(gcloud secrets versions access latest --secret=CLAUDE_CODE_ADMIN_API_KEY 2>/dev/null || echo "") && \
     uvicorn ace.runners.service:app --host 0.0.0.0 --port 8080'
 Restart=always
 RestartSec=10
@@ -153,6 +160,7 @@ gcloud compute instances create "$VM_NAME" \
     --boot-disk-type=pd-standard \
     --image-family=debian-12 \
     --image-project=debian-cloud \
+    --network=ace-network \
     --service-account="$SA_EMAIL" \
     --scopes=cloud-platform \
     --tags=ace \
