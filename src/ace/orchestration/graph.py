@@ -90,6 +90,63 @@ async def run_agent(state: WorkerState) -> WorkerState:
     """Execute the agent in the workspace."""
     logger.info("step_run_agent", issue=state.issue_number, backend=state.backend)
     state.current_step = "run_agent"
+
+    if not state.issue:
+        logger.error("no_issue_to_process", issue=state.issue_number)
+        state.last_update = datetime.now()
+        return state
+
+    try:
+        # Build task from issue
+        task = f"{state.issue.title}\n\n{state.issue.body}"
+        context = {
+            "repo_name": state.metadata.get("repo_name", "unknown"),
+            "repo_owner": state.metadata.get("repo_owner", "unknown"),
+            "issue_number": state.issue_number,
+            "labels": state.issue.labels,
+        }
+        workspace_path = state.workspace_path or "/tmp/agent-workspace"
+
+        # Select and run the appropriate agent
+        if state.backend == "claude":
+            from ace.agents.claude_agent import ClaudeAgent
+
+            model = state.metadata.get("model")
+            agent = ClaudeAgent(model=model)
+        else:
+            from ace.agents.codex_agent import CodexAgent
+
+            agent = CodexAgent()
+
+        logger.info(
+            "executing_agent",
+            issue=state.issue_number,
+            backend=state.backend,
+            model=state.metadata.get("model"),
+        )
+
+        result = await agent.run(task, context, workspace_path)
+        state.agent_result = result
+
+        logger.info(
+            "agent_execution_complete",
+            issue=state.issue_number,
+            status=result.status.value,
+            output_length=len(result.output),
+        )
+
+    except Exception as e:
+        logger.error("agent_execution_failed", issue=state.issue_number, error=str(e))
+        from ace.agents.base import AgentResult, AgentStatus
+
+        state.agent_result = AgentResult(
+            status=AgentStatus.FAILED,
+            output="",
+            files_changed=[],
+            commands_run=[],
+            error=str(e),
+        )
+
     state.last_update = datetime.now()
     return state
 
