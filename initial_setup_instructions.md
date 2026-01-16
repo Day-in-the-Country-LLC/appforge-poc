@@ -415,3 +415,8 @@ Either is fine—multi-repo just changes the “workspace hydration” and branc
 [7]: https://docs.github.com/en/copilot/how-tos/provide-context/use-mcp/set-up-the-github-mcp-server?utm_source=chatgpt.com "Setting up the GitHub MCP Server"
 [8]: https://docs.cloud.google.com/python/docs/reference/secretmanager/latest?utm_source=chatgpt.com "Python Client for Secret Manager"
 [9]: https://docs.langchain.com/oss/python/langgraph/workflows-agents?utm_source=chatgpt.com "Workflows and agents - Docs by LangChain"
+
+Claude Code API Key stored in the GCP project appforge-483920 as CLAUDE_CODE_ADMIN_API_KEY
+OpenAI API Key stored in the GCP project appforge-483920 as APPFORGE_OPENAI_API_KEY
+
+GCP credentials file in repo and named appforge-creds.json
