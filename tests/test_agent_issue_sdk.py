@@ -1,5 +1,10 @@
 """Tests for Agent Issue SDK."""
 
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
 from ace.agent_issue_sdk import IssueContent, IssueCreator
 
 
@@ -18,22 +23,69 @@ def test_issue_content_creation():
     assert len(issue.acceptance_criteria) == 2
 
 
-def test_issue_creator_initialization():
-    """Test IssueCreator initialization."""
-    creator = IssueCreator(
-        github_token="test_token",
-        github_org="test-org",
-        project_name="test-project",
-    )
+@patch("ace.agent_issue_sdk.client.IssueCreator._fetch_secret")
+def test_issue_creator_initialization(mock_fetch_secret):
+    """Test IssueCreator initialization with credentials file."""
+    mock_fetch_secret.return_value = "test_token"
 
-    assert creator.github_token == "test_token"
-    assert creator.github_org == "test-org"
-    assert creator.project_name == "test-project"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        creds_file = Path(tmpdir) / "creds.json"
+        creds_file.write_text(json.dumps({"project_id": "test-project-id"}))
+
+        creator = IssueCreator(
+            github_org="test-org",
+            project_name="test-project",
+            credentials_file=str(creds_file),
+        )
+
+        assert creator.github_token == "test_token"
+        assert creator.github_org == "test-org"
+        assert creator.project_name == "test-project"
+        mock_fetch_secret.assert_called_once_with(
+            "test-project-id", "github-control-api-key", str(creds_file)
+        )
 
 
-def test_format_issue_body_basic():
+def test_issue_creator_credentials_file_not_found():
+    """Test IssueCreator raises error when credentials file not found."""
+    try:
+        IssueCreator(credentials_file="/nonexistent/creds.json")
+        assert False, "Should have raised FileNotFoundError"
+    except FileNotFoundError as e:
+        assert "Credentials file not found" in str(e)
+
+
+def test_issue_creator_invalid_credentials_json():
+    """Test IssueCreator raises error with invalid JSON."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        creds_file = Path(tmpdir) / "creds.json"
+        creds_file.write_text("invalid json {")
+
+        try:
+            IssueCreator(credentials_file=str(creds_file))
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "Invalid JSON" in str(e)
+
+
+def test_issue_creator_missing_project_id():
+    """Test IssueCreator raises error when project_id missing from credentials."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        creds_file = Path(tmpdir) / "creds.json"
+        creds_file.write_text(json.dumps({"type": "service_account"}))
+
+        try:
+            IssueCreator(credentials_file=str(creds_file))
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "project_id not found" in str(e)
+
+
+@patch("ace.agent_issue_sdk.client.IssueCreator._fetch_secret")
+def test_format_issue_body_basic(mock_fetch_secret):
     """Test basic issue body formatting."""
-    creator = IssueCreator(github_token="test_token")
+    mock_fetch_secret.return_value = "test_token"
+    creator = IssueCreator(gcp_project_id="test-project")
 
     issue = IssueContent(
         title="Test Issue",
@@ -53,9 +105,11 @@ def test_format_issue_body_basic():
     assert "- [ ] Criterion 2" in body
 
 
-def test_format_issue_body_with_notes():
+@patch("ace.agent_issue_sdk.client.IssueCreator._fetch_secret")
+def test_format_issue_body_with_notes(mock_fetch_secret):
     """Test issue body formatting with implementation notes."""
-    creator = IssueCreator(github_token="test_token")
+    mock_fetch_secret.return_value = "test_token"
+    creator = IssueCreator(gcp_project_id="test-project")
 
     issue = IssueContent(
         title="Test Issue",
@@ -71,9 +125,11 @@ def test_format_issue_body_with_notes():
     assert "Use pattern X from utils.py" in body
 
 
-def test_format_issue_body_with_related():
+@patch("ace.agent_issue_sdk.client.IssueCreator._fetch_secret")
+def test_format_issue_body_with_related(mock_fetch_secret):
     """Test issue body formatting with related issues."""
-    creator = IssueCreator(github_token="test_token")
+    mock_fetch_secret.return_value = "test_token"
+    creator = IssueCreator(gcp_project_id="test-project")
 
     issue = IssueContent(
         title="Test Issue",
@@ -90,9 +146,11 @@ def test_format_issue_body_with_related():
     assert "- #456" in body
 
 
-def test_build_labels_basic():
+@patch("ace.agent_issue_sdk.client.IssueCreator._fetch_secret")
+def test_build_labels_basic(mock_fetch_secret):
     """Test label building."""
-    creator = IssueCreator(github_token="test_token")
+    mock_fetch_secret.return_value = "test_token"
+    creator = IssueCreator(gcp_project_id="test-project")
 
     labels = creator._build_labels("medium", None)
 
@@ -100,9 +158,11 @@ def test_build_labels_basic():
     assert "difficulty:medium" in labels
 
 
-def test_build_labels_with_additional():
+@patch("ace.agent_issue_sdk.client.IssueCreator._fetch_secret")
+def test_build_labels_with_additional(mock_fetch_secret):
     """Test label building with additional labels."""
-    creator = IssueCreator(github_token="test_token")
+    mock_fetch_secret.return_value = "test_token"
+    creator = IssueCreator(gcp_project_id="test-project")
 
     labels = creator._build_labels("hard", ["performance", "backend"])
 
@@ -112,19 +172,23 @@ def test_build_labels_with_additional():
     assert "backend" in labels
 
 
-def test_build_labels_all_difficulties():
+@patch("ace.agent_issue_sdk.client.IssueCreator._fetch_secret")
+def test_build_labels_all_difficulties(mock_fetch_secret):
     """Test label building for all difficulty levels."""
-    creator = IssueCreator(github_token="test_token")
+    mock_fetch_secret.return_value = "test_token"
+    creator = IssueCreator(gcp_project_id="test-project")
 
     for difficulty in ("easy", "medium", "hard"):
         labels = creator._build_labels(difficulty, None)
         assert f"difficulty:{difficulty}" in labels
 
 
-def test_issue_creator_headers():
+@patch("ace.agent_issue_sdk.client.IssueCreator._fetch_secret")
+def test_issue_creator_headers(mock_fetch_secret):
     """Test that headers are correctly set."""
     token = "test_token_123"
-    creator = IssueCreator(github_token=token)
+    mock_fetch_secret.return_value = token
+    creator = IssueCreator(gcp_project_id="test-project")
 
     assert creator.headers["Authorization"] == f"token {token}"
     assert "Accept" in creator.headers

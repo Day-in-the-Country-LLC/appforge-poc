@@ -6,9 +6,9 @@ Create issues in the **DITC TODO** org project directly from any repository's ag
 
 ```python
 from ace.agent_issue_sdk import IssueCreator, IssueContent
-import os
 
-creator = IssueCreator(github_token=os.getenv("GITHUB_TOKEN"))
+# Token automatically fetched from GCP Secret Manager
+creator = IssueCreator()
 
 issue = IssueContent(
     title="Add caching to API",
@@ -39,6 +39,20 @@ Or with `pip`:
 pip install git+https://github.com/Day-in-the-Country-LLC/appforge-poc.git
 ```
 
+## Setup
+
+1. Ensure your GCP project has the GitHub token in Secret Manager:
+
+```bash
+gcloud secrets create github-control-api-key --data-file=- <<< "ghp_your_token"
+```
+
+2. Set the GCP project environment variable:
+
+```bash
+export GOOGLE_CLOUD_PROJECT=your-gcp-project-id
+```
+
 ## Documentation
 
 See `docs/agent-issue-sdk.md` for complete documentation, examples, and API reference.
@@ -53,6 +67,7 @@ See `docs/agent-issue-sdk.md` for complete documentation, examples, and API refe
 ## Features
 
 - Async and sync APIs
+- Automatic GitHub token retrieval from GCP Secret Manager
 - Automatic label management (`agent`, `difficulty:*`)
 - Formatted issue bodies
 - Support for implementation notes and related issues
@@ -61,8 +76,10 @@ See `docs/agent-issue-sdk.md` for complete documentation, examples, and API refe
 ## Environment
 
 ```bash
-export GITHUB_TOKEN=ghp_your_token_here
+export GOOGLE_CLOUD_PROJECT=your-gcp-project-id
 ```
+
+The SDK uses Application Default Credentials (ADC) for GCP authentication.
 
 ## License
 

@@ -1,10 +1,14 @@
 """Issue creation client for agents to create issues in DITC TODO project."""
 
+import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import httpx
 import structlog
+from google.cloud import secretmanager
 
 logger = structlog.get_logger(__name__)
 
@@ -26,27 +30,91 @@ class IssueCreator:
 
     def __init__(
         self,
-        github_token: str,
         github_org: str = "Day-in-the-Country-LLC",
         project_name: str = "DITC TODO",
         api_url: str = "https://api.github.com",
+        credentials_file: Optional[str] = None,
+        secret_name: str = "github-control-api-key",
     ):
         """Initialize IssueCreator.
 
+        Fetches GitHub token from GCP Secret Manager using credentials file.
+
         Args:
-            github_token: GitHub Personal Access Token
             github_org: GitHub organization (default: Day-in-the-Country-LLC)
             project_name: Project name in org (default: DITC TODO)
             api_url: GitHub API URL (default: https://api.github.com)
+            credentials_file: Path to GCP credentials JSON file (default: appforge-creds.json)
+            secret_name: Secret name in Secret Manager (default: github-control-api-key)
         """
-        self.github_token = github_token
         self.github_org = github_org
         self.project_name = project_name
         self.api_url = api_url
+
+        credentials_file = credentials_file or "appforge-creds.json"
+        gcp_project_id = self._get_project_id_from_credentials(credentials_file)
+
+        self.github_token = self._fetch_secret(gcp_project_id, secret_name, credentials_file)
         self.headers = {
-            "Authorization": f"token {github_token}",
+            "Authorization": f"token {self.github_token}",
             "Accept": "application/vnd.github.v3+json",
         }
+
+    @staticmethod
+    def _get_project_id_from_credentials(credentials_file: str) -> str:
+        """Extract GCP project ID from credentials file.
+
+        Args:
+            credentials_file: Path to GCP credentials JSON file
+
+        Returns:
+            GCP project ID
+
+        Raises:
+            FileNotFoundError: If credentials file not found
+            ValueError: If project_id not in credentials file
+        """
+        creds_path = Path(credentials_file)
+        if not creds_path.exists():
+            raise FileNotFoundError(
+                f"Credentials file not found: {credentials_file}. "
+                "Ensure appforge-creds.json exists in the repo root."
+            )
+
+        try:
+            with open(creds_path) as f:
+                creds = json.load(f)
+            project_id = creds.get("project_id")
+            if not project_id:
+                raise ValueError("project_id not found in credentials file")
+            return project_id
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in credentials file: {e}")
+
+    @staticmethod
+    def _fetch_secret(project_id: str, secret_name: str, credentials_file: str) -> str:
+        """Fetch secret from GCP Secret Manager using credentials file.
+
+        Args:
+            project_id: GCP project ID
+            secret_name: Secret name
+            credentials_file: Path to GCP credentials JSON file
+
+        Returns:
+            Secret value
+
+        Raises:
+            Exception: If secret fetch fails
+        """
+        try:
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_file
+            client = secretmanager.SecretManagerServiceClient()
+            name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
+            response = client.access_secret_version(request={"name": name})
+            return response.payload.data.decode("UTF-8")
+        except Exception as e:
+            logger.error("secret_fetch_failed", secret=secret_name, error=str(e))
+            raise
 
     async def create_issue(
         self,
@@ -159,20 +227,24 @@ class IssueCreatorSync:
 
     def __init__(
         self,
-        github_token: str,
         github_org: str = "Day-in-the-Country-LLC",
         project_name: str = "DITC TODO",
         api_url: str = "https://api.github.com",
+        credentials_file: Optional[str] = None,
+        secret_name: str = "github-control-api-key",
     ):
         """Initialize IssueCreatorSync.
 
+        Fetches GitHub token from GCP Secret Manager using credentials file.
+
         Args:
-            github_token: GitHub Personal Access Token
             github_org: GitHub organization (default: Day-in-the-Country-LLC)
             project_name: Project name in org (default: DITC TODO)
             api_url: GitHub API URL (default: https://api.github.com)
+            credentials_file: Path to GCP credentials JSON file (default: appforge-creds.json)
+            secret_name: Secret name in Secret Manager (default: github-control-api-key)
         """
-        self.client = IssueCreator(github_token, github_org, project_name, api_url)
+        self.client = IssueCreator(github_org, project_name, api_url, credentials_file, secret_name)
 
     def create_issue(
         self,
