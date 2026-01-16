@@ -15,9 +15,11 @@ class Settings(BaseSettings):
 
     # GitHub
     github_token: str = os.getenv("GITHUB_CONTROL_API_KEY", "")
-    github_repo_owner: str = os.getenv("GITHUB_REPO_OWNER", "")
-    github_repo_name: str = os.getenv("GITHUB_REPO_NAME", "")
+    github_org: str = os.getenv("GITHUB_ORG", "Day-in-the-Country-LLC")
+    github_project_name: str = os.getenv("GITHUB_PROJECT_NAME", "DITC TODO")
     github_webhook_secret: Optional[str] = os.getenv("GITHUB_WEBHOOK_SECRET")
+    github_ready_status: str = os.getenv("GITHUB_READY_STATUS", "Ready")
+    github_agent_label: str = os.getenv("GITHUB_AGENT_LABEL", "agent")
 
     # OpenAI / Codex
     openai_api_key: str = os.getenv("APPFORGE_OPENAI_API_KEY", "")

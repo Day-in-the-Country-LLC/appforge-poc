@@ -64,6 +64,28 @@ class IssueQueue:
         logger.info("issues_listed", count=len(issues))
         return issues
 
+    async def list_issues_by_agent_label(self, agent_label: str) -> list[Issue]:
+        """List issues with agent label (for org project queries).
+
+        Args:
+            agent_label: Agent label to filter by (e.g., "agent")
+
+        Returns:
+            List of issues matching the criteria
+        """
+        logger.info("listing_issues_by_agent_label", agent_label=agent_label)
+        result = await self.mcp_client.call_tool(
+            "search_issues",
+            {
+                "query": f"org:{self.owner} label:{agent_label} state:open",
+            },
+        )
+        issues = []
+        for item in result.get("items", []):
+            issues.append(self._parse_issue(item))
+        logger.info("issues_listed", count=len(issues))
+        return issues
+
     async def claim_issue(self, issue_number: int, claim_comment: str) -> None:
         """Claim an issue by adding labels and a comment.
 
@@ -188,6 +210,25 @@ class IssueQueue:
         )
         logger.info("pull_request_created", pr_number=result.get("number"))
         return result
+
+    async def set_project_status(self, issue_number: int, status: str) -> None:
+        """Set project status for an issue.
+
+        Args:
+            issue_number: Issue number
+            status: Status value (e.g., "Ready", "In Progress", "Blocked", "Done")
+        """
+        logger.info("setting_project_status", issue=issue_number, status=status)
+        await self.mcp_client.call_tool(
+            "update_issue_project_status",
+            {
+                "owner": self.owner,
+                "repo": self.repo,
+                "issue_number": issue_number,
+                "status": status,
+            },
+        )
+        logger.info("project_status_set", issue=issue_number, status=status)
 
     def _parse_issue(self, item: dict[str, Any]) -> Issue:
         """Parse a GitHub API issue response into an Issue object."""
