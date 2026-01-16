@@ -22,6 +22,7 @@ async def create_github_issue(
     difficulty: str = "medium",
     labels: Optional[list[str]] = None,
     github_org: str = "Day-in-the-Country-LLC",
+    add_to_project: bool = True,
 ) -> dict:
     """Create a GitHub issue using the Agent Issue SDK.
 
@@ -39,6 +40,7 @@ async def create_github_issue(
         difficulty: Difficulty level (easy, medium, hard)
         labels: Additional labels to add to the issue
         github_org: GitHub organization (default: Day-in-the-Country-LLC)
+        add_to_project: Whether to add the issue to the project board (default: True)
 
     Returns:
         Dict with MCP server instructions for creating the issue.
@@ -55,7 +57,8 @@ async def create_github_issue(
             },
             "post_actions": {
                 "dependencies": list[str],
-                "blocks": list[str]
+                "blocks": list[str],
+                "add_to_project": bool
             }
         }
 
@@ -96,6 +99,9 @@ async def create_github_issue(
         difficulty=difficulty,
         labels=labels,
     )
+
+    # Update post_actions to include project board flag
+    mcp_instructions["post_actions"]["add_to_project"] = add_to_project
 
     return mcp_instructions
 
