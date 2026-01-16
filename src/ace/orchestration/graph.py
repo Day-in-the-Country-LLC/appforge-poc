@@ -36,7 +36,7 @@ def _build_repo_url(owner: str, repo: str, token: str) -> str:
     return f"https://github.com/{owner}/{repo}.git"
 
 
-def _format_task_plan_comment(plan: TaskManager, tasks) -> str:
+def _format_task_plan_comment(tasks) -> str:
     lines = [
         "**Task Plan (ACE)**",
         "",
@@ -184,7 +184,7 @@ async def run_agent(state: WorkerState) -> WorkerState:
                     repo_owner,
                     repo_name,
                 )
-                comment = _format_task_plan_comment(task_manager, plan.tasks)
+                comment = _format_task_plan_comment(plan.tasks)
                 await issue_queue.post_comment(
                     state.issue.number,
                     comment,
