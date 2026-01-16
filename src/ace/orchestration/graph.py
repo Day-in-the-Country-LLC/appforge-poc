@@ -6,6 +6,8 @@ import structlog
 from langgraph.graph import StateGraph
 
 from ace.agents.model_selector import ModelSelector
+from ace.github.issue_queue import IssueQueue
+from ace.github.status_manager import StatusManager
 from ace.orchestration.state import WorkerState
 
 logger = structlog.get_logger(__name__)
@@ -20,9 +22,23 @@ async def fetch_candidates(state: WorkerState) -> WorkerState:
 
 
 async def claim_issue(state: WorkerState) -> WorkerState:
-    """Claim an issue by adding labels and posting a claim comment."""
+    """Claim an issue: set status to In Progress, keep agent label."""
     logger.info("step_claim_issue", issue=state.issue_number)
     state.current_step = "claim_issue"
+
+    if state.issue and state.branch_name:
+        try:
+            from ace.config.settings import get_settings
+
+            settings = get_settings()
+            issue_queue = IssueQueue(None, settings.github_org, "")
+            status_manager = StatusManager(issue_queue)
+
+            repo_name = state.metadata.get("repo", "unknown")
+            await status_manager.claim_issue(state.issue_number, repo_name, state.branch_name)
+        except Exception as e:
+            logger.error("claim_failed", issue=state.issue_number, error=str(e))
+
     state.last_update = datetime.now()
     return state
 
@@ -83,9 +99,26 @@ async def evaluate_result(state: WorkerState) -> WorkerState:
 
 
 async def handle_blocked(state: WorkerState) -> WorkerState:
-    """Handle blocked state: post BLOCKED comment and wait."""
+    """Handle blocked state: remove agent label, assign to user, post questions."""
     logger.info("step_handle_blocked", issue=state.issue_number)
     state.current_step = "handle_blocked"
+
+    if state.agent_result and state.agent_result.blocked_questions:
+        try:
+            from ace.config.settings import get_settings
+
+            settings = get_settings()
+            issue_queue = IssueQueue(None, settings.github_org, "")
+            status_manager = StatusManager(issue_queue)
+
+            await status_manager.mark_blocked(
+                state.issue_number,
+                state.agent_result.blocked_questions,
+                assignee="kristinday",
+            )
+        except Exception as e:
+            logger.error("mark_blocked_failed", issue=state.issue_number, error=str(e))
+
     state.last_update = datetime.now()
     return state
 
@@ -99,17 +132,43 @@ async def open_pr(state: WorkerState) -> WorkerState:
 
 
 async def post_failure(state: WorkerState) -> WorkerState:
-    """Post failure comment and label issue as failed."""
+    """Post failure comment: remove agent label, assign to user, post error."""
     logger.info("step_post_failure", issue=state.issue_number, error=state.error)
     state.current_step = "post_failure"
+
+    if state.issue_number and state.error:
+        try:
+            from ace.config.settings import get_settings
+
+            settings = get_settings()
+            issue_queue = IssueQueue(None, settings.github_org, "")
+            status_manager = StatusManager(issue_queue)
+
+            await status_manager.mark_failed(state.issue_number, state.error)
+        except Exception as e:
+            logger.error("mark_failed_failed", issue=state.issue_number, error=str(e))
+
     state.last_update = datetime.now()
     return state
 
 
 async def mark_done(state: WorkerState) -> WorkerState:
-    """Mark issue as done with PR link."""
+    """Mark issue as done: set status to Done, remove agent label, post PR link."""
     logger.info("step_mark_done", issue=state.issue_number, pr=state.pr_number)
     state.current_step = "mark_done"
+
+    if state.issue_number and state.pr_number and state.pr_url:
+        try:
+            from ace.config.settings import get_settings
+
+            settings = get_settings()
+            issue_queue = IssueQueue(None, settings.github_org, "")
+            status_manager = StatusManager(issue_queue)
+
+            await status_manager.mark_done(state.issue_number, state.pr_number, state.pr_url)
+        except Exception as e:
+            logger.error("mark_done_failed", issue=state.issue_number, error=str(e))
+
     state.last_update = datetime.now()
     return state
 
