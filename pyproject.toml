@@ -28,6 +28,7 @@ dependencies = [
     "gitpython>=3.1.40",
     "pyyaml>=6.0",
     "structlog>=24.1.0",
+    "twilio>=8.10.0",
 ]
 
 [project.optional-dependencies]

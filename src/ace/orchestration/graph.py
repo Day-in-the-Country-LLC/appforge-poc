@@ -124,9 +124,30 @@ async def handle_blocked(state: WorkerState) -> WorkerState:
 
 
 async def open_pr(state: WorkerState) -> WorkerState:
-    """Open a pull request with the changes."""
+    """Open a pull request with the changes and send SMS notification."""
     logger.info("step_open_pr", issue=state.issue_number)
     state.current_step = "open_pr"
+
+    if state.pr_number and state.pr_url and state.issue:
+        try:
+            from ace.notifications.twilio_client import TwilioNotifier
+
+            notifier = TwilioNotifier()
+
+            summary = state.agent_result.output if state.agent_result else "Work completed"
+            repo_name = state.metadata.get("repo", "unknown")
+
+            await notifier.send_pr_notification(
+                pr_number=state.pr_number,
+                pr_url=state.pr_url,
+                issue_number=state.issue_number,
+                issue_title=state.issue.title,
+                repo_name=repo_name,
+                summary=summary[:200],
+            )
+        except Exception as e:
+            logger.error("pr_notification_failed", issue=state.issue_number, error=str(e))
+
     state.last_update = datetime.now()
     return state
 

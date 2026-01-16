@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     difficulty_hard_backend: str = os.getenv("DIFFICULTY_HARD_BACKEND", "claude")
     difficulty_hard_model: str = os.getenv("DIFFICULTY_HARD_MODEL", "claude-opus-4-5")
 
+    # Twilio SMS notifications
+    twilio_enabled: bool = os.getenv("TWILIO_ENABLED", "false").lower() == "true"
+    twilio_account_sid: str = os.getenv("TWILIO_ACCOUNT_SID", "")
+    twilio_auth_token: str = os.getenv("TWILIO_AUTH_TOKEN", "")
+    twilio_messaging_service_sid: str = os.getenv("TWILIO_MESSAGING_SERVICE_SID", "")
+    twilio_to_number: str = os.getenv("TWILIO_TO_NUMBER", "")
+
     class Config:
         env_file = ".env"
         case_sensitive = False
