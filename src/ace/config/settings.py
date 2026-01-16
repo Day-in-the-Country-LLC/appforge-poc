@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # OpenAI / Codex
     openai_api_key: str = os.getenv("APPFORGE_OPENAI_API_KEY", "")
-    codex_model: str = os.getenv("CODEX_MODEL", "gpt-4o")
+    codex_model: str = os.getenv("CODEX_MODEL", "gpt-5.1-codex-mini")
 
     # Claude
     claude_api_key: str = os.getenv("CLAUDE_CODE_ADMIN_API_KEY", "")
@@ -50,7 +50,7 @@ class Settings(BaseSettings):
 
     # Difficulty-based model mapping
     difficulty_easy_backend: str = os.getenv("DIFFICULTY_EASY_BACKEND", "codex")
-    difficulty_easy_model: str = os.getenv("DIFFICULTY_EASY_MODEL", "gpt-4o")
+    difficulty_easy_model: str = os.getenv("DIFFICULTY_EASY_MODEL", "gpt-5.1-codex-mini")
     difficulty_medium_backend: str = os.getenv("DIFFICULTY_MEDIUM_BACKEND", "claude")
     difficulty_medium_model: str = os.getenv("DIFFICULTY_MEDIUM_MODEL", "claude-haiku-4-5")
     difficulty_hard_backend: str = os.getenv("DIFFICULTY_HARD_BACKEND", "claude")
