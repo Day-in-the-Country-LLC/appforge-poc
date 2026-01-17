@@ -30,14 +30,26 @@ class StatusManager:
         self.issue_queue = issue_queue
         self.settings = get_settings()
 
-    async def claim_issue(self, issue_number: int, repo: str, branch: str) -> None:
+    async def claim_issue(
+        self,
+        issue_number: int,
+        repo_owner: str | None,
+        repo_name: str | None,
+        branch: str,
+    ) -> None:
         """Claim an issue: set status to In Progress, keep agent label.
 
         Args:
             issue_number: GitHub issue number
-            repo: Repository name
+            repo_owner: Repository owner
+            repo_name: Repository name
             branch: Branch name
         """
+        if not repo_owner or not repo_name:
+            logger.warning("claim_issue_missing_repo", issue=issue_number)
+            return
+
+        repo = f"{repo_owner}/{repo_name}"
         logger.info("claiming_issue", issue=issue_number, repo=repo, branch=branch)
 
         claim_comment = f"""**Agent Claim**
@@ -48,9 +60,18 @@ class StatusManager:
 - Started: {self._get_timestamp()}
 - Heartbeat: Updates posted at major milestones
 """
-        await self.issue_queue.post_comment(issue_number, claim_comment)
+        await self.issue_queue.post_comment(
+            issue_number,
+            claim_comment,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+        )
         await self.issue_queue.set_project_status(
-            issue_number, IssueStatus.IN_PROGRESS.value, self.settings.github_project_name
+            issue_number,
+            IssueStatus.IN_PROGRESS.value,
+            self.settings.github_project_name,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
         )
         logger.info("issue_claimed", issue=issue_number)
 
@@ -59,6 +80,8 @@ class StatusManager:
         issue_number: int,
         questions: list[str],
         assignee: str = "kristinday",
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
     ) -> None:
         """Block issue: remove agent label, assign to user, post questions.
 
@@ -67,6 +90,10 @@ class StatusManager:
             questions: List of questions for the user
             assignee: GitHub username to assign to
         """
+        if not repo_owner or not repo_name:
+            logger.warning("mark_blocked_missing_repo", issue=issue_number)
+            return
+
         logger.info("marking_blocked", issue=issue_number, questions=questions)
 
         blocked_comment = "**BLOCKED - Agent Needs Input**\n\n"
@@ -76,11 +103,30 @@ class StatusManager:
             "\nPlease reply with your answers and re-add the `agent` label when ready to resume."
         )
 
-        await self.issue_queue.remove_labels(issue_number, [self.settings.github_agent_label])
-        await self.issue_queue.assign_issue(issue_number, assignee)
-        await self.issue_queue.post_comment(issue_number, blocked_comment)
+        await self.issue_queue.remove_labels(
+            issue_number,
+            [self.settings.github_agent_label],
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+        )
+        await self.issue_queue.assign_issue(
+            issue_number,
+            assignee,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+        )
+        await self.issue_queue.post_comment(
+            issue_number,
+            blocked_comment,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+        )
         await self.issue_queue.set_project_status(
-            issue_number, IssueStatus.BLOCKED.value, self.settings.github_project_name
+            issue_number,
+            IssueStatus.BLOCKED.value,
+            self.settings.github_project_name,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
         )
         logger.info("issue_blocked", issue=issue_number, assignee=assignee)
 
@@ -89,6 +135,8 @@ class StatusManager:
         issue_number: int,
         pr_number: int,
         pr_url: str,
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
     ) -> None:
         """Mark issue as done: set status to Done, remove agent label, post PR link.
 
@@ -97,6 +145,10 @@ class StatusManager:
             pr_number: Pull request number
             pr_url: Pull request URL
         """
+        if not repo_owner or not repo_name:
+            logger.warning("mark_done_missing_repo", issue=issue_number)
+            return
+
         logger.info("marking_done", issue=issue_number, pr=pr_number)
 
         done_comment = f"""**Agent Complete**
@@ -106,10 +158,24 @@ URL: {pr_url}
 
 Status: Done
 """
-        await self.issue_queue.remove_labels(issue_number, [self.settings.github_agent_label])
-        await self.issue_queue.post_comment(issue_number, done_comment)
+        await self.issue_queue.remove_labels(
+            issue_number,
+            [self.settings.github_agent_label],
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+        )
+        await self.issue_queue.post_comment(
+            issue_number,
+            done_comment,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+        )
         await self.issue_queue.set_project_status(
-            issue_number, IssueStatus.DONE.value, self.settings.github_project_name
+            issue_number,
+            IssueStatus.DONE.value,
+            self.settings.github_project_name,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
         )
         logger.info("issue_marked_done", issue=issue_number, pr=pr_number)
 
@@ -117,6 +183,8 @@ Status: Done
         self,
         issue_number: int,
         error: str,
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
     ) -> None:
         """Mark issue as failed: set status to Blocked, remove agent label, post error.
 
@@ -124,6 +192,10 @@ Status: Done
             issue_number: GitHub issue number
             error: Error message
         """
+        if not repo_owner or not repo_name:
+            logger.warning("mark_failed_missing_repo", issue=issue_number)
+            return
+
         logger.info("marking_failed", issue=issue_number, error=error)
 
         failed_comment = f"""**Agent Failed**
@@ -135,14 +207,33 @@ Error:
 
 Status: Blocked - Please review and re-add the `agent` label to retry.
 """
-        await self.issue_queue.remove_labels(issue_number, [self.settings.github_agent_label])
-        await self.issue_queue.post_comment(issue_number, failed_comment)
+        await self.issue_queue.remove_labels(
+            issue_number,
+            [self.settings.github_agent_label],
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+        )
+        await self.issue_queue.post_comment(
+            issue_number,
+            failed_comment,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+        )
         await self.issue_queue.set_project_status(
-            issue_number, IssueStatus.BLOCKED.value, self.settings.github_project_name
+            issue_number,
+            IssueStatus.BLOCKED.value,
+            self.settings.github_project_name,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
         )
         logger.info("issue_marked_failed", issue=issue_number)
 
-    async def resume_from_blocked(self, issue_number: int) -> None:
+    async def resume_from_blocked(
+        self,
+        issue_number: int,
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
+    ) -> None:
         """Resume blocked issue: add agent label, set status to In Progress.
 
         Called when user re-adds agent label and provides answer.
@@ -150,13 +241,31 @@ Status: Blocked - Please review and re-add the `agent` label to retry.
         Args:
             issue_number: GitHub issue number
         """
+        if not repo_owner or not repo_name:
+            logger.warning("resume_missing_repo", issue=issue_number)
+            return
+
         logger.info("resuming_from_blocked", issue=issue_number)
 
         resume_comment = "**Agent Resuming**\n\nContinuing with provided answers."
-        await self.issue_queue.add_labels(issue_number, [self.settings.github_agent_label])
-        await self.issue_queue.post_comment(issue_number, resume_comment)
+        await self.issue_queue.add_labels(
+            issue_number,
+            [self.settings.github_agent_label],
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+        )
+        await self.issue_queue.post_comment(
+            issue_number,
+            resume_comment,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+        )
         await self.issue_queue.set_project_status(
-            issue_number, IssueStatus.IN_PROGRESS.value, self.settings.github_project_name
+            issue_number,
+            IssueStatus.IN_PROGRESS.value,
+            self.settings.github_project_name,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
         )
         logger.info("issue_resumed", issue=issue_number)
 

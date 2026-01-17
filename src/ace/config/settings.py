@@ -23,7 +23,9 @@ class Settings(BaseSettings):
     github_local_agent_label: str = os.getenv("GITHUB_LOCAL_AGENT_LABEL", "agent:local")
     github_remote_agent_label: str = os.getenv("GITHUB_REMOTE_AGENT_LABEL", "agent:remote")
     github_base_branch: str = os.getenv("GITHUB_BASE_BRANCH", "main")
-    github_token_secret_name: str = os.getenv("GITHUB_TOKEN_SECRET_NAME", "")
+    github_token_secret_name: str = os.getenv(
+        "GITHUB_TOKEN_SECRET_NAME", "github-control-api-key"
+    )
     github_token_secret_version: str = os.getenv("GITHUB_TOKEN_SECRET_VERSION", "latest")
     github_mcp_token_env: str = os.getenv("GITHUB_MCP_TOKEN_ENV", "GITHUB_TOKEN")
     mcp_config_filename: str = os.getenv("MCP_CONFIG_FILENAME", ".mcp.json")
@@ -47,9 +49,9 @@ class Settings(BaseSettings):
     claude_model: str = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
 
     # GCP
-    gcp_project_id: str = os.getenv("GCP_PROJECT_ID", "")
-    gcp_secret_manager_enabled: bool = (
-        os.getenv("GCP_SECRET_MANAGER_ENABLED", "false").lower() == "true"
+    gcp_project_id: str = os.getenv("GCP_PROJECT_ID", "appforge-483920")
+    gcp_credentials_path: str = os.getenv(
+        "GCP_CREDENTIALS_FILE", os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
     )
 
     # Agent workspace
@@ -144,7 +146,9 @@ class Settings(BaseSettings):
         == "true"
     )
     langsmith_api_key: str = os.getenv("LANGSMITH_API_KEY", os.getenv("LANGCHAIN_API_KEY", ""))
-    langsmith_secret_name: str = os.getenv("LANGSMITH_SECRET_NAME", "")
+    langsmith_secret_name: str = os.getenv(
+        "LANGSMITH_SECRET_NAME", "LANGSMITH_ADS_OPTIMIZATION_KEY"
+    )
     langsmith_secret_version: str = os.getenv("LANGSMITH_SECRET_VERSION", "latest")
     langsmith_project: str = os.getenv(
         "LANGSMITH_PROJECT", os.getenv("LANGCHAIN_PROJECT", "ace")
