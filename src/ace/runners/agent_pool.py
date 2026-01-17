@@ -2,9 +2,11 @@
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
+from pathlib import Path
+import time
 
 import structlog
 
@@ -14,8 +16,16 @@ from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import Issue, IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client
 from ace.github.status_manager import IssueStatus
+from ace.metrics import metrics
 from ace.orchestration.graph import get_compiled_graph
 from ace.orchestration.state import WorkerState
+from ace.orchestration.task_manager import TaskManager
+from ace.workspaces.git_ops import GitOps
+from ace.workspaces.tmux_ops import (
+    TmuxOps,
+    parse_issue_from_session,
+    session_name_for_issue,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -91,6 +101,8 @@ class AgentPool:
         self._failed_count = 0
         self._processed_issues: set[int] = set()
         self._session_processed: int = 0  # Issues processed in current session
+        self._resume_completed: bool = False
+        self._last_cleanup_at: datetime | None = None
 
     @property
     def api_client(self) -> GitHubAPIClient:
@@ -229,6 +241,63 @@ class AgentPool:
             logger.error("fetch_ready_issues_failed", error=str(e))
             return []
 
+    async def fetch_in_progress_issues(self) -> list[Issue]:
+        """Fetch issues already in progress for resume sweep."""
+        try:
+            issues = await self.issue_queue.list_issues_by_project_status(
+                self.settings.github_project_name,
+                IssueStatus.IN_PROGRESS.value,
+            )
+
+            filtered = []
+            for issue in issues:
+                if issue.number in self._processed_issues:
+                    continue
+                if not self._matches_target(issue):
+                    continue
+                if self.settings.github_agent_label not in issue.labels:
+                    continue
+                filtered.append(issue)
+
+            logger.info(
+                "fetched_in_progress_issues",
+                total=len(issues),
+                filtered=len(filtered),
+            )
+            return filtered
+        except Exception as e:
+            logger.error("fetch_in_progress_issues_failed", error=str(e))
+            return []
+
+    async def resume_in_progress_issues(self) -> dict[str, Any]:
+        """Resume issues that were in progress (startup sweep)."""
+        if not self.settings.resume_in_progress_issues or self._resume_completed:
+            return {"status": "skipped", "spawned": 0}
+
+        in_progress = await self.fetch_in_progress_issues()
+        if not in_progress:
+            self._resume_completed = True
+            return {"status": "none", "spawned": 0}
+
+        spawned = 0
+        skipped = 0
+        for issue in in_progress:
+            if self.get_status().idle_slots == 0:
+                skipped += len(in_progress) - spawned - skipped
+                break
+            if await self.spawn_agent(issue):
+                spawned += 1
+            else:
+                skipped += 1
+
+        self._resume_completed = True
+        logger.info(
+            "resume_in_progress_complete",
+            spawned=spawned,
+            skipped=skipped,
+        )
+        return {"status": "resumed", "spawned": spawned, "skipped": skipped}
+
     async def _run_agent_for_issue(self, slot: AgentSlot, issue: Issue) -> None:
         """Run an agent for a specific issue.
 
@@ -240,6 +309,11 @@ class AgentPool:
         slot.issue = issue
         slot.started_at = datetime.now()
         slot.error = None
+        metrics.inc_counter(
+            "ace_agent_runs_total",
+            labels={"status": "started", "backend": "unknown"},
+        )
+        metrics.inc_gauge("ace_active_agents", 1)
 
         logger.info(
             "agent_starting",
@@ -274,10 +348,34 @@ class AgentPool:
             self._session_processed += 1
 
             # Handle both dict and WorkerState return types from graph
-            pr_number = (
-                final_state.get("pr_number")
-                if isinstance(final_state, dict)
-                else final_state.pr_number
+            agent_result = None
+            if isinstance(final_state, dict):
+                pr_number = final_state.get("pr_number")
+                backend = final_state.get("backend") or "unknown"
+                agent_result = final_state.get("agent_result")
+            else:
+                pr_number = final_state.pr_number
+                backend = final_state.backend or "unknown"
+                agent_result = final_state.agent_result
+
+            result_status = "success"
+            if agent_result:
+                if isinstance(agent_result, dict):
+                    status_value = agent_result.get("status")
+                else:
+                    status_value = agent_result.status.value
+                if status_value != "success":
+                    result_status = "failed"
+
+            duration_seconds = (slot.completed_at - slot.started_at).total_seconds()
+            metrics.observe_summary(
+                "ace_agent_duration_seconds",
+                duration_seconds,
+                labels={"backend": backend},
+            )
+            metrics.inc_counter(
+                "ace_agent_runs_total",
+                labels={"status": result_status, "backend": backend},
             )
 
             logger.info(
@@ -285,7 +383,7 @@ class AgentPool:
                 slot=slot.slot_id,
                 issue=issue.number,
                 pr_number=pr_number,
-                duration_seconds=(slot.completed_at - slot.started_at).total_seconds(),
+                duration_seconds=duration_seconds,
             )
 
         except Exception as e:
@@ -293,6 +391,16 @@ class AgentPool:
             slot.completed_at = datetime.now()
             slot.error = str(e)
             self._failed_count += 1
+            duration_seconds = (slot.completed_at - slot.started_at).total_seconds()
+            metrics.observe_summary(
+                "ace_agent_duration_seconds",
+                duration_seconds,
+                labels={"backend": "unknown"},
+            )
+            metrics.inc_counter(
+                "ace_agent_runs_total",
+                labels={"status": "failed", "backend": "unknown"},
+            )
 
             logger.error(
                 "agent_failed",
@@ -306,6 +414,7 @@ class AgentPool:
             slot.state = AgentState.IDLE
             slot.issue = None
             slot.task = None
+            metrics.dec_gauge("ace_active_agents", 1)
 
     async def spawn_agent(self, issue: Issue) -> bool:
         """Spawn an agent for an issue if a slot is available.
@@ -387,11 +496,19 @@ class AgentPool:
         self._running = True
         logger.info("agent_pool_starting", max_agents=self.max_agents, poll_interval=poll_interval)
 
+        if self.settings.resume_in_progress_issues:
+            try:
+                await self.resume_in_progress_issues()
+            except Exception as e:
+                logger.error("resume_in_progress_failed", error=str(e))
+
         while self._running:
             try:
                 await self.process_ready_issues()
             except Exception as e:
                 logger.error("pool_cycle_error", error=str(e))
+
+            await self._maybe_cleanup()
 
             # Wait before next poll
             await asyncio.sleep(poll_interval)
@@ -438,6 +555,7 @@ class AgentPool:
                     break
 
             # Wait before next check
+            await self._maybe_cleanup()
             await asyncio.sleep(check_interval)
 
         self._draining = False
@@ -455,6 +573,103 @@ class AgentPool:
         self._running = False
         self._draining = False
         logger.info("agent_pool_stop_requested")
+
+    async def _maybe_cleanup(self) -> None:
+        if not self.settings.cleanup_enabled:
+            return
+        now = datetime.utcnow()
+        if self._last_cleanup_at:
+            elapsed = (now - self._last_cleanup_at).total_seconds()
+            if elapsed < self.settings.cleanup_interval_seconds:
+                return
+        self._last_cleanup_at = now
+        await self._cleanup_stale_resources()
+
+    async def _cleanup_stale_resources(self) -> None:
+        worktrees_root = Path(self.settings.agent_workspace_root) / "worktrees"
+        if not worktrees_root.exists():
+            return
+
+        tmux = TmuxOps()
+        git_ops = GitOps(self.settings.agent_workspace_root)
+        active_issues = {
+            slot.issue.number
+            for slot in self.slots
+            if slot.state == AgentState.RUNNING and slot.issue
+        }
+        active_sessions = {
+            session_name_for_issue(slot.issue.repo_name, slot.issue.number)
+            for slot in self.slots
+            if slot.state == AgentState.RUNNING and slot.issue
+        }
+
+        retention = timedelta(hours=self.settings.cleanup_worktree_retention_hours)
+        now = datetime.utcnow()
+
+        for repo_dir in worktrees_root.iterdir():
+            if not repo_dir.is_dir():
+                continue
+            for issue_dir in repo_dir.iterdir():
+                if not issue_dir.is_dir() or not issue_dir.name.isdigit():
+                    continue
+
+                issue_number = int(issue_dir.name)
+                if issue_number in active_issues:
+                    continue
+
+                session_name = session_name_for_issue(repo_dir.name, issue_number)
+                if tmux.session_exists(session_name):
+                    continue
+
+                task_manager = TaskManager(issue_dir)
+                plan = task_manager.load_plan()
+                if self.settings.cleanup_only_done:
+                    if not plan or any(t.status != "done" for t in plan.tasks):
+                        continue
+
+                last_activity = issue_dir.stat().st_mtime
+                tasks_path = issue_dir / "ace_tasks.json"
+                if tasks_path.exists():
+                    last_activity = max(last_activity, tasks_path.stat().st_mtime)
+
+                age = now - datetime.utcfromtimestamp(last_activity)
+                if age < retention:
+                    continue
+
+                logger.info(
+                    "cleanup_worktree",
+                    repo=repo_dir.name,
+                    issue=issue_number,
+                    age_hours=round(age.total_seconds() / 3600, 2),
+                )
+                await git_ops.cleanup_worktree(issue_dir)
+
+        if not self.settings.cleanup_tmux_enabled:
+            return
+
+        tmux_retention_seconds = self.settings.cleanup_tmux_retention_hours * 3600
+        now_ts = time.time()
+        for session_name, activity_epoch in tmux.list_sessions():
+            if session_name in active_sessions:
+                continue
+            if now_ts - activity_epoch < tmux_retention_seconds:
+                continue
+
+            parsed = parse_issue_from_session(session_name)
+            if parsed:
+                repo_slug, issue_number = parsed
+                worktree_path = worktrees_root / repo_slug / str(issue_number)
+                if worktree_path.exists():
+                    task_manager = TaskManager(worktree_path)
+                    plan = task_manager.load_plan()
+                    if plan and any(t.status != "done" for t in plan.tasks):
+                        continue
+
+            logger.info(
+                "cleanup_tmux_session",
+                session=session_name,
+            )
+            tmux.kill_session(session_name)
 
     async def wait_for_completion(self, timeout: float | None = None) -> None:
         """Wait for all active agents to complete.

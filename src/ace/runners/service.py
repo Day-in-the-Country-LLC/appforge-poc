@@ -6,10 +6,12 @@ from typing import Any
 
 import structlog
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from ace.config.logging import configure_logging
 from ace.config.settings import get_settings
+from ace.metrics import metrics
 from ace.runners.agent_pool import AgentTarget, get_pool
 from ace.runners.scheduler import get_scheduler
 
@@ -45,6 +47,12 @@ async def startup_event():
 async def health_check() -> HealthResponse:
     """Health check endpoint."""
     return HealthResponse(status="healthy", version="0.1.0")
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics_endpoint() -> PlainTextResponse:
+    """Prometheus metrics endpoint."""
+    return PlainTextResponse(metrics.render_prometheus(), media_type="text/plain")
 
 
 @app.post("/webhook/github")

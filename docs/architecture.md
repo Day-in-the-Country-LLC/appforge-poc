@@ -62,6 +62,8 @@ mark_done
 In CLI/tmux mode, `run_agent` coordinates sequential tasks inside a single worktree.
 Each task writes `ACE_TASK.md` for the coding CLI and completes by dropping
 `ACE_TASK_DONE.json`. When all tasks are complete, the manager opens the PR.
+While waiting, the manager monitors git activity and sends tmux nudges to
+idle sessions. After repeated nudges it will restart the session or fail the task.
 
 ### 4. Service Layer (`src/ace/runners/`)
 

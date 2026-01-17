@@ -29,6 +29,7 @@ dependencies = [
     "pyyaml>=6.0",
     "structlog>=24.1.0",
     "twilio>=8.10.0",
+    "langsmith>=0.1.147",
 ]
 
 [project.optional-dependencies]
