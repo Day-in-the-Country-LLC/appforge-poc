@@ -174,8 +174,14 @@ async def claim_issue(state: WorkerState) -> WorkerState:
             issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
             status_manager = StatusManager(issue_queue)
 
-            repo_name = state.metadata.get("repo", "unknown")
-            await status_manager.claim_issue(state.issue_number, repo_name, state.branch_name)
+            repo_owner = state.metadata.get("repo_owner") or state.issue.repo_owner
+            repo_name = state.metadata.get("repo_name") or state.issue.repo_name
+            await status_manager.claim_issue(
+                state.issue_number,
+                repo_owner,
+                repo_name,
+                state.branch_name,
+            )
         except Exception as e:
             logger.error("claim_failed", issue=state.issue_number, error=str(e))
 
@@ -586,8 +592,6 @@ async def run_agent(state: WorkerState) -> WorkerState:
 
     except Exception as e:
         logger.error("agent_execution_failed", issue=state.issue_number, error=str(e))
-        from ace.agents.base import AgentResult, AgentStatus
-
         state.agent_result = AgentResult(
             status=AgentStatus.FAILED,
             output="",
@@ -626,10 +630,14 @@ async def handle_blocked(state: WorkerState) -> WorkerState:
             issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
             status_manager = StatusManager(issue_queue)
 
+            repo_owner = state.metadata.get("repo_owner") or state.issue.repo_owner
+            repo_name = state.metadata.get("repo_name") or state.issue.repo_name
             await status_manager.mark_blocked(
                 state.issue_number,
                 state.agent_result.blocked_questions,
                 assignee="kristinday",
+                repo_owner=repo_owner,
+                repo_name=repo_name,
             )
         except Exception as e:
             logger.error("mark_blocked_failed", issue=state.issue_number, error=str(e))
@@ -682,7 +690,14 @@ async def post_failure(state: WorkerState) -> WorkerState:
             issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
             status_manager = StatusManager(issue_queue)
 
-            await status_manager.mark_failed(state.issue_number, state.error)
+            repo_owner = state.metadata.get("repo_owner") or state.issue.repo_owner
+            repo_name = state.metadata.get("repo_name") or state.issue.repo_name
+            await status_manager.mark_failed(
+                state.issue_number,
+                state.error,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+            )
         except Exception as e:
             logger.error("mark_failed_failed", issue=state.issue_number, error=str(e))
 
@@ -705,7 +720,15 @@ async def mark_done(state: WorkerState) -> WorkerState:
             issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
             status_manager = StatusManager(issue_queue)
 
-            await status_manager.mark_done(state.issue_number, state.pr_number, state.pr_url)
+            repo_owner = state.metadata.get("repo_owner") or state.issue.repo_owner
+            repo_name = state.metadata.get("repo_name") or state.issue.repo_name
+            await status_manager.mark_done(
+                state.issue_number,
+                state.pr_number,
+                state.pr_url,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+            )
         except Exception as e:
             logger.error("mark_done_failed", issue=state.issue_number, error=str(e))
 

@@ -52,8 +52,8 @@ LANGSMITH_LOG_RESPONSES=true
 APPFORGE_OPENAI_API_KEY=sk-...
 CLAUDE_CODE_ADMIN_API_KEY=sk-...
 
-GCP_PROJECT_ID=your-gcp-project
-GCP_SECRET_MANAGER_ENABLED=false
+GCP_PROJECT_ID=appforge-483920
+GCP_CREDENTIALS_FILE=appforge-creds.json
 
 AGENT_WORKSPACE_ROOT=/tmp/agent-hq
 AGENT_ID=ace-dev
@@ -139,6 +139,20 @@ python -m ace.runners.worker 123
 ```
 
 Where `123` is the GitHub issue number.
+
+### Run the Issue Harness (End-to-End)
+
+```bash
+python scripts/run_issue_harness.py --owner <org> --repo <repo> --issue <number>
+```
+
+This will hit GitHub APIs, create comments, and open a PR when tasks complete.
+
+Auto-select the first unblocked issue from the configured project:
+
+```bash
+python scripts/run_issue_harness.py --auto --target remote
+```
 
 ## Development Workflow
 
