@@ -1,7 +1,9 @@
 """LangGraph orchestration graph definition."""
 
+import asyncio
 from datetime import datetime
 import re
+from typing import Any
 from urllib.parse import quote
 
 import structlog
@@ -15,9 +17,15 @@ from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client
 from ace.github.status_manager import StatusManager
+from ace.metrics import metrics
 from ace.orchestration.state import WorkerState
 from ace.workspaces.git_ops import GitOps
-from ace.orchestration.task_manager import InstructionBuilder, TaskManager
+from ace.workspaces.tmux_ops import TmuxOps
+from ace.orchestration.task_manager import (
+    InstructionBuilder,
+    TaskManager,
+    TaskValidationError,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -48,7 +56,8 @@ def _format_task_plan_comment(tasks) -> str:
         "Sequential tasks for this issue:",
     ]
     for task in tasks:
-        lines.append(f"- [ ] {task.task_id}: {task.title}")
+        checkbox = "x" if task.status == "done" else " "
+        lines.append(f"- [{checkbox}] {task.task_id}: {task.title}")
         if task.description:
             lines.append(f"  - {task.description}")
         if task.acceptance_criteria:
@@ -57,6 +66,89 @@ def _format_task_plan_comment(tasks) -> str:
     lines.append("")
     lines.append("Progress will be posted as tasks complete.")
     return "\n".join(lines)
+
+
+async def _wait_for_done_marker_with_nudges(
+    task_manager: TaskManager,
+    session_name: str | None,
+    task_id: str,
+    task_title: str,
+    settings,
+    poll_interval_seconds: int,
+    timeout_seconds: int | None,
+) -> tuple[str, dict[str, Any] | None]:
+    loop = asyncio.get_event_loop()
+    start_time = loop.time()
+    last_progress_time = start_time
+    last_nudge_time = 0.0
+    nudge_count = 0
+    last_signature = task_manager.progress_signature()
+    tmux = TmuxOps()
+
+    while True:
+        marker = task_manager.read_done_marker()
+        if marker:
+            return "done", marker
+
+        signature = task_manager.progress_signature()
+        if signature and signature != last_signature:
+            last_signature = signature
+            last_progress_time = loop.time()
+            nudge_count = 0
+
+        now = loop.time()
+        if (
+            session_name
+            and settings.task_nudge_enabled
+            and settings.task_nudge_after_seconds > 0
+            and now - last_progress_time >= settings.task_nudge_after_seconds
+        ):
+            if (
+                settings.task_nudge_max_attempts > 0
+                and nudge_count >= settings.task_nudge_max_attempts
+            ):
+                return "nudge_exceeded", None
+
+            if (
+                last_nudge_time == 0.0
+                or now - last_nudge_time >= settings.task_nudge_interval_seconds
+            ):
+                if not tmux.session_exists(session_name):
+                    logger.warning("tmux_session_missing", session=session_name)
+                    return "nudge_exceeded", None
+
+                message = settings.task_nudge_message
+                try:
+                    message = message.format(task_id=task_id, task_title=task_title)
+                except Exception as e:
+                    logger.warning("task_nudge_message_format_failed", error=str(e))
+
+                try:
+                    tmux.nudge_session(session_name, message)
+                    logger.info(
+                        "task_nudge_sent",
+                        session=session_name,
+                        task_id=task_id,
+                        nudge_count=nudge_count + 1,
+                    )
+                    metrics.inc_counter("ace_task_nudges_total")
+                except Exception as e:
+                    logger.warning(
+                        "task_nudge_failed",
+                        session=session_name,
+                        task_id=task_id,
+                        error=str(e),
+                    )
+
+                nudge_count += 1
+                last_nudge_time = now
+
+        if timeout_seconds is not None and timeout_seconds > 0:
+            elapsed = now - start_time
+            if elapsed >= timeout_seconds:
+                return "timeout", None
+
+        await asyncio.sleep(poll_interval_seconds)
 
 
 async def fetch_candidates(state: WorkerState) -> WorkerState:
@@ -190,149 +282,307 @@ async def run_agent(state: WorkerState) -> WorkerState:
                     repo_name,
                 )
                 comment = _format_task_plan_comment(plan.tasks)
-                await issue_queue.post_comment(
+                posted = await issue_queue.post_comment(
                     state.issue.number,
                     comment,
                     repo_owner=repo_owner,
                     repo_name=repo_name,
                 )
+                plan.plan_comment_id = posted.get("id")
+                task_manager.save_plan(plan)
             except Exception as e:
                 logger.warning("task_plan_comment_failed", error=str(e))
-        completed_task = task_manager.apply_done_marker(plan)
-        if completed_task:
+        auto_advance = (
+            settings.task_auto_advance
+            and settings.agent_execution_mode.lower() in {"tmux", "cli"}
+        )
+
+        while True:
             try:
-                api_client = GitHubAPIClient(github_token)
-                issue_queue = IssueQueue(
-                    api_client,
-                    repo_owner,
-                    repo_name,
+                completed_task = task_manager.apply_done_marker(plan, branch_name)
+            except TaskValidationError as e:
+                metrics.inc_counter("ace_task_validation_failed_total")
+                should_comment = (
+                    plan.last_validation_task_id != e.task_id
+                    or plan.last_validation_error != str(e)
                 )
-                summary = ""
-                if completed_task.completion:
-                    summary = completed_task.completion.get("summary", "")
-                comment = (
-                    f"**Task Complete**\n\n"
-                    f"- Task: {completed_task.task_id} - {completed_task.title}\n"
-                )
-                if summary:
-                    comment += f"- Summary: {summary}\n"
-                await issue_queue.post_comment(
-                    state.issue.number,
-                    comment,
-                    repo_owner=repo_owner,
-                    repo_name=repo_name,
-                )
-            except Exception as e:
-                logger.warning("task_completion_comment_failed", error=str(e))
-        current_task = task_manager.current_task(plan)
-        if not current_task:
-            if plan.pr_url:
-                state.pr_number = plan.pr_number
-                state.pr_url = plan.pr_url
+                if should_comment:
+                    try:
+                        api_client = GitHubAPIClient(github_token)
+                        issue_queue = IssueQueue(
+                            api_client,
+                            repo_owner,
+                            repo_name,
+                        )
+                        comment = (
+                            "**Task Validation Failed**\n\n"
+                            f"- Task: {e.task_id} - {e.task_title}\n"
+                            f"- Error: {str(e)}\n"
+                            "Fix the issue, push the branch, and rewrite `ACE_TASK_DONE.json`."
+                        )
+                        await issue_queue.post_comment(
+                            state.issue.number,
+                            comment,
+                            repo_owner=repo_owner,
+                            repo_name=repo_name,
+                        )
+                    except Exception as comment_error:
+                        logger.warning(
+                            "task_validation_comment_failed",
+                            error=str(comment_error),
+                        )
+
+                    plan.last_validation_task_id = e.task_id
+                    plan.last_validation_error = str(e)
+                    task_manager.save_plan(plan)
+
                 state.agent_result = AgentResult(
                     status=AgentStatus.SUCCESS,
-                    output=f"All tasks complete. PR already created: {plan.pr_url}",
+                    output="Task validation failed; awaiting correction.",
                     files_changed=[],
                     commands_run=[],
                 )
                 state.last_update = datetime.now()
                 return state
 
-            try:
-                api_client = GitHubAPIClient(github_token)
-                issue_queue = IssueQueue(
-                    api_client,
-                    repo_owner,
-                    repo_name,
-                )
-                pr_title = f"Agent: {state.issue.title}"
-                task_lines = "\n".join(
-                    f"- {t.title}" for t in plan.tasks
-                ) or "- N/A"
-                pr_body = (
-                    f"Closes #{state.issue.number}\n\n"
-                    "Tasks completed:\n"
-                    f"{task_lines}\n"
-                )
-                head = f"{repo_owner}:{branch_name}"
-                pr = await issue_queue.create_pull_request(
-                    title=pr_title,
-                    body=pr_body,
-                    head=head,
-                    base=settings.github_base_branch,
-                    repo_owner=repo_owner,
-                    repo_name=repo_name,
-                )
-                state.pr_number = pr.get("number")
-                state.pr_url = pr.get("html_url")
-                plan.pr_number = state.pr_number
-                plan.pr_url = state.pr_url
-                task_manager.save_plan(plan)
-                output = f"All tasks complete. PR created: {state.pr_url}"
-                status = AgentStatus.SUCCESS
-                error = None
-            except Exception as e:
-                output = "All tasks complete, but PR creation failed."
-                status = AgentStatus.FAILED
-                error = str(e)
+            if completed_task:
+                metrics.task_completed(state.issue_number, completed_task.task_id)
+                try:
+                    api_client = GitHubAPIClient(github_token)
+                    issue_queue = IssueQueue(
+                        api_client,
+                        repo_owner,
+                        repo_name,
+                    )
+                    summary = ""
+                    if completed_task.completion:
+                        summary = completed_task.completion.get("summary", "")
+                    comment = (
+                        f"**Task Complete**\n\n"
+                        f"- Task: {completed_task.task_id} - {completed_task.title}\n"
+                    )
+                    if summary:
+                        comment += f"- Summary: {summary}\n"
+                    await issue_queue.post_comment(
+                        state.issue.number,
+                        comment,
+                        repo_owner=repo_owner,
+                        repo_name=repo_name,
+                    )
 
-            state.agent_result = AgentResult(
-                status=status,
-                output=output,
-                files_changed=[],
-                commands_run=[],
-                error=error,
+                    if plan.plan_comment_id:
+                        updated_plan = _format_task_plan_comment(plan.tasks)
+                        await issue_queue.update_comment(
+                            plan.plan_comment_id,
+                            updated_plan,
+                            repo_owner=repo_owner,
+                            repo_name=repo_name,
+                        )
+                    else:
+                        updated_plan = _format_task_plan_comment(plan.tasks)
+                        posted = await issue_queue.post_comment(
+                            state.issue.number,
+                            updated_plan,
+                            repo_owner=repo_owner,
+                            repo_name=repo_name,
+                        )
+                        plan.plan_comment_id = posted.get("id")
+                        task_manager.save_plan(plan)
+                except Exception as e:
+                    logger.warning("task_completion_comment_failed", error=str(e))
+
+            current_task = task_manager.current_task(plan)
+            if not current_task:
+                if plan.pr_url:
+                    state.pr_number = plan.pr_number
+                    state.pr_url = plan.pr_url
+                    state.agent_result = AgentResult(
+                        status=AgentStatus.SUCCESS,
+                        output=f"All tasks complete. PR already created: {plan.pr_url}",
+                        files_changed=[],
+                        commands_run=[],
+                    )
+                    state.last_update = datetime.now()
+                    return state
+
+                try:
+                    api_client = GitHubAPIClient(github_token)
+                    issue_queue = IssueQueue(
+                        api_client,
+                        repo_owner,
+                        repo_name,
+                    )
+                    pr_title = f"Agent: {state.issue.title}"
+                    task_lines = "\n".join(
+                        f"- {t.title}" for t in plan.tasks
+                    ) or "- N/A"
+                    pr_body = (
+                        f"Closes #{state.issue.number}\n\n"
+                        "Tasks completed:\n"
+                        f"{task_lines}\n"
+                    )
+                    head = f"{repo_owner}:{branch_name}"
+                    pr = await issue_queue.create_pull_request(
+                        title=pr_title,
+                        body=pr_body,
+                        head=head,
+                        base=settings.github_base_branch,
+                        repo_owner=repo_owner,
+                        repo_name=repo_name,
+                    )
+                    state.pr_number = pr.get("number")
+                    state.pr_url = pr.get("html_url")
+                    plan.pr_number = state.pr_number
+                    plan.pr_url = state.pr_url
+                    task_manager.save_plan(plan)
+                    output = f"All tasks complete. PR created: {state.pr_url}"
+                    status = AgentStatus.SUCCESS
+                    error = None
+                except Exception as e:
+                    output = "All tasks complete, but PR creation failed."
+                    status = AgentStatus.FAILED
+                    error = str(e)
+
+                state.agent_result = AgentResult(
+                    status=status,
+                    output=output,
+                    files_changed=[],
+                    commands_run=[],
+                    error=error,
+                )
+                state.last_update = datetime.now()
+                return state
+
+            if current_task.status != "in_progress":
+                task_manager.mark_in_progress(plan, current_task.task_id)
+            metrics.task_started(state.issue_number, current_task.task_id)
+
+            context["task_id"] = current_task.task_id
+            context["task_title"] = current_task.title
+
+            instruction_builder = InstructionBuilder(
+                backend=state.backend,
+                model=state.metadata.get("model"),
             )
-            state.last_update = datetime.now()
-            return state
+            instructions = await instruction_builder.build(state.issue, current_task)
+            task_manager.write_instructions(
+                state.issue,
+                current_task,
+                instructions,
+                branch_name,
+            )
 
-        task_manager.mark_in_progress(plan, current_task.task_id)
-        context["task_id"] = current_task.task_id
-        context["task_title"] = current_task.title
+            if settings.agent_execution_mode.lower() not in {"tmux", "cli"}:
+                task = instructions
 
-        instruction_builder = InstructionBuilder(
-            backend=state.backend,
-            model=state.metadata.get("model"),
-        )
-        instructions = await instruction_builder.build(state.issue, current_task)
-        task_manager.write_instructions(state.issue, current_task, instructions, branch_name)
-
-        if settings.agent_execution_mode.lower() not in {"tmux", "cli"}:
-            task = instructions
-
-        # Select and run the appropriate agent
-        if settings.agent_execution_mode.lower() in {"tmux", "cli"}:
-            from ace.agents.cli_agent import CliAgent
-
-            model = state.metadata.get("model")
-            agent = CliAgent(backend=state.backend, model=model)
-        else:
-            if state.backend == "claude":
-                from ace.agents.claude_agent import ClaudeAgent
+            # Select and run the appropriate agent
+            if settings.agent_execution_mode.lower() in {"tmux", "cli"}:
+                from ace.agents.cli_agent import CliAgent
 
                 model = state.metadata.get("model")
-                agent = ClaudeAgent(model=model)
+                agent = CliAgent(backend=state.backend, model=model)
             else:
-                from ace.agents.codex_agent import CodexAgent
+                if state.backend == "claude":
+                    from ace.agents.claude_agent import ClaudeAgent
 
-                agent = CodexAgent()
+                    model = state.metadata.get("model")
+                    agent = ClaudeAgent(model=model)
+                else:
+                    from ace.agents.codex_agent import CodexAgent
 
-        logger.info(
-            "executing_agent",
-            issue=state.issue_number,
-            backend=state.backend,
-            model=state.metadata.get("model"),
-        )
+                    agent = CodexAgent()
 
-        result = await agent.run(task, context, workspace_path)
-        state.agent_result = result
+            logger.info(
+                "executing_agent",
+                issue=state.issue_number,
+                backend=state.backend,
+                model=state.metadata.get("model"),
+            )
 
-        logger.info(
-            "agent_execution_complete",
-            issue=state.issue_number,
-            status=result.status.value,
-            output_length=len(result.output),
-        )
+            restart_attempts = 0
+            tmux = TmuxOps()
+            while True:
+                result = await agent.run(task, context, workspace_path)
+                state.agent_result = result
+
+                logger.info(
+                    "agent_execution_complete",
+                    issue=state.issue_number,
+                    status=result.status.value,
+                    output_length=len(result.output),
+                )
+
+                if not auto_advance or result.status != AgentStatus.SUCCESS:
+                    break
+
+                session_name = None
+                if result.metadata and isinstance(result.metadata, dict):
+                    session_name = result.metadata.get("session_name")
+
+                timeout_seconds = (
+                    settings.task_wait_timeout_seconds
+                    if settings.task_wait_timeout_seconds > 0
+                    else None
+                )
+
+                if session_name:
+                    wait_status, marker = await _wait_for_done_marker_with_nudges(
+                        task_manager,
+                        session_name,
+                        current_task.task_id,
+                        current_task.title,
+                        settings,
+                        settings.task_poll_interval_seconds,
+                        timeout_seconds,
+                    )
+                else:
+                    marker = await task_manager.wait_for_done_marker(
+                        settings.task_poll_interval_seconds,
+                        timeout_seconds,
+                    )
+                    wait_status = "done" if marker else "timeout"
+
+                if wait_status == "done":
+                    break
+
+                if wait_status == "nudge_exceeded":
+                    metrics.inc_counter("ace_task_nudge_exceeded_total")
+                    if restart_attempts < settings.task_nudge_max_restarts and session_name:
+                        tmux.kill_session(session_name)
+                        restart_attempts += 1
+                        metrics.inc_counter("ace_task_restarts_total")
+                        logger.info(
+                            "task_nudge_restart",
+                            issue=state.issue_number,
+                            task_id=current_task.task_id,
+                            attempt=restart_attempts,
+                        )
+                        continue
+                    state.agent_result = AgentResult(
+                        status=AgentStatus.FAILED,
+                        output="Nudge limit reached without progress.",
+                        files_changed=[],
+                        commands_run=[],
+                        error="task_nudge_exceeded",
+                    )
+                    break
+
+                if wait_status == "timeout":
+                    metrics.inc_counter("ace_task_wait_timeout_total")
+                    state.agent_result = AgentResult(
+                        status=AgentStatus.FAILED,
+                        output="Timed out waiting for ACE_TASK_DONE.json.",
+                        files_changed=[],
+                        commands_run=[],
+                        error="task_wait_timeout",
+                    )
+                    break
+
+            if not auto_advance:
+                break
+
+            if state.agent_result.status != AgentStatus.SUCCESS:
+                break
 
     except Exception as e:
         logger.error("agent_execution_failed", issue=state.issue_number, error=str(e))
@@ -354,6 +604,9 @@ async def evaluate_result(state: WorkerState) -> WorkerState:
     """Evaluate agent result and route to next step."""
     logger.info("step_evaluate_result", issue=state.issue_number)
     state.current_step = "evaluate_result"
+    if state.agent_result and state.agent_result.status != AgentStatus.SUCCESS:
+        if not state.error:
+            state.error = state.agent_result.error or state.agent_result.output or "agent_failed"
     state.last_update = datetime.now()
     return state
 

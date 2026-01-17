@@ -187,6 +187,34 @@ class IssueQueue:
         logger.info("comment_posted", issue=issue_number)
         return result
 
+    async def update_comment(
+        self,
+        comment_id: int,
+        body: str,
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Update an existing issue comment.
+
+        Args:
+            comment_id: Comment ID to update
+            body: New comment body
+            repo_owner: Repository owner (defaults to self.owner)
+            repo_name: Repository name (defaults to self.repo)
+
+        Returns:
+            Updated comment data
+        """
+        owner = repo_owner or self.owner
+        repo = repo_name or self.repo
+        logger.info("updating_comment", comment_id=comment_id)
+        result = await self.api_client.rest_patch(
+            f"/repos/{owner}/{repo}/issues/comments/{comment_id}",
+            json={"body": body},
+        )
+        logger.info("comment_updated", comment_id=comment_id)
+        return result
+
     async def add_labels(
         self,
         issue_number: int,

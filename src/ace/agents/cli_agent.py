@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import shlex
 from pathlib import Path
 from typing import Any
@@ -11,7 +10,7 @@ import structlog
 
 from ace.config.settings import get_settings
 from ace.config.secrets import resolve_github_token
-from ace.workspaces.tmux_ops import TmuxOps
+from ace.workspaces.tmux_ops import TmuxOps, session_name_for_issue
 
 from .base import AgentResult, AgentStatus, BaseAgent
 from .mcp_config import ensure_mcp_config
@@ -154,9 +153,7 @@ class CliAgent(BaseAgent):
     def _session_name(self, context: dict[str, Any]) -> str:
         repo = context.get("repo_name", "repo")
         issue = context.get("issue_number", "issue")
-        raw = f"ace-{repo}-{issue}"
-        slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", raw).strip("-")
-        return slug[:60] if len(slug) > 60 else slug
+        return session_name_for_issue(str(repo), issue)
 
     def _condense_prompt(self, prompt: str) -> str:
         return " ".join(prompt.split())

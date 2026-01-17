@@ -68,6 +68,56 @@ class Settings(BaseSettings):
     # Polling
     polling_interval_seconds: int = int(os.getenv("POLLING_INTERVAL_SECONDS", "60"))
 
+    # Task auto-advance (sequential tasks)
+    task_auto_advance: bool = (
+        os.getenv("TASK_AUTO_ADVANCE", "true").lower() == "true"
+    )
+    task_poll_interval_seconds: int = int(
+        os.getenv("TASK_POLL_INTERVAL_SECONDS", "30")
+    )
+    task_wait_timeout_seconds: int = int(
+        os.getenv("TASK_WAIT_TIMEOUT_SECONDS", "0")
+    )
+    task_nudge_enabled: bool = (
+        os.getenv("TASK_NUDGE_ENABLED", "true").lower() == "true"
+    )
+    task_nudge_after_seconds: int = int(
+        os.getenv("TASK_NUDGE_AFTER_SECONDS", "900")
+    )
+    task_nudge_interval_seconds: int = int(
+        os.getenv("TASK_NUDGE_INTERVAL_SECONDS", "300")
+    )
+    task_nudge_max_attempts: int = int(
+        os.getenv("TASK_NUDGE_MAX_ATTEMPTS", "3")
+    )
+    task_nudge_max_restarts: int = int(
+        os.getenv("TASK_NUDGE_MAX_RESTARTS", "1")
+    )
+    task_nudge_message: str = os.getenv(
+        "TASK_NUDGE_MESSAGE",
+        "HEALTH_CHECK: please continue work on {task_id} ({task_title}). "
+        "If blocked, post a BLOCKED comment and exit.",
+    )
+    cleanup_enabled: bool = os.getenv("CLEANUP_ENABLED", "true").lower() == "true"
+    cleanup_interval_seconds: int = int(
+        os.getenv("CLEANUP_INTERVAL_SECONDS", "1800")
+    )
+    cleanup_worktree_retention_hours: int = int(
+        os.getenv("CLEANUP_WORKTREE_RETENTION_HOURS", "72")
+    )
+    cleanup_tmux_retention_hours: int = int(
+        os.getenv("CLEANUP_TMUX_RETENTION_HOURS", "12")
+    )
+    cleanup_only_done: bool = os.getenv("CLEANUP_ONLY_DONE", "true").lower() == "true"
+    cleanup_tmux_enabled: bool = (
+        os.getenv("CLEANUP_TMUX_ENABLED", "true").lower() == "true"
+    )
+
+    # Resume sweep
+    resume_in_progress_issues: bool = (
+        os.getenv("RESUME_IN_PROGRESS_ISSUES", "true").lower() == "true"
+    )
+
     # Difficulty-based model mapping
     difficulty_easy_backend: str = os.getenv("DIFFICULTY_EASY_BACKEND", "codex")
     difficulty_easy_model: str = os.getenv("DIFFICULTY_EASY_MODEL", "gpt-5.1-codex-mini")
@@ -78,6 +128,35 @@ class Settings(BaseSettings):
 
     # Blocked handling
     blocked_assignee: str = os.getenv("BLOCKED_ASSIGNEE", "kristinday")
+
+    # GitHub API retry/backoff
+    github_api_max_retries: int = int(os.getenv("GITHUB_API_MAX_RETRIES", "5"))
+    github_api_retry_base_seconds: float = float(
+        os.getenv("GITHUB_API_RETRY_BASE_SECONDS", "1.0")
+    )
+    github_api_retry_max_seconds: float = float(
+        os.getenv("GITHUB_API_RETRY_MAX_SECONDS", "30.0")
+    )
+
+    # LangSmith tracing
+    langsmith_enabled: bool = (
+        os.getenv("LANGSMITH_ENABLED", os.getenv("LANGCHAIN_TRACING_V2", "false")).lower()
+        == "true"
+    )
+    langsmith_api_key: str = os.getenv("LANGSMITH_API_KEY", os.getenv("LANGCHAIN_API_KEY", ""))
+    langsmith_project: str = os.getenv(
+        "LANGSMITH_PROJECT", os.getenv("LANGCHAIN_PROJECT", "ace")
+    )
+    langsmith_endpoint: str = os.getenv(
+        "LANGSMITH_ENDPOINT",
+        os.getenv("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com"),
+    )
+    langsmith_log_prompts: bool = (
+        os.getenv("LANGSMITH_LOG_PROMPTS", "true").lower() == "true"
+    )
+    langsmith_log_responses: bool = (
+        os.getenv("LANGSMITH_LOG_RESPONSES", "true").lower() == "true"
+    )
 
     # Twilio SMS notifications
     twilio_enabled: bool = os.getenv("TWILIO_ENABLED", "false").lower() == "true"
