@@ -144,6 +144,8 @@ class Settings(BaseSettings):
         == "true"
     )
     langsmith_api_key: str = os.getenv("LANGSMITH_API_KEY", os.getenv("LANGCHAIN_API_KEY", ""))
+    langsmith_secret_name: str = os.getenv("LANGSMITH_SECRET_NAME", "")
+    langsmith_secret_version: str = os.getenv("LANGSMITH_SECRET_VERSION", "latest")
     langsmith_project: str = os.getenv(
         "LANGSMITH_PROJECT", os.getenv("LANGCHAIN_PROJECT", "ace")
     )
