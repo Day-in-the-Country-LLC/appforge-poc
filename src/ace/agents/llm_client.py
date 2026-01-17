@@ -20,10 +20,12 @@ class _LangSmithTracer:
 
         try:
             from ace.config.settings import get_settings
+            from ace.config.secrets import resolve_langsmith_api_key
 
             settings = get_settings()
-            self._enabled = bool(settings.langsmith_enabled and settings.langsmith_api_key)
-            self._api_key = settings.langsmith_api_key
+            api_key = resolve_langsmith_api_key(settings)
+            self._enabled = bool(settings.langsmith_enabled and api_key)
+            self._api_key = api_key
             self._project = settings.langsmith_project
             self._endpoint = settings.langsmith_endpoint
             self._log_prompts = settings.langsmith_log_prompts

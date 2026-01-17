@@ -34,3 +34,17 @@ def resolve_github_token(settings: Settings) -> str:
         except Exception as e:
             logger.warning("github_token_secret_failed", error=str(e))
     return settings.github_token
+
+
+def resolve_langsmith_api_key(settings: Settings) -> str:
+    """Resolve the LangSmith API key, preferring Secret Manager when enabled."""
+    if settings.gcp_secret_manager_enabled and settings.langsmith_secret_name:
+        try:
+            return load_secret(
+                settings.gcp_project_id,
+                settings.langsmith_secret_name,
+                settings.langsmith_secret_version,
+            )
+        except Exception as e:
+            logger.warning("langsmith_secret_failed", error=str(e))
+    return settings.langsmith_api_key
