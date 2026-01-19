@@ -160,22 +160,29 @@ class TmuxOps:
         )
 
     def send_prompt(self, session_name: str, prompt: str, delay_seconds: float = 1.0) -> None:
-        """Send a prompt to an existing session."""
+        """Send a prompt to an existing session (chunked) and hit Enter twice."""
         if not prompt:
             return
 
         if delay_seconds > 0:
             time.sleep(delay_seconds)
 
-        subprocess.run(
-            ["tmux", "send-keys", "-t", session_name, "-l", prompt],
-            check=True,
-            capture_output=True,
-            timeout=5,
-        )
-        subprocess.run(
-            ["tmux", "send-keys", "-t", session_name, "Enter"],
-            check=True,
-            capture_output=True,
-            timeout=5,
-        )
+        chunk_size = 500
+        for offset in range(0, len(prompt), chunk_size):
+            chunk = prompt[offset : offset + chunk_size]
+            subprocess.run(
+                ["tmux", "send-keys", "-t", session_name, "-l", chunk],
+                check=True,
+                capture_output=True,
+                timeout=5,
+            )
+
+        # Enter twice to ensure the line is executed even if the CLI is waiting.
+        for _ in range(2):
+            subprocess.run(
+                ["tmux", "send-keys", "-t", session_name, "Enter"],
+                check=True,
+                capture_output=True,
+                timeout=5,
+            )
+            time.sleep(0.1)

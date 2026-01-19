@@ -9,7 +9,7 @@ from typing import Any
 import structlog
 
 from ace.config.settings import get_settings
-from ace.config.secrets import resolve_github_token
+from ace.config.secrets import resolve_github_token, resolve_openai_api_key, resolve_claude_api_key
 from ace.workspaces.tmux_ops import TmuxOps, session_name_for_issue
 
 from .base import AgentResult, AgentStatus, BaseAgent
@@ -52,22 +52,63 @@ class CliAgent(BaseAgent):
             )
 
         try:
-            command, command_display, template_has_prompt = self._build_command(prompt)
+            system_prompt = self._load_system_prompt()
+            prompt_for_cli = prompt
+            if system_prompt and self.backend == "codex":
+                prompt_for_cli = f"{system_prompt}\n\n{prompt}"
+
+            command, command_display, template_has_prompt = self._build_command(
+                prompt_for_cli,
+                system_prompt=system_prompt,
+            )
+            # Always send the prompt after starting codex; ignore template prompt embedding.
+            template_has_prompt = False
             session_name = self._session_name(context)
             token = resolve_github_token(self.settings)
-            env = {}
+            env_exports: dict[str, str] = {}
             if token:
-                env[self.settings.github_mcp_token_env] = token
-                if self.settings.github_mcp_token_env != "GITHUB_CONTROL_API_KEY":
-                    env["GITHUB_CONTROL_API_KEY"] = token
+                env_exports[self.settings.github_mcp_token_env] = token
+                env_exports["GITHUB_CONTROL_API_KEY"] = token
+                env_exports["GITHUB_TOKEN"] = token
+
+            if self.backend == "codex":
+                openai_key = resolve_openai_api_key(self.settings)
+                env_exports["OPENAI_API_KEY"] = openai_key
+
+            try:
+                claude_key = resolve_claude_api_key(self.settings)
+                env_exports["CLAUDE_CODE_ADMIN_API_KEY"] = claude_key
+            except Exception:
+                # If backend is codex, we can skip Claude; otherwise propagate when invoked.
+                if self.backend == "claude":
+                    raise
+
+            gcp_credentials = context.get("gcp_credentials_path") or self.settings.gcp_credentials_path
+            if gcp_credentials:
+                env_exports["GOOGLE_APPLICATION_CREDENTIALS"] = gcp_credentials
+                env_exports["GCP_CREDENTIALS_FILE"] = gcp_credentials
 
             if token:
                 ensure_mcp_config(workdir, self.backend, token, self.settings)
 
-            created = self.tmux.start_session(session_name, workdir, command, env=env)
-            if created and not template_has_prompt:
-                condensed_prompt = self._condense_prompt(prompt)
-                self.tmux.send_prompt(session_name, condensed_prompt)
+            # Start bare session, then send exports + exec codex in bash -lc with desired flags
+            created = self.tmux.start_session(session_name, workdir, [], env=None)
+
+            export_parts = [f"export {k}={shlex.quote(v)}" for k, v in env_exports.items()]
+            exec_cmd = shlex.join(command)
+            launch_cmd = "bash -lc " + shlex.quote("; ".join(export_parts + [f"exec {exec_cmd}"]))
+            self.tmux.send_prompt(session_name, launch_cmd, delay_seconds=0.2)
+
+            if self.backend == "claude":
+                # Auto-accept bypass warning when running with dangerously-skip-permissions.
+                self.tmux.send_prompt(session_name, "2", delay_seconds=0.6)
+
+            if not template_has_prompt:
+                if self.backend == "claude":
+                    prompt_to_send = "Please read ACE_TASK.md in the current directory and execute all instructions end-to-end. When finished, summarize the changes and status."
+                else:
+                    prompt_to_send = self._condense_prompt(prompt_for_cli)
+                self.tmux.send_prompt(session_name, prompt_to_send, delay_seconds=0.8)
 
             if created:
                 output = (
@@ -134,7 +175,12 @@ class CliAgent(BaseAgent):
             return self.settings.claude_cli_command
         return self.settings.codex_cli_command
 
-    def _build_command(self, prompt: str) -> tuple[list[str], str, bool]:
+    def _build_command(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str = "",
+    ) -> tuple[list[str], str, bool]:
         template = self._command_template()
         template_has_prompt = "{prompt}" in template
 
@@ -144,11 +190,31 @@ class CliAgent(BaseAgent):
         formatted = template.replace("{model}", model_value).replace("{prompt}", prompt)
         command = shlex.split(formatted)
 
+        if self.backend == "claude" and system_prompt and "--system-prompt" not in command:
+            command += ["--system-prompt", system_prompt]
+            display += " --system-prompt <system_prompt>"
+
         if not template_has_prompt and model_value and "--model" not in command:
             command += ["--model", model_value]
             display += f" --model {model_value}"
 
         return command, display, template_has_prompt
+
+    def _load_system_prompt(self) -> str:
+        path_value = self.settings.cli_system_prompt_path
+        if not path_value:
+            return ""
+        path = Path(path_value).expanduser()
+        if not path.is_absolute():
+            repo_root = Path(__file__).resolve().parents[3]
+            path = repo_root / path
+        try:
+            if not path.exists():
+                return ""
+            return path.read_text(encoding="utf-8").strip()
+        except Exception as exc:
+            logger.warning("system_prompt_read_failed", path=str(path), error=str(exc))
+            return ""
 
     def _session_name(self, context: dict[str, Any]) -> str:
         repo = context.get("repo_name", "repo")

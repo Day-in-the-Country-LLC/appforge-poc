@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     github_agent_label: str = os.getenv("GITHUB_AGENT_LABEL", "agent")
     github_local_agent_label: str = os.getenv("GITHUB_LOCAL_AGENT_LABEL", "agent:local")
     github_remote_agent_label: str = os.getenv("GITHUB_REMOTE_AGENT_LABEL", "agent:remote")
+    disable_issue_comments: bool = (
+        os.getenv("DISABLE_ISSUE_COMMENTS", "false").lower() == "true"
+    )
+    disable_issue_status: bool = (
+        os.getenv("DISABLE_ISSUE_STATUS", "false").lower() == "true"
+    )
     github_base_branch: str = os.getenv("GITHUB_BASE_BRANCH", "main")
     github_token_secret_name: str = os.getenv(
         "GITHUB_TOKEN_SECRET_NAME", "github-control-api-key"
@@ -42,10 +48,18 @@ class Settings(BaseSettings):
 
     # OpenAI / Codex
     openai_api_key: str = os.getenv("APPFORGE_OPENAI_API_KEY", "")
+    openai_secret_name: str = os.getenv("OPENAI_SECRET_NAME", "APPFORGE_OPENAI_API_KEY")
+    openai_secret_version: str = os.getenv("OPENAI_SECRET_VERSION", "latest")
     codex_model: str = os.getenv("CODEX_MODEL", "gpt-5.1-codex-mini")
+    instruction_backend: str = os.getenv("INSTRUCTION_BACKEND", "openai")
+    instruction_model: str = os.getenv(
+        "INSTRUCTION_MODEL", os.getenv("CODEX_MODEL", "gpt-5.1-codex-mini")
+    )
 
     # Claude
     claude_api_key: str = os.getenv("CLAUDE_CODE_ADMIN_API_KEY", "")
+    claude_secret_name: str = os.getenv("CLAUDE_SECRET_NAME", "CLAUDE_CODE_ADMIN_API_KEY")
+    claude_secret_version: str = os.getenv("CLAUDE_SECRET_VERSION", "latest")
     claude_model: str = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
 
     # GCP
@@ -60,8 +74,17 @@ class Settings(BaseSettings):
     agent_execution_mode: str = os.getenv("AGENT_EXECUTION_MODE", "tmux")
 
     # CLI agent commands
-    codex_cli_command: str = os.getenv("CODEX_CLI_COMMAND", "codex --model {model}")
-    claude_cli_command: str = os.getenv("CLAUDE_CLI_COMMAND", "claude --model {model}")
+    codex_cli_command: str = os.getenv(
+        "CODEX_CLI_COMMAND",
+        "codex --ask-for-approval never --full-auto --sandbox danger-full-access --model {model}",
+    )
+    claude_cli_command: str = os.getenv(
+        "CLAUDE_CLI_COMMAND",
+        "claude --permission-mode dontAsk --dangerously-skip-permissions --no-session-persistence --model {model}",
+    )
+    cli_system_prompt_path: str = os.getenv(
+        "CLI_SYSTEM_PROMPT_PATH", "prompts/cli_system_prompt.md"
+    )
 
     # Service
     service_port: int = int(os.getenv("SERVICE_PORT", "8080"))
@@ -121,10 +144,12 @@ class Settings(BaseSettings):
     )
 
     # Difficulty-based model mapping
-    difficulty_easy_backend: str = os.getenv("DIFFICULTY_EASY_BACKEND", "codex")
-    difficulty_easy_model: str = os.getenv("DIFFICULTY_EASY_MODEL", "gpt-5.1-codex-mini")
+    difficulty_easy_backend: str = os.getenv("DIFFICULTY_EASY_BACKEND", "claude")
+    difficulty_easy_model: str = os.getenv("DIFFICULTY_EASY_MODEL", "claude-haiku-4-5")
     difficulty_medium_backend: str = os.getenv("DIFFICULTY_MEDIUM_BACKEND", "claude")
-    difficulty_medium_model: str = os.getenv("DIFFICULTY_MEDIUM_MODEL", "claude-haiku-4-5")
+    difficulty_medium_model: str = os.getenv(
+        "DIFFICULTY_MEDIUM_MODEL", "claude-sonnet-4-5"
+    )
     difficulty_hard_backend: str = os.getenv("DIFFICULTY_HARD_BACKEND", "claude")
     difficulty_hard_model: str = os.getenv("DIFFICULTY_HARD_MODEL", "claude-opus-4-5")
 
