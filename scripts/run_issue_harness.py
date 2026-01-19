@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime
+import os
 
 import structlog
 
@@ -16,6 +17,7 @@ from ace.github.issue_queue import IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client
 from ace.github.status_manager import IssueStatus
 from ace.orchestration.graph import get_compiled_graph
+from ace.agents.base import AgentStatus
 from ace.orchestration.state import WorkerState
 
 logger = structlog.get_logger(__name__)
@@ -60,6 +62,19 @@ async def _select_unblocked_issue(
         if has_blockers:
             continue
         return item.repo_owner, item.repo_name, item.number
+    return None
+
+
+def _parse_repo_issue(value: str) -> tuple[str, int] | None:
+    """Parse strings like 'repo-123' or 'repo#123' into (repo, number)."""
+    candidate = value.strip()
+    if not candidate:
+        return None
+    for sep in ("-", "#"):
+        if sep in candidate:
+            repo, num = candidate.rsplit(sep, 1)
+            if repo and num.isdigit():
+                return repo, int(num)
     return None
 
 
@@ -112,6 +127,26 @@ async def run_issue(
 
     graph = get_compiled_graph()
     final_state = await graph.ainvoke(initial_state)
+
+    # Handle dict or object state
+    agent_result = None
+    if hasattr(final_state, "agent_result"):
+        agent_result = final_state.agent_result
+    elif isinstance(final_state, dict):
+        agent_result = final_state.get("agent_result")
+        # If agent_result was serialized as a dict, keep it as-is
+    if agent_result is None:
+        raise RuntimeError("Instructions were not generated or agent did not run.")
+    status_val = getattr(agent_result, "status", None)
+    if isinstance(agent_result, dict):
+        status_val = agent_result.get("status")
+    if status_val != AgentStatus.SUCCESS:
+        err = (
+            getattr(agent_result, "error", None)
+            or getattr(agent_result, "output", "")
+            or (agent_result.get("error") if isinstance(agent_result, dict) else "")
+        )
+        raise RuntimeError(f"Agent failed before completion: {err}")
     logger.info(
         "harness_complete",
         issue=issue.number,
@@ -130,6 +165,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--repo", help="GitHub repository name")
     parser.add_argument("--issue", type=int, help="Issue number")
     parser.add_argument(
+        "--dev",
+        help="Convenience flag: provide <repo>-<issue> (owner defaults to configured org).",
+    )
+    parser.add_argument(
         "--auto",
         action="store_true",
         help="Pick the first unblocked issue in the configured project",
@@ -145,7 +184,25 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    asyncio.run(run_issue(args.owner, args.repo, args.issue, args.auto, args.target))
+    settings = get_settings()
+
+    owner = args.owner
+    repo = args.repo
+    issue_number = args.issue
+    auto = args.auto
+
+    if args.dev:
+        parsed = _parse_repo_issue(args.dev)
+        if not parsed:
+            raise SystemExit("--dev must be in the form <repo>-<issue>")
+        repo, issue_number = parsed
+        owner = owner or settings.github_org
+        auto = False
+        # Dev mode: do not touch issue comments or status.
+        os.environ["DISABLE_ISSUE_COMMENTS"] = "true"
+        os.environ["DISABLE_ISSUE_STATUS"] = "true"
+
+    asyncio.run(run_issue(owner, repo, issue_number, auto, args.target))
 
 
 if __name__ == "__main__":

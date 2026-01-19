@@ -90,3 +90,45 @@ def resolve_langsmith_api_key(settings: Settings) -> str:
         except Exception as e:
             logger.warning("langsmith_secret_failed", error=str(e))
     return api_key or settings.langsmith_api_key
+
+
+def resolve_openai_api_key(settings: Settings) -> str:
+    """Resolve the OpenAI API key. Must come from Secret Manager; no env fallback."""
+    if not _should_use_secret_manager(settings, settings.openai_secret_name):
+        raise ValueError("OpenAI API key secret not configured")
+
+    try:
+        api_key = load_secret(
+            settings.gcp_project_id,
+            settings.openai_secret_name,
+            settings.openai_secret_version,
+            settings.gcp_credentials_path,
+        )
+    except Exception as e:
+        raise ValueError(f"OpenAI secret fetch failed: {e}") from e
+
+    if not api_key:
+        raise ValueError("OpenAI API key missing from Secret Manager")
+
+    return api_key
+
+
+def resolve_claude_api_key(settings: Settings) -> str:
+    """Resolve the Claude API key. Must come from Secret Manager; no env fallback."""
+    if not _should_use_secret_manager(settings, settings.claude_secret_name):
+        raise ValueError("Claude API key secret not configured")
+
+    try:
+        api_key = load_secret(
+            settings.gcp_project_id,
+            settings.claude_secret_name,
+            settings.claude_secret_version,
+            settings.gcp_credentials_path,
+        )
+    except Exception as e:
+        raise ValueError(f"Claude secret fetch failed: {e}") from e
+
+    if not api_key:
+        raise ValueError("Claude API key missing from Secret Manager")
+
+    return api_key

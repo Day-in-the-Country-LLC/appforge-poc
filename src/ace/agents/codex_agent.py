@@ -6,6 +6,8 @@ import httpx
 import structlog
 
 from ace.config.settings import get_settings
+from ace.config.secrets import resolve_openai_api_key
+from ace.config.secrets import resolve_openai_api_key
 
 from .base import AgentResult, AgentStatus, BaseAgent
 
@@ -18,7 +20,7 @@ class CodexAgent(BaseAgent):
     def __init__(self):
         """Initialize the Codex agent."""
         self.settings = get_settings()
-        self.api_key = self.settings.openai_api_key
+        self.api_key = resolve_openai_api_key(self.settings)
         self.model = self.settings.codex_model
 
     async def plan(self, task: str, context: dict[str, Any]) -> str:

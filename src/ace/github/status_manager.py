@@ -29,6 +29,7 @@ class StatusManager:
         """
         self.issue_queue = issue_queue
         self.settings = get_settings()
+        self.status_disabled = self.settings.disable_issue_status
 
     async def claim_issue(
         self,
@@ -47,6 +48,9 @@ class StatusManager:
         """
         if not repo_owner or not repo_name:
             logger.warning("claim_issue_missing_repo", issue=issue_number)
+            return
+        if self.status_disabled:
+            logger.info("claim_issue_skipped_status_disabled", issue=issue_number)
             return
 
         repo = f"{repo_owner}/{repo_name}"
@@ -93,6 +97,9 @@ class StatusManager:
         if not repo_owner or not repo_name:
             logger.warning("mark_blocked_missing_repo", issue=issue_number)
             return
+        if self.status_disabled:
+            logger.info("mark_blocked_skipped_status_disabled", issue=issue_number)
+            return
 
         logger.info("marking_blocked", issue=issue_number, questions=questions)
 
@@ -130,6 +137,29 @@ class StatusManager:
         )
         logger.info("issue_blocked", issue=issue_number, assignee=assignee)
 
+    async def mark_blocked_from_comment(
+        self,
+        issue_number: int,
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
+    ) -> None:
+        """Mark issue as blocked based on an existing BLOCKED comment."""
+        if not repo_owner or not repo_name:
+            logger.warning("mark_blocked_missing_repo", issue=issue_number)
+            return
+        if self.status_disabled:
+            logger.info("mark_blocked_skipped_status_disabled", issue=issue_number)
+            return
+
+        logger.info("marking_blocked_from_comment", issue=issue_number)
+        await self.issue_queue.set_project_status(
+            issue_number,
+            IssueStatus.BLOCKED.value,
+            self.settings.github_project_name,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+        )
+
     async def mark_done(
         self,
         issue_number: int,
@@ -147,6 +177,9 @@ class StatusManager:
         """
         if not repo_owner or not repo_name:
             logger.warning("mark_done_missing_repo", issue=issue_number)
+            return
+        if self.status_disabled:
+            logger.info("mark_done_skipped_status_disabled", issue=issue_number)
             return
 
         logger.info("marking_done", issue=issue_number, pr=pr_number)
@@ -194,6 +227,9 @@ Status: Done
         """
         if not repo_owner or not repo_name:
             logger.warning("mark_failed_missing_repo", issue=issue_number)
+            return
+        if self.status_disabled:
+            logger.info("mark_failed_skipped_status_disabled", issue=issue_number)
             return
 
         logger.info("marking_failed", issue=issue_number, error=error)

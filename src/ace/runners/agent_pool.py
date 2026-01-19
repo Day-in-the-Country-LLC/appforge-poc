@@ -19,7 +19,6 @@ from ace.github.status_manager import IssueStatus
 from ace.metrics import metrics
 from ace.orchestration.graph import get_compiled_graph
 from ace.orchestration.state import WorkerState
-from ace.orchestration.task_manager import TaskManager
 from ace.workspaces.git_ops import GitOps
 from ace.workspaces.tmux_ops import (
     TmuxOps,
@@ -619,10 +618,7 @@ class AgentPool:
 
                 session_name = session_name_for_issue(repo_dir.name, issue_number)
                 if tmux.session_exists(session_name):
-                    continue
-
-                task_manager = TaskManager(issue_dir)
-                plan = task_manager.load_plan()
+                    continue                plan = task_manager.load_plan()
                 if self.settings.cleanup_only_done:
                     if not plan or any(t.status != "done" for t in plan.tasks):
                         continue
@@ -659,9 +655,7 @@ class AgentPool:
             if parsed:
                 repo_slug, issue_number = parsed
                 worktree_path = worktrees_root / repo_slug / str(issue_number)
-                if worktree_path.exists():
-                    task_manager = TaskManager(worktree_path)
-                    plan = task_manager.load_plan()
+                if worktree_path.exists():                    plan = task_manager.load_plan()
                     if plan and any(t.status != "done" for t in plan.tasks):
                         continue
 

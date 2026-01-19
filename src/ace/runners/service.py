@@ -117,6 +117,9 @@ async def handle_comment_event(payload: dict[str, Any]) -> None:
     comment = payload.get("comment", {})
     issue_number = issue.get("number")
     comment_body = comment.get("body", "")
+    repo = payload.get("repository", {}) or {}
+    repo_owner = (repo.get("owner") or {}).get("login")
+    repo_name = repo.get("name")
 
     logger.info(
         "handling_comment_event",
@@ -124,6 +127,27 @@ async def handle_comment_event(payload: dict[str, Any]) -> None:
         issue=issue_number,
         comment_length=len(comment_body),
     )
+
+    if action == "created" and comment_body.strip().startswith("BLOCKED:"):
+        try:
+            settings = get_settings()
+            api_client = GitHubAPIClient(resolve_github_token(settings))
+            projects_client = ProjectsV2Client(api_client)
+            issue_queue = IssueQueue(
+                api_client,
+                settings.github_org,
+                "",
+                projects_client,
+            )
+            status_manager = StatusManager(issue_queue)
+            await status_manager.mark_blocked_from_comment(
+                issue_number,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+            )
+            await api_client.close()
+        except Exception as e:
+            logger.error("mark_blocked_from_comment_failed", issue=issue_number, error=str(e))
 
     if action == "created" and "ANSWER:" in comment_body:
         logger.info("answer_received", issue=issue_number)

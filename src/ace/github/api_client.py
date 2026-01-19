@@ -10,7 +10,7 @@ import structlog
 
 from ace.config.settings import get_settings
 
-logger = structlog.get_logger(__name__)
+logger = structlog.get_logger(__name__).bind(component="github_api")
 
 GITHUB_API_URL = "https://api.github.com"
 GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
@@ -54,7 +54,7 @@ class GitHubAPIClient:
             JSON response
         """
         url = f"{GITHUB_API_URL}{endpoint}"
-        logger.debug("github_rest_get", endpoint=endpoint, params=params)
+        logger.debug("github_rest_get", endpoint=endpoint)
         response = await self._request("GET", url, params=params)
         response.raise_for_status()
         return response.json()
