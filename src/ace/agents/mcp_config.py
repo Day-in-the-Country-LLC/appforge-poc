@@ -21,33 +21,53 @@ def ensure_mcp_config(
 ) -> None:
     """Ensure the MCP config exists for the given backend."""
     if not token:
-        logger.warning("mcp_config_skipped_missing_token")
-        return
+        raise ValueError("GitHub token missing; cannot configure MCP servers.")
 
     config_path = workdir / settings.mcp_config_filename
     backend = backend.lower()
 
+    include_appforge_server = settings.appforge_mcp_enabled and settings.appforge_mcp_url
+
     if backend == "claude":
         payload = _claude_http_config(settings, token)
         _write_mcp_config(config_path, payload, settings.mcp_server_name)
+        logger.info("mcp_config_written_github", path=str(config_path))
+        if include_appforge_server:
+            appforge_payload = _appforge_http_config(settings)
+            _write_mcp_config(
+                config_path, appforge_payload, settings.appforge_mcp_server_name
+            )
+            logger.info("mcp_config_written_appforge", path=str(config_path))
         _ensure_git_exclude(workdir, settings.mcp_config_filename)
         return
 
     if backend == "codex":
-        _write_codex_config(
+        codex_url = _normalize_mcp_url(settings.codex_mcp_url)
+        codex_config = Path(settings.codex_config_path).expanduser()
+        _write_codex_server(
             Path(settings.codex_config_path).expanduser(),
-            settings.codex_mcp_url,
+            settings.mcp_server_name,
+            codex_url,
             settings.github_mcp_token_env,
         )
+        logger.info("codex_mcp_config_written_github", path=str(codex_config))
+        if include_appforge_server:
+            _write_codex_server(
+                codex_config,
+                settings.appforge_mcp_server_name,
+                _normalize_mcp_url(settings.appforge_mcp_url),
+            )
+            logger.info("codex_mcp_config_written_appforge", path=str(codex_config))
         return
 
     logger.info("mcp_config_skipped", backend=backend)
 
 
 def _claude_http_config(settings: Settings, token: str) -> dict:
+    url = _normalize_mcp_url(settings.claude_mcp_url)
     return {
         "type": "http",
-        "url": settings.claude_mcp_url,
+        "url": url,
         "headers": {"Authorization": f"Bearer {token}"},
     }
 
@@ -82,19 +102,26 @@ def _ensure_git_exclude(workdir: Path, filename: str) -> None:
     exclude_path.write_text(content + entry, encoding="utf-8")
 
 
-def _write_codex_config(config_path: Path, url: str, token_env_var: str) -> None:
+def _appforge_http_config(settings: Settings) -> dict:
+    return {
+        "type": "http",
+        "url": _normalize_mcp_url(settings.appforge_mcp_url),
+    }
+
+
+def _write_codex_server(
+    config_path: Path, server_name: str, url: str, token_env_var: str | None = None
+) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    block = (
-        "[mcp_servers.github]\n"
-        f"url = \"{url}\"\n"
-        f"bearer_token_env_var = \"{token_env_var}\"\n"
-    )
+    block = f"[mcp_servers.{server_name}]\n" f"url = \"{url}\"\n"
+    if token_env_var:
+        block += f"bearer_token_env_var = \"{token_env_var}\"\n"
 
     content = ""
     if config_path.exists():
         content = config_path.read_text(encoding="utf-8")
 
-    pattern = re.compile(r"\[mcp_servers\.github\][\s\S]*?(?=\n\[|\Z)")
+    pattern = re.compile(rf"\[mcp_servers\.{re.escape(server_name)}\][\s\S]*?(?=\n\[|\Z)")
     if pattern.search(content):
         content = pattern.sub(block, content)
     else:
@@ -102,3 +129,13 @@ def _write_codex_config(config_path: Path, url: str, token_env_var: str) -> None
 
     config_path.write_text(content, encoding="utf-8")
     logger.info("codex_mcp_config_written", path=str(config_path))
+
+
+def _normalize_mcp_url(url: str) -> str:
+    """Ensure the MCP URL ends with /mcp (single trailing slash optional)."""
+    if not url:
+        return url
+    normalized = url.rstrip("/")
+    if normalized.endswith("/mcp"):
+        return url if url.endswith("/") else normalized + "/"
+    return normalized + "/mcp"

@@ -30,6 +30,17 @@ Every issue MUST include:
 5. **Context** - Links, design docs, related issues, or background
 6. **Dependencies** - Other issues or PRs that must be completed first
 
+## Choosing the right repository (multi-repo guidance)
+
+- Prefer **one repo per issue**. If a request spans multiple repos, split into sub-issues, one per repo, and link them.
+- Use these defaults (by project prefix):
+  - **Infra/Cloud**: `ditc-terraform` (all infrastructure changes live here; no ad-hoc scripts elsewhere).
+  - **MCP/tools**: `<project>-mcp` (all custom agent tools/servers).
+  - **Frontend**: React/Next/SPA repos for that project (e.g., `<project>-web`, `<project>-frontend`); keep them UI-only.
+  - **Orchestration/Backend app**: the project’s orchestration/service repo (e.g., `digido-digital-assistant`).
+  - **Data/DB migrations**: the service/backend repo that owns the database (e.g., `digido-digital-assistant/supabase/migrations/...`), never in docs.
+- Each project prefix (e.g., `digido*`) should maintain a short architecture/map (what repo owns what) in its `AGENTS.md` or here; reference it when choosing the target repo.
+
 ## Issue Format
 
 Generate issues in this exact format:

@@ -36,7 +36,6 @@ The CLI path runs inside tmux and reads `ACE_TASK.md` for detailed task instruct
 
 - **`state.py`** - Pydantic state model for the workflow
 - **`graph.py`** - LangGraph workflow definition
-- **`task_manager.py`** - Sequential task planning, instruction generation, and task tracking
 
 The workflow is a state machine with these nodes:
 
@@ -65,14 +64,11 @@ Each task writes `ACE_TASK.md` for the coding CLI and completes by dropping
 While waiting, the manager monitors git activity and sends tmux nudges to
 idle sessions. After repeated nudges it will restart the session or fail the task.
 
-### 4. Service Layer (`src/ace/runners/`)
+### 4. Runners/Scheduler (`src/ace/runners/`)
 
-- **`service.py`** - FastAPI service with:
-  - Health check endpoint
-  - GitHub webhook receiver
-  - Manual poll trigger
-- **`worker.py`** - Entrypoint for processing a single ticket
-- **`scheduler.py`** - (Optional) Polling loop for Cloud Scheduler
+- **`agent_pool.py`** - Concurrent agent manager
+- **`scheduler.py`** - Daily trigger (optional)
+- **`worker.py`** - Single-ticket entrypoint (legacy helper)
 
 ### 5. Workspace Management (`src/ace/workspaces/`)
 
@@ -130,30 +126,9 @@ Worker resumes with answer
 Agent continues execution
 ```
 
-## Deployment Model
+## Deployment Model (non-HTTP)
 
-### Local Development
-
-```
-FastAPI service (uvicorn)
-    ↓
-GitHub webhook (via ngrok or similar)
-    ↓
-Worker processes issues locally
-```
-
-### GCP Cloud Run
-
-```
-Cloud Run Service
-    ├→ Webhook receiver (always running)
-    └→ Polling trigger (Cloud Scheduler every 1-5 min)
-    ↓
-Cloud Run Job (per ticket)
-    ├→ Secrets from Secret Manager
-    ├→ Workspace in ephemeral storage
-    └→ Agent execution
-```
+Run the agent pool as a scheduled/CLI drain (e.g., cron/Cloud Scheduler) to process ready issues, then exit. No FastAPI/HTTP surface is present.
 
 ## Security Model
 

@@ -85,39 +85,12 @@ CLEANUP_ONLY_DONE=true
 CLEANUP_TMUX_ENABLED=true
 ```
 
-### 3. Start the Service
+## Running locally (no service)
+
+Drain ready issues once (example: remote target, limit 1 issue):
 
 ```bash
-uvicorn ace.runners.service:app --reload --port 8080
-```
-
-The service will be available at `http://localhost:8080`.
-
-### 4. Test Health Check
-
-```bash
-curl http://localhost:8080/health
-```
-
-Expected response:
-```json
-{"status": "healthy", "version": "0.1.0"}
-```
-
-### 5. Metrics Endpoint
-
-```bash
-curl http://localhost:8080/metrics
-```
-
-## Testing Locally
-
-### Manual Webhook Testing
-
-Use ngrok to expose your local service:
-
-```bash
-ngrok http 8080
+UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/run_agent_pool.py --target remote --max-issues 1
 ```
 
 Then configure the webhook in GitHub:
@@ -181,6 +154,16 @@ logging.basicConfig(level=logging.DEBUG)
 ```
 
 Or set `DEBUG=true` in `.env`.
+
+### Capture tmux output
+
+Grab the recent output from a tmux-backed CLI agent:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/dump_tmux_logs.py --repo appforge-poc --issue 123 --lines 200 --out /tmp/issue-123.log
+```
+
+If you already know the tmux session name, pass `--session <name>` instead of `--repo/--issue`.
 
 ## Common Tasks
 

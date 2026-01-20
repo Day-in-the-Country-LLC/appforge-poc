@@ -78,6 +78,8 @@ class CliAgent(BaseAgent):
             try:
                 claude_key = resolve_claude_api_key(self.settings)
                 env_exports["CLAUDE_CODE_ADMIN_API_KEY"] = claude_key
+                env_exports["ANTHROPIC_API_KEY"] = claude_key
+                env_exports["CLAUDE_API_KEY"] = claude_key
             except Exception:
                 # If backend is codex, we can skip Claude; otherwise propagate when invoked.
                 if self.backend == "claude":
@@ -91,8 +93,10 @@ class CliAgent(BaseAgent):
             if token:
                 ensure_mcp_config(workdir, self.backend, token, self.settings)
 
+            self._ensure_claude_guide(workdir)
+
             # Start bare session, then send exports + exec codex in bash -lc with desired flags
-            created = self.tmux.start_session(session_name, workdir, [], env=None)
+            created = self.tmux.start_session(session_name, workdir, [], env=env_exports)
 
             export_parts = [f"export {k}={shlex.quote(v)}" for k, v in env_exports.items()]
             exec_cmd = shlex.join(command)
@@ -100,15 +104,22 @@ class CliAgent(BaseAgent):
             self.tmux.send_prompt(session_name, launch_cmd, delay_seconds=0.2)
 
             if self.backend == "claude":
-                # Auto-accept bypass warning when running with dangerously-skip-permissions.
-                self.tmux.send_prompt(session_name, "2", delay_seconds=0.6)
+                # First-run onboarding: accept default style if prompted.
+                self._maybe_send_claude_onboarding_inputs(session_name)
 
             if not template_has_prompt:
                 if self.backend == "claude":
-                    prompt_to_send = "Please read ACE_TASK.md in the current directory and execute all instructions end-to-end. When finished, summarize the changes and status."
+                    prompt_to_send = (
+                        "Please read ACE_TASK.md in the current directory and execute all instructions end-to-end. "
+                        "When finished, write ACE_TASK_DONE.json with task_id, summary, files_changed, commands_run, "
+                        "then summarize the changes and status."
+                    )
                 else:
                     prompt_to_send = self._condense_prompt(prompt_for_cli)
                 self.tmux.send_prompt(session_name, prompt_to_send, delay_seconds=0.8)
+                if self.backend == "claude":
+                    # Ensure the instruction is submitted even if the CLI is waiting on a blank line.
+                    self.tmux.send_enter(session_name, repeat=1, delay_seconds=0.2)
 
             if created:
                 output = (
@@ -190,9 +201,9 @@ class CliAgent(BaseAgent):
         formatted = template.replace("{model}", model_value).replace("{prompt}", prompt)
         command = shlex.split(formatted)
 
-        if self.backend == "claude" and system_prompt and "--system-prompt" not in command:
-            command += ["--system-prompt", system_prompt]
-            display += " --system-prompt <system_prompt>"
+        if self.backend == "claude" and system_prompt and "--append-system-prompt" not in command:
+            command += ["--append-system-prompt", system_prompt]
+            display += " --append-system-prompt <system_prompt>"
 
         if not template_has_prompt and model_value and "--model" not in command:
             command += ["--model", model_value]
@@ -211,7 +222,9 @@ class CliAgent(BaseAgent):
         try:
             if not path.exists():
                 return ""
-            return path.read_text(encoding="utf-8").strip()
+            text = path.read_text(encoding="utf-8").strip()
+            # Normalize newlines to spaces so the tmux send-keys invocation doesn't inject literal newlines mid-command.
+            return " ".join(text.split())
         except Exception as exc:
             logger.warning("system_prompt_read_failed", path=str(path), error=str(exc))
             return ""
@@ -223,3 +236,74 @@ class CliAgent(BaseAgent):
 
     def _condense_prompt(self, prompt: str) -> str:
         return " ".join(prompt.split())
+
+    def _maybe_send_claude_onboarding_inputs(self, session_name: str) -> None:
+        """Handle first-run prompts for style selection and API key authentication."""
+        sentinel = Path.home() / ".ace" / "claude_onboarding_done"
+        if sentinel.exists():
+            return
+
+        try:
+            output = ""
+            try:
+                output = self.tmux.capture_session_output(session_name, lines=800)
+            except Exception as exc:
+                logger.warning("claude_onboarding_capture_failed", session=session_name, error=str(exc))
+
+            lowered = output.lower()
+            sent = False
+
+            if "preferred text style" in lowered or "select your text style" in lowered:
+                self.tmux.send_enter(session_name, repeat=1, delay_seconds=0.4)
+                sent = True
+
+            if "detected a custom api key" in lowered and "anthropic_api_key" in lowered:
+                # Choose "Yes" to use the provided API key.
+                self.tmux.send_prompt(session_name, "1", delay_seconds=0.6 if sent else 0.4)
+                sent = True
+
+            if not sent:
+                logger.info("claude_onboarding_no_known_prompt", session=session_name)
+
+            sentinel.parent.mkdir(parents=True, exist_ok=True)
+            sentinel.write_text("claude onboarding inputs sent\n", encoding="utf-8")
+        except Exception as exc:
+            logger.warning("claude_onboarding_inputs_failed", session=session_name, error=str(exc))
+
+    def _ensure_claude_guide(self, workdir: Path) -> None:
+        """Copy a shared CLAUDE.md into the workspace if one isn't present."""
+        try:
+            source = Path(self.settings.claude_guide_path).expanduser()
+            if not source.exists():
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(_DEFAULT_CLAUDE_GUIDE.strip() + "\n", encoding="utf-8")
+
+            dest = workdir / "CLAUDE.md"
+            if dest.exists():
+                return
+
+            dest.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            logger.info("claude_guide_injected", path=str(dest))
+        except Exception as exc:
+            logger.warning("claude_guide_inject_failed", workdir=str(workdir), error=str(exc))
+
+
+_DEFAULT_CLAUDE_GUIDE = """
+# CLAUDE.md
+
+## How to work
+- Read ACE_TASK.md fully before acting; follow steps in order.
+- Prefer minimal changes; keep commits tight and focused when asked.
+- Ask clarifying questions in the GitHub issue if requirements are unclear.
+- When blocked by credentials or missing services, leave a concise issue comment.
+- Always format code with repo standards; run available linters/tests when practical.
+
+## Tooling
+- You are running inside tmux; logs are captured. Keep output concise.
+- MCP servers: GitHub (official) and Appforge MCP for project board filtering.
+- GitHub token is injected as GITHUB_TOKEN.
+
+## Delivery
+- Summarize changes at the end (what, why, tests).
+- If no changes made, state that explicitly with the reason.
+"""

@@ -198,17 +198,28 @@ async def call_claude(
 
 def _extract_openai_text(data: dict) -> str:
     """Extract text from OpenAI responses API payload."""
+    # Shortcut: some responses include a flat output_text field.
+    if "output_text" in data and isinstance(data["output_text"], str):
+        return data["output_text"]
+
     if "output" in data:
         output = data["output"]
         if isinstance(output, list) and output:
-            item = output[0]
-            if isinstance(item, dict):
+            # Prefer the first text-bearing entry; skip reasoning-only blocks.
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
                 content = item.get("content")
-                if isinstance(content, list) and content:
-                    return content[0].get("text", str(content[0]))
+                if isinstance(content, list):
+                    for entry in content:
+                        if isinstance(entry, dict) and "text" in entry:
+                            return entry["text"]
+                        if isinstance(entry, dict) and "output_text" in entry:
+                            return entry["output_text"]
                 if "text" in item:
                     return item["text"]
-            return str(item)
+            # Fallback: stringify the first item.
+            return str(output[0])
         return str(output)
 
     if "choices" in data:

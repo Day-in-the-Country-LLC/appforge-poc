@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     codex_config_path: str = os.getenv(
         "CODEX_CONFIG_PATH", "~/.codex/config.toml"
     )
+    # Appforge MCP (hardcoded Cloud Run endpoint; no env toggle)
+    appforge_mcp_enabled: bool = True
+    appforge_mcp_url: str = "https://appforge-mcp-gchmaqkvia-uc.a.run.app"
+    appforge_mcp_server_name: str = "appforge-mcp-server"
 
     # OpenAI / Codex
     openai_api_key: str = os.getenv("APPFORGE_OPENAI_API_KEY", "")
@@ -58,7 +62,9 @@ class Settings(BaseSettings):
 
     # Claude
     claude_api_key: str = os.getenv("CLAUDE_CODE_ADMIN_API_KEY", "")
-    claude_secret_name: str = os.getenv("CLAUDE_SECRET_NAME", "CLAUDE_CODE_ADMIN_API_KEY")
+    claude_secret_name: str = os.getenv(
+        "CLAUDE_SECRET_NAME", "appforge-anthropic-api-key"
+    )
     claude_secret_version: str = os.getenv("CLAUDE_SECRET_VERSION", "latest")
     claude_model: str = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
 
@@ -80,7 +86,7 @@ class Settings(BaseSettings):
     )
     claude_cli_command: str = os.getenv(
         "CLAUDE_CLI_COMMAND",
-        "claude --permission-mode dontAsk --dangerously-skip-permissions --no-session-persistence --model {model}",
+        "claude --permission-mode dontAsk --dangerously-skip-permissions --model {model}",
     )
     cli_system_prompt_path: str = os.getenv(
         "CLI_SYSTEM_PROMPT_PATH", "prompts/cli_system_prompt.md"
@@ -101,7 +107,7 @@ class Settings(BaseSettings):
         os.getenv("TASK_POLL_INTERVAL_SECONDS", "30")
     )
     task_wait_timeout_seconds: int = int(
-        os.getenv("TASK_WAIT_TIMEOUT_SECONDS", "0")
+        os.getenv("TASK_WAIT_TIMEOUT_SECONDS", "900")
     )
     task_nudge_enabled: bool = (
         os.getenv("TASK_NUDGE_ENABLED", "true").lower() == "true"
@@ -164,6 +170,9 @@ class Settings(BaseSettings):
     github_api_retry_max_seconds: float = float(
         os.getenv("GITHUB_API_RETRY_MAX_SECONDS", "30.0")
     )
+
+    # Agent guidance
+    claude_guide_path: str = os.getenv("CLAUDE_GUIDE_PATH", "~/.ace/CLAUDE.md")
 
     # LangSmith tracing
     langsmith_enabled: bool = (

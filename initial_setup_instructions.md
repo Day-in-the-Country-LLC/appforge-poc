@@ -95,7 +95,6 @@ agentic-coding-engine/
         mark_done.py
 
     runners/
-      service.py              # FastAPI endpoints (webhook receiver + health)
       scheduler.py            # polling loop / Cloud Scheduler trigger
       worker.py               # the “do one ticket” entrypoint
 
