@@ -235,6 +235,14 @@ Issues in the **DITC TODO** org project use status fields:
 
 **Solution:** Verify MCP configuration file exists and is valid JSON. Restart your IDE.
 
+### Custom GitHub Projects MCP server
+
+The GitHub Projects MCP server now lives in the `appforge-mcp` repo and is deployed on Cloud Run.
+ACE is currently hardcoded to use the production endpoint (`https://appforge-mcp-gchmaqkvia-uc.a.run.app`)
+with server name `appforge-mcp-server`; no env vars are required. If the Cloud Run URL changes, update
+`appforge_mcp_url` in `ditc_terraform/live/prod/appforge-483920` and then change the hardcoded value in
+`src/ace/config/settings.py`.
+
 ### "Permission denied" error
 
 **Solution:** Verify GitHub PAT has `repo` and `read:org` scopes. Regenerate if needed.

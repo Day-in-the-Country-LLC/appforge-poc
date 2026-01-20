@@ -156,7 +156,7 @@ class TmuxOps:
                 return
             last_error = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(
-            f"failed to send Enter to tmux session '{session_name}': {last_error}"
+                f"failed to send Enter to tmux session '{session_name}': {last_error}"
         )
 
     def send_prompt(self, session_name: str, prompt: str, delay_seconds: float = 1.0) -> None:
@@ -186,3 +186,40 @@ class TmuxOps:
                 timeout=5,
             )
             time.sleep(0.1)
+
+    def send_enter(self, session_name: str, repeat: int = 1, delay_seconds: float = 0.0) -> None:
+        """Send one or more Enter keypresses to a session."""
+        if not self.session_exists(session_name):
+            raise RuntimeError(f"tmux session '{session_name}' not found")
+
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+
+        for _ in range(max(repeat, 1)):
+            subprocess.run(
+                ["tmux", "send-keys", "-t", session_name, "Enter"],
+                check=True,
+                capture_output=True,
+                timeout=5,
+            )
+            time.sleep(0.1)
+
+    def capture_session_output(self, session_name: str, lines: int = 400) -> str:
+        """Return the most recent output from a tmux session."""
+        if not self.session_exists(session_name):
+            raise RuntimeError(f"tmux session '{session_name}' not found")
+
+        start_flag = f"-{lines}" if lines and lines > 0 else "-"
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-t", session_name, "-J", "-S", start_flag],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            error = result.stderr.strip()
+            logger.warning("tmux_capture_failed", session=session_name, error=error)
+            raise RuntimeError(f"failed to capture tmux session '{session_name}': {error}")
+
+        return result.stdout

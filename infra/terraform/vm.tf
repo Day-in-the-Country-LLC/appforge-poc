@@ -90,9 +90,8 @@ resource "google_compute_instance" "ace_vm" {
     Environment="ENVIRONMENT=production"
     Environment="GCP_PROJECT_ID=${var.gcp_project_id}"
     Environment="GCP_SECRET_MANAGER_ENABLED=true"
-    ExecStart=/opt/ace/venv/bin/uvicorn ace.runners.service:app --host 0.0.0.0 --port 8080
-    Restart=always
-    RestartSec=10
+    ExecStart=/opt/ace/venv/bin/python scripts/run_agent_pool.py --target remote
+    Restart=no
 
     [Install]
     WantedBy=multi-user.target

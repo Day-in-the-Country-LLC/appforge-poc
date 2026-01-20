@@ -1,6 +1,6 @@
 # GCP Deployment Guide
 
-This guide walks through deploying the Agentic Coding Engine to Google Cloud Platform using a persistent VM.
+This guide walks through deploying the Agentic Coding Engine to Google Cloud Platform using a persistent VM (non-HTTP; runs a drain and exits).
 
 ## Architecture
 
@@ -31,7 +31,7 @@ This will:
 - Grant necessary IAM roles
 - Prompt for secrets (GitHub token, API keys)
 
-## Step 2: Deploy with Terraform
+## Step 2: Deploy with Terraform (VM optional; HTTP service removed)
 
 ```bash
 cd infra/terraform
@@ -46,11 +46,7 @@ terraform plan -var gcp_project_id=$PROJECT_ID -var gcp_region=$REGION
 terraform apply -var gcp_project_id=$PROJECT_ID -var gcp_region=$REGION
 ```
 
-Terraform will create:
-- e2-medium VM with startup script
-- Cloud Scheduler job (daily 8 AM trigger)
-- Firewall rules for HTTP access
-- IAM bindings
+Terraform can create a VM skeleton, but the previous HTTP service has been removed. For daily runs, trigger the CLI (e.g., via cron/Cloud Scheduler invoking the CLI) rather than an HTTP endpoint.
 
 ## Step 3: Verify Deployment
 
@@ -60,21 +56,15 @@ Get the VM's external IP:
 gcloud compute instances describe ace-vm --zone us-central1-a --format='value(networkInterfaces[0].accessConfigs[0].natIP)'
 ```
 
-Check service health:
+Previous HTTP endpoints are removed (no FastAPI service). Use CLI runs instead.
+
+## Triggering daily runs
+
+Use a cron/Cloud Scheduler job to execute the CLI on the VM:
 
 ```bash
-curl http://<VM_IP>:8080/health
+UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/run_agent_pool.py --target remote --max-issues 0
 ```
-
-## Step 4: Configure GitHub Webhook (Optional)
-
-If you want real-time webhook triggers in addition to scheduled runs:
-
-1. Go to Settings → Webhooks → Add webhook
-2. Payload URL: `http://<VM_IP>:8080/webhook/github`
-3. Content type: `application/json`
-4. Events: `Issues`, `Issue comments`
-5. Secret: (use the value from bootstrap)
 
 ## Step 5: Create GitHub Labels
 
@@ -88,39 +78,6 @@ In your repository, create the following labels:
 
 ## Monitoring
 
-### View VM Logs
-
-```bash
-# SSH into VM
-gcloud compute ssh ace-vm --zone us-central1-a
-
-# View service logs
-sudo journalctl -u ace -f
-```
-
-### Check Agent Pool Status
-
-```bash
-curl http://<VM_IP>:8080/agents/status
-```
-
-### Check Scheduler Status
-
-```bash
-curl http://<VM_IP>:8080/scheduler/status
-
-# Or via Cloud Scheduler
-gcloud scheduler jobs describe ace-morning-run --location $REGION
-```
-
-### Manually Trigger a Run
-
-```bash
-curl -X POST http://<VM_IP>:8080/agents/run
-```
-
-### View Secret Manager
-
 ```bash
 gcloud secrets list
 gcloud secrets versions list github-token
@@ -128,40 +85,7 @@ gcloud secrets versions list github-token
 
 ## Troubleshooting
 
-### Service won't start
-
-SSH into the VM and check:
-```bash
-gcloud compute ssh ace-vm --zone us-central1-a
-sudo systemctl status ace
-sudo journalctl -u ace --no-pager -n 100
-```
-
-Common issues:
-- Missing secrets in Secret Manager
-- Invalid API keys
-- Git clone failed (check network/permissions)
-
-### Webhook not being received
-
-1. Verify webhook URL uses VM's external IP
-2. Check firewall allows port 8080
-3. Check GitHub webhook delivery logs
-
-### Scheduler not triggering
-
-```bash
-gcloud scheduler jobs run ace-morning-run --location $REGION
-```
-
-Check execution in Cloud Logging.
-
-### Restart Service
-
-```bash
-gcloud compute ssh ace-vm --zone us-central1-a
-sudo systemctl restart ace
-```
+No HTTP service is running. Monitor the CLI job logs (cron/Cloud Scheduler/ssh).
 
 ## Cleanup
 
@@ -171,46 +95,14 @@ To destroy all resources:
 terraform destroy -var gcp_project_id=$PROJECT_ID -var gcp_region=$REGION
 ```
 
-Then manually delete secrets:
-```bash
-gcloud secrets delete github-token
-gcloud secrets delete openai-api-key
-gcloud secrets delete claude-api-key
-```
-
-## API Endpoints
-
-All agent endpoints accept a `target` query parameter:
-- `local` — Only process issues with `agent:local` label
-- `remote` — Only process issues with `agent:remote` label (default for `/agents/run`)
-- `any` — Process all issues regardless of label (default for other endpoints)
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/agents/status?target=` | GET | Pool status (active/idle agents) |
-| `/agents/run?target=` | POST | Process all unblocked issues until empty |
-| `/agents/spawn?target=` | POST | Spawn agents for current ready issues |
-| `/agents/stop?target=` | POST | Stop processing |
-| `/scheduler/status` | GET | Next scheduled run time |
-| `/scheduler/start` | POST | Start built-in daily scheduler |
-| `/scheduler/stop` | POST | Stop built-in scheduler |
+Then manually delete secrets if desired.
 
 ### Local Agent Setup
 
-For issues requiring local machine access (e.g., Redis migration), run a local agent pool:
+For issues requiring local machine access (e.g., Redis migration), run the CLI drain locally:
 
 ```bash
-# In your local environment
 cd appforge-poc
 source .venv/bin/activate
-
-# Start local agent pool (only processes agent:local issues)
-curl -X POST http://localhost:8080/agents/run?target=local
-```
-
-Or run the service locally:
-```bash
-uvicorn ace.runners.service:app --port 8080
-curl -X POST http://localhost:8080/agents/run?target=local
+UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/run_agent_pool.py --target local --max-issues 0
 ```

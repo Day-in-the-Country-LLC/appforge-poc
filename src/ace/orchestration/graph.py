@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from datetime import datetime
@@ -25,6 +26,7 @@ from ace.github.status_manager import StatusManager
 from ace.metrics import metrics
 from ace.orchestration.state import WorkerState
 from ace.workspaces.git_ops import GitOps
+from ace.workspaces.tmux_ops import TmuxOps
 
 logger = structlog.get_logger(__name__)
 
@@ -41,7 +43,7 @@ class InstructionBuilder:
 
     async def build(self, issue) -> str:
         prompt = self._build_prompt(issue)
-        return await self._call_model(
+        instructions = await self._call_model(
             prompt,
             trace_name="issue_instructions",
             metadata={
@@ -49,12 +51,43 @@ class InstructionBuilder:
                 "issue_title": issue.title,
             },
         )
+        cleaned = (instructions or "").strip()
+        if (
+            not cleaned
+            or "type': 'reasoning" in cleaned
+            or cleaned.startswith("{'id':")
+        ):
+            preview = cleaned[:400]
+            logger.error("instruction_generation_failed", preview=preview)
+            raise ValueError(
+                "Instruction agent returned no usable instructions. "
+                f"Preview: {preview}"
+            )
+        refusal_markers = [
+            "i'm sorry",
+            "i am sorry",
+            "i cannot help",
+            "i can't help",
+            "cannot assist",
+            "can't assist",
+        ]
+        lower_cleaned = cleaned.lower()
+        if any(marker in lower_cleaned for marker in refusal_markers):
+            preview = cleaned[:400]
+            logger.error("instruction_generation_refused", preview=preview)
+            raise ValueError(
+                "Instruction agent refused to provide steps. "
+                f"Preview: {preview}"
+            )
+        return instructions
 
     def _build_prompt(self, issue) -> str:
         body = f"""
 You are an instruction agent. Write detailed, step-by-step *programmatic* coding instructions
 for the issue below. Output Markdown only. Do not include UI/manual steps.
 Before writing steps, check if AGENTS.md exists in the repo root and follow any practices listed there.
+Do not refuse or apologize; if information is missing, make reasonable assumptions and proceed with best-effort coding steps.
+If schema changes are needed, generate a timestamped Supabase migration (e.g., supabase/migrations/<YYYYMMDDHHMMSS>__desc.sql) using the current system time; do not place schema DDL in docs.
 
 Issue Title: {issue.title}
 Issue Body:
@@ -88,17 +121,6 @@ When finished:
             trace_name=trace_name,
             metadata=metadata,
         )
-
-    def _fallback_instructions(self, issue) -> str:
-        return (
-            f"# Issue {issue.number}: {issue.title}\n\n"
-            f"{issue.body}\n\n"
-            "## Steps\n"
-            "1. Review the issue details and repo context.\n"
-            "2. Implement the required changes.\n"
-            "3. Run relevant tests and validate behavior.\n"
-        )
-
 
 def _slugify_title(title: str, max_length: int = 40) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
@@ -283,6 +305,7 @@ async def run_agent(state: WorkerState) -> WorkerState:
 
     # If running in tmux/cli, wait for ACE_TASK_DONE.json to appear before success.
     if settings.agent_execution_mode.lower() in {"tmux", "cli"} and session_name:
+        tmux = TmuxOps()
         timeout = settings.task_wait_timeout_seconds if settings.task_wait_timeout_seconds > 0 else None
         done_path = Path(workspace_path) / "ACE_TASK_DONE.json"
         start = time.monotonic()
@@ -300,6 +323,16 @@ async def run_agent(state: WorkerState) -> WorkerState:
                     commands_run=[],
                 )
                 break
+            if not tmux.session_exists(session_name):
+                state.agent_result = AgentResult(
+                    status=AgentStatus.FAILED,
+                    output="tmux session ended without ACE_TASK_DONE.json.",
+                    files_changed=[],
+                    commands_run=[],
+                    error="missing_done_file",
+                )
+                state.error = state.agent_result.error
+                break
             if timeout is not None and (time.monotonic() - start) > timeout:
                 state.agent_result = AgentResult(
                     status=AgentStatus.FAILED,
@@ -308,6 +341,7 @@ async def run_agent(state: WorkerState) -> WorkerState:
                     commands_run=[],
                     error="task_wait_timeout",
                 )
+                state.error = state.agent_result.error
                 break
             time.sleep(5)
 

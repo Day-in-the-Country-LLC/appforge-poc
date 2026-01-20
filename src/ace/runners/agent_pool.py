@@ -25,6 +25,7 @@ from ace.workspaces.tmux_ops import (
     parse_issue_from_session,
     session_name_for_issue,
 )
+from fastmcp import Client as McpClient
 
 logger = structlog.get_logger(__name__)
 
@@ -80,12 +81,14 @@ class AgentPool:
         self,
         max_agents: int = MAX_CONCURRENT_AGENTS,
         target: AgentTarget = AgentTarget.ANY,
+        max_issues_per_run: int = 0,
     ):
         """Initialize the agent pool.
 
         Args:
             max_agents: Maximum number of concurrent agents (default: 5)
             target: Which issues to process (local, remote, or any)
+            max_issues_per_run: Limit issues processed per run (0 = unlimited)
         """
         self.max_agents = max_agents
         self.target = target
@@ -102,6 +105,7 @@ class AgentPool:
         self._session_processed: int = 0  # Issues processed in current session
         self._resume_completed: bool = False
         self._last_cleanup_at: datetime | None = None
+        self.max_issues_per_run = max_issues_per_run
 
     @property
     def api_client(self) -> GitHubAPIClient:
@@ -153,6 +157,11 @@ class AgentPool:
                 return slot
         return None
 
+    def set_max_issues_per_run(self, limit: int) -> None:
+        """Set the maximum issues to process in this run (0 = unlimited)."""
+        self.max_issues_per_run = max(0, limit)
+        logger.info("max_issues_per_run_set", limit=self.max_issues_per_run, target=self.target.value)
+
     def _matches_target(self, issue: Issue) -> bool:
         """Check if issue matches the pool's target environment.
 
@@ -191,6 +200,12 @@ class AgentPool:
         Returns:
             List of issues with "Ready" status and no open blockers
         """
+        # Prefer appforge MCP server when enabled and target is remote/any (server filters remote label + blockers)
+        if self.settings.appforge_mcp_enabled and self.target in {AgentTarget.REMOTE, AgentTarget.ANY}:
+            mcp_issues = await self._fetch_ready_issues_via_mcp()
+            if mcp_issues:
+                return mcp_issues
+
         try:
             issues = await self.issue_queue.list_issues_by_project_status(
                 self.settings.github_project_name,
@@ -238,6 +253,51 @@ class AgentPool:
 
         except Exception as e:
             logger.error("fetch_ready_issues_failed", error=str(e))
+            return []
+
+    async def _fetch_ready_issues_via_mcp(self) -> list[Issue]:
+        """Fetch ready issues via appforge MCP server (already filtered by status/label/blockers)."""
+        url = self.settings.appforge_mcp_url.rstrip("/")
+        if not url.endswith("/mcp"):
+            url = f"{url}/mcp"
+
+        try:
+            async with McpClient(url) as client:
+                args = {
+                    "project_name": self.settings.github_project_name,
+                    "status": self.settings.github_ready_status,
+                    "remote_label": self.settings.github_remote_agent_label,
+                }
+                resp = await client.call_tool("list_ready_remote_items", args)
+                issues: list[Issue] = []
+                now = datetime.utcnow()
+                for item in resp or []:
+                    try:
+                        issues.append(
+                            Issue(
+                                number=int(item["number"]),
+                                title=item.get("title", ""),
+                                body="",
+                                labels=item.get("labels", []),
+                                assignee=None,
+                                state="open",
+                                created_at=now,
+                                updated_at=now,
+                                html_url=item.get("html_url", ""),
+                                repo_owner=item.get("repo_owner"),
+                                repo_name=item.get("repo_name"),
+                            )
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning("mcp_issue_parse_failed", item=item, error=str(exc))
+                logger.info(
+                    "fetched_ready_issues_via_mcp",
+                    count=len(issues),
+                    target=self.target.value,
+                )
+                return issues
+        except Exception as exc:
+            logger.warning("fetch_ready_issues_via_mcp_failed", error=str(exc))
             return []
 
     async def fetch_in_progress_issues(self) -> list[Issue]:
@@ -444,6 +504,18 @@ class AgentPool:
         """
         logger.info("process_ready_issues_starting")
 
+        limit = self.max_issues_per_run
+        if limit > 0:
+            remaining = limit - self._session_processed
+            if remaining <= 0:
+                logger.info("max_issues_reached", max_issues=limit)
+                return {
+                    "status": "max_reached",
+                    "spawned": 0,
+                    "skipped": 0,
+                    "pool_status": self.get_status().__dict__,
+                }
+
         # Fetch ready issues from project board
         ready_issues = await self.fetch_ready_issues()
 
@@ -455,6 +527,10 @@ class AgentPool:
                 "skipped": 0,
                 "pool_status": self.get_status().__dict__,
             }
+
+        if limit > 0:
+            remaining = limit - self._session_processed
+            ready_issues = ready_issues[:remaining]
 
         spawned = 0
         skipped = 0
@@ -493,6 +569,7 @@ class AgentPool:
             poll_interval: Seconds between polls for new issues
         """
         self._running = True
+        self._session_processed = 0
         logger.info("agent_pool_starting", max_agents=self.max_agents, poll_interval=poll_interval)
 
         if self.settings.resume_in_progress_issues:
@@ -618,10 +695,10 @@ class AgentPool:
 
                 session_name = session_name_for_issue(repo_dir.name, issue_number)
                 if tmux.session_exists(session_name):
-                    continue                plan = task_manager.load_plan()
+                    continue
                 if self.settings.cleanup_only_done:
-                    if not plan or any(t.status != "done" for t in plan.tasks):
-                        continue
+                    # Without task status, skip cleanup when only_done is enforced
+                    continue
 
                 last_activity = issue_dir.stat().st_mtime
                 tasks_path = issue_dir / "ace_tasks.json"
@@ -655,9 +732,8 @@ class AgentPool:
             if parsed:
                 repo_slug, issue_number = parsed
                 worktree_path = worktrees_root / repo_slug / str(issue_number)
-                if worktree_path.exists():                    plan = task_manager.load_plan()
-                    if plan and any(t.status != "done" for t in plan.tasks):
-                        continue
+                if worktree_path.exists() and self.settings.cleanup_only_done:
+                    continue
 
             logger.info(
                 "cleanup_tmux_session",

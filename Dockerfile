@@ -15,9 +15,5 @@ COPY docs/ docs/
 
 ENV ENVIRONMENT=production
 ENV DEBUG=false
-ENV SERVICE_HOST=0.0.0.0
-ENV SERVICE_PORT=8080
 
-EXPOSE 8080
-
-CMD ["uvicorn", "ace.runners.service:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "scripts/run_agent_pool.py", "--target", "remote"]

@@ -37,33 +37,5 @@ source /opt/ace/venv/bin/activate
 pip install --upgrade pip
 pip install -e .
 
-# Create systemd service
-cat > /etc/systemd/system/ace.service << 'SERVICEEOF'
-[Unit]
-Description=Agentic Coding Engine
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/ace/appforge-poc
-Environment="PATH=/opt/ace/venv/bin:/usr/bin"
-Environment="ENVIRONMENT=production"
-ExecStart=/bin/bash -c 'source /opt/ace/venv/bin/activate && \
-    export GITHUB_CONTROL_API_KEY=$(gcloud secrets versions access latest --secret=GITHUB_CONTROL_API_KEY) && \
-    export APPFORGE_OPENAI_API_KEY=$(gcloud secrets versions access latest --secret=APPFORGE_OPENAI_API_KEY 2>/dev/null || echo "") && \
-    export CLAUDE_CODE_ADMIN_API_KEY=$(gcloud secrets versions access latest --secret=CLAUDE_CODE_ADMIN_API_KEY 2>/dev/null || echo "") && \
-    uvicorn ace.runners.service:app --host 0.0.0.0 --port 8080'
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-SERVICEEOF
-
-# Enable and start service
-systemctl daemon-reload
-systemctl enable ace
-systemctl restart ace
-
-echo "ACE service started"
+# NOTE: FastAPI/HTTP service removed. Configure your own scheduler/cron to run:
+# UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/run_agent_pool.py --target remote --max-issues 0
