@@ -26,6 +26,7 @@ from ace.workspaces.tmux_ops import (
     session_name_for_issue,
 )
 from fastmcp import Client as McpClient
+from ace.agents.manager_agent import ManagerAgent
 
 logger = structlog.get_logger(__name__)
 
@@ -97,6 +98,8 @@ class AgentPool:
         self._api_client: GitHubAPIClient | None = None
         self._projects_client: ProjectsV2Client | None = None
         self._issue_queue: IssueQueue | None = None
+        self._manager_agent: ManagerAgent | None = None
+        self._project_id: str | None = None
         self._running = False
         self._draining = False  # Drain mode: process until queue empty
         self._completed_count = 0
@@ -134,6 +137,39 @@ class AgentPool:
             )
         return self._issue_queue
 
+    def _get_manager_agent(self) -> ManagerAgent | None:
+        if not self.settings.manager_agent_enabled:
+            return None
+        if self._manager_agent is None:
+            self._manager_agent = ManagerAgent()
+        return self._manager_agent
+
+    async def _hydrate_issue(self, issue: Issue) -> Issue:
+        if not issue.repo_owner or not issue.repo_name:
+            return issue
+        try:
+            full = await self.issue_queue.get_issue(
+                issue.number,
+                repo_owner=issue.repo_owner,
+                repo_name=issue.repo_name,
+            )
+            full.repo_owner = issue.repo_owner
+            full.repo_name = issue.repo_name
+            return full
+        except Exception as exc:
+            logger.warning(
+                "issue_hydration_failed",
+                issue=issue.number,
+                error=str(exc),
+            )
+            return issue
+
+    async def _hydrate_issues(self, issues: list[Issue]) -> list[Issue]:
+        hydrated: list[Issue] = []
+        for issue in issues:
+            hydrated.append(await self._hydrate_issue(issue))
+        return hydrated
+
     def get_status(self) -> PoolStatus:
         """Get current pool status."""
         active = sum(1 for s in self.slots if s.state == AgentState.RUNNING)
@@ -156,6 +192,51 @@ class AgentPool:
             if slot.state == AgentState.IDLE:
                 return slot
         return None
+
+    async def _get_project_id(self) -> str:
+        if self._project_id:
+            return self._project_id
+        project_id = await self.projects_client.get_org_project_id(
+            self.settings.github_org,
+            self.settings.github_project_name,
+        )
+        if not project_id:
+            raise ValueError(
+                f"Project '{self.settings.github_project_name}' not found in org "
+                f"'{self.settings.github_org}'"
+            )
+        self._project_id = project_id
+        return project_id
+
+    async def _has_blockers_not_done(self, issue: Issue) -> bool:
+        if not issue.repo_owner or not issue.repo_name:
+            return False
+        blockers = await self.projects_client.get_issue_blockers(
+            issue.repo_owner,
+            issue.repo_name,
+            issue.number,
+        )
+        if not blockers:
+            return False
+        project_id = await self._get_project_id()
+        not_done = []
+        for blocker in blockers:
+            status = await self.projects_client.get_issue_project_status(
+                project_id,
+                blocker.number,
+                blocker.repo_owner,
+                blocker.repo_name,
+            )
+            if status != IssueStatus.DONE.value:
+                not_done.append((blocker.number, status))
+        if not_done:
+            logger.debug(
+                "issue_skipped_blockers_not_done",
+                issue=issue.number,
+                blockers=not_done,
+            )
+            return True
+        return False
 
     def set_max_issues_per_run(self, limit: int) -> None:
         """Set the maximum issues to process in this run (0 = unlimited)."""
@@ -204,13 +285,18 @@ class AgentPool:
         if self.settings.appforge_mcp_enabled and self.target in {AgentTarget.REMOTE, AgentTarget.ANY}:
             mcp_issues = await self._fetch_ready_issues_via_mcp()
             if mcp_issues:
-                return mcp_issues
+                issues = mcp_issues
+            else:
+                issues = []
+        else:
+            issues = []
 
         try:
-            issues = await self.issue_queue.list_issues_by_project_status(
-                self.settings.github_project_name,
-                IssueStatus.READY.value,
-            )
+            if not issues:
+                issues = await self.issue_queue.list_issues_by_project_status(
+                    self.settings.github_project_name,
+                    IssueStatus.READY.value,
+                )
 
             # Filter out already processed issues
             new_issues = [issue for issue in issues if issue.number not in self._processed_issues]
@@ -218,26 +304,21 @@ class AgentPool:
             # Filter by target environment
             target_issues = [issue for issue in new_issues if self._matches_target(issue)]
 
-            # Filter out issues with open blockers
+            # Filter out issues with blockers not in Done status
             unblocked_issues = []
             blocked_count = 0
 
             for issue in target_issues:
-                if issue.repo_owner and issue.repo_name:
-                    has_blockers = await self.projects_client.has_open_blockers(
-                        issue.repo_owner,
-                        issue.repo_name,
-                        issue.number,
-                    )
-                    if has_blockers:
-                        blocked_count += 1
-                        logger.debug(
-                            "issue_skipped_has_blockers",
-                            issue=issue.number,
-                            title=issue.title,
-                        )
-                        continue
+                if await self._has_blockers_not_done(issue):
+                    blocked_count += 1
+                    continue
                 unblocked_issues.append(issue)
+
+            unblocked_issues = await self._hydrate_issues(unblocked_issues)
+            manager = self._get_manager_agent()
+            if manager:
+                selected = await manager.select_ready_issues(unblocked_issues)
+                unblocked_issues = [issue for issue in unblocked_issues if issue.number in selected]
 
             logger.info(
                 "fetched_ready_issues",
@@ -308,6 +389,7 @@ class AgentPool:
                 IssueStatus.IN_PROGRESS.value,
             )
 
+            issues = await self._hydrate_issues(issues)
             filtered = []
             for issue in issues:
                 if issue.number in self._processed_issues:
@@ -316,7 +398,19 @@ class AgentPool:
                     continue
                 if self.settings.github_agent_label not in issue.labels:
                     continue
+                if issue.assignee:
+                    logger.debug(
+                        "issue_skipped_assigned",
+                        issue=issue.number,
+                        assignee=issue.assignee,
+                    )
+                    continue
                 filtered.append(issue)
+
+            manager = self._get_manager_agent()
+            if manager:
+                selected = await manager.select_resume_issues(filtered)
+                filtered = [issue for issue in filtered if issue.number in selected]
 
             logger.info(
                 "fetched_in_progress_issues",
