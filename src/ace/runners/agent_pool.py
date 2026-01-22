@@ -1,8 +1,9 @@
 """Agent pool manager for concurrent issue processing."""
 
 import asyncio
+import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 from pathlib import Path
@@ -31,6 +32,64 @@ from ace.agents.manager_agent import ManagerAgent
 logger = structlog.get_logger(__name__)
 
 MAX_CONCURRENT_AGENTS = 5
+
+
+def _extract_mcp_items(resp: Any) -> list[dict[str, Any]]:
+    """Normalize MCP tool responses into a list of issue-like dicts."""
+    if resp is None:
+        return []
+
+    for attr in ("structured_content", "structuredContent"):
+        structured = getattr(resp, attr, None)
+        if isinstance(structured, dict) and isinstance(structured.get("result"), list):
+            return structured["result"]
+
+    content = getattr(resp, "content", None)
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                try:
+                    parsed = json.loads(part.get("text", "[]"))
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, list):
+                    return parsed
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            return parsed
+
+    if isinstance(resp, dict):
+        if isinstance(resp.get("result"), list):
+            return resp["result"]
+        structured = resp.get("structuredContent")
+        if isinstance(structured, dict) and isinstance(structured.get("result"), list):
+            return structured["result"]
+        content = resp.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    try:
+                        parsed = json.loads(part.get("text", "[]"))
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(parsed, list):
+                        return parsed
+        if isinstance(content, str):
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return parsed
+
+    if isinstance(resp, list):
+        return resp
+
+    return []
 
 
 class AgentState(str, Enum):
@@ -351,8 +410,8 @@ class AgentPool:
                 }
                 resp = await client.call_tool("list_ready_remote_items", args)
                 issues: list[Issue] = []
-                now = datetime.utcnow()
-                for item in resp or []:
+                now = datetime.now(UTC)
+                for item in _extract_mcp_items(resp):
                     try:
                         issues.append(
                             Issue(
@@ -582,6 +641,10 @@ class AgentPool:
         if not slot:
             logger.warning("no_idle_slots_available", issue=issue.number)
             return False
+
+        # Reserve the slot immediately to avoid oversubscribing slots.
+        slot.state = AgentState.RUNNING
+        slot.issue = issue
 
         # Mark as processed to avoid duplicate spawning
         self._processed_issues.add(issue.number)
