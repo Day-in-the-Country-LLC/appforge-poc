@@ -14,9 +14,11 @@ Follow the ACE issue creation workflow to open issues and set project board stat
 1. Locate the target repo by reading its `project_architecture.md` to confirm where the issue belongs.
 2. Create a discrete, modular issue focused on a single task or goal.
 3. Capture dependencies in the issue description and use GitHub issue relationships to link them.
-4. Choose the execution label: `developer`, `agent:local`, or `agent:remote` based on who/where the work must happen.
-5. Apply exactly one difficulty label: `difficulty:easy`, `difficulty:medium`, or `difficulty:hard`.
-6. Create the issue using `github-mcp` and set project status to `Backlog` using `appforge-mcp`.
+4. For `ditc_terraform` update issues, add an explicit instruction to run the `terraform-apply` skill at the end of the work.
+5. When a new secret is added to Secret Manager via Terraform, create a follow-up issue assigned to `klday` to add the secret value as a version, including this command in the issue: `printf %s \"$SECRET_VALUE\" | gcloud secrets versions add SECRET_NAME --data-file=-`.
+6. Choose the execution label: `developer`, `agent:local`, or `agent:remote` based on who/where the work must happen.
+7. Apply exactly one difficulty label: `difficulty:easy`, `difficulty:medium`, or `difficulty:hard`.
+8. Create the issue using `github-mcp` and set project status to `Backlog` using `appforge-mcp`.
 
 ## References
 
