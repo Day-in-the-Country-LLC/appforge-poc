@@ -773,6 +773,13 @@ class AgentPool:
 
             status = self.get_status()
 
+            if result.get("status") == "max_reached":
+                logger.info(
+                    "drain_mode_max_issues_reached",
+                    session_processed=self._session_processed,
+                )
+                break
+
             # Check if we're done:
             # - No issues were spawned or available
             # - All agents are idle (no active work)
