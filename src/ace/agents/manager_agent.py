@@ -111,6 +111,55 @@ class ManagerAgent:
         )
         return await self._call_and_parse(prompt, fallback=issues)
 
+    async def order_work_items(self, items: list[dict[str, Any]]) -> list[str]:
+        """Order actionable work items by priority."""
+        if not items:
+            return []
+        skill_section = f"\n\nSkill:\n{self.skill_text}\n" if self.skill_text else ""
+        payload = []
+        for item in items:
+            issue = item.get("issue")
+            if not isinstance(issue, Issue):
+                continue
+            payload.append(
+                {
+                    "key": item.get("key"),
+                    "number": issue.number,
+                    "title": issue.title,
+                    "labels": issue.labels,
+                    "repo_owner": issue.repo_owner,
+                    "repo_name": issue.repo_name,
+                    "category": item.get("category"),
+                }
+            )
+        prompt = (
+            "You are the Appforge manager agent. "
+            "Order these work items in the exact sequence they should be processed.\n"
+            "Priority order: pr_comment first, then in_progress, then ready.\n"
+            "Within a category, preserve sensible ordering based on urgency.\n"
+            "Return ONLY a JSON array of item keys, in order.\n"
+            f"{skill_section}\n"
+            "Items:\n"
+            f"{json.dumps(payload, indent=2)}\n"
+        )
+        try:
+            response = await call_openai(
+                prompt,
+                self.model,
+                self._openai_key,
+                max_tokens=200,
+                trace_name="manager_order_work_items",
+                metadata={"item_count": len(payload)},
+            )
+            cleaned = (response or "").strip()
+            parsed = _safe_parse_str_list(cleaned)
+            if not parsed:
+                raise ValueError("manager_order_empty")
+            return parsed
+        except Exception as exc:
+            logger.warning("manager_order_failed", error=str(exc))
+            return []
+
     def _build_prompt(self, mode: str, issues: list[Issue], instruction: str) -> str:
         skill_section = f"\n\nSkill:\n{self.skill_text}\n" if self.skill_text else ""
         issue_block = self._format_issues(issues)
@@ -305,6 +354,23 @@ def _safe_parse_int_list(raw: str) -> list[int]:
         except ValueError:
             continue
     return values
+
+
+def _safe_parse_str_list(raw: str) -> list[str]:
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`\n ")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned.split("\n", 1)[-1].strip()
+    if not cleaned.startswith("[") or not cleaned.endswith("]"):
+        return []
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if isinstance(item, str)]
 
 
 def _safe_parse_json(raw: str) -> dict | list | None:

@@ -121,6 +121,7 @@ class AgentSlot:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error: str | None = None
+    work_key: str | None = None
 
 
 @dataclass
@@ -165,8 +166,9 @@ class AgentPool:
         self._completed_count = 0
         self._failed_count = 0
         self._fatal_error: str | None = None
-        self._processed_issues: set[int] = set()
+        self._processed_issues: set[str] = set()
         self._session_processed: int = 0  # Issues processed in current session
+        self._work_meta_by_key: dict[str, dict[str, Any]] = {}
         self._resume_completed: bool = False
         self._last_cleanup_at: datetime | None = None
         self.max_issues_per_run = max_issues_per_run
@@ -343,6 +345,157 @@ class AgentPool:
 
         return True
 
+    def _issue_key(self, issue: Issue) -> str:
+        return f"issue:{issue.repo_owner}/{issue.repo_name}#{issue.number}"
+
+    def _pr_comment_key(self, issue: Issue, comment_id: int) -> str:
+        return f"pr_comment:{issue.repo_owner}/{issue.repo_name}#{issue.number}:{comment_id}"
+
+    def _filter_actionable(self, issues: list[Issue]) -> list[Issue]:
+        """Filter out issues that are blocked or waiting on developer input."""
+        agent_label = self.settings.github_agent_label
+        return [issue for issue in issues if agent_label in issue.labels]
+
+    async def _build_work_queue(self) -> tuple[list[tuple[Issue, str]], dict[str, int]]:
+        """Build an ordered work queue: PR comments, in-progress, then ready."""
+        pr_items = await self.fetch_pr_comment_work_items()
+        in_progress = self._filter_actionable(await self.fetch_in_progress_issues())
+        ready = self._filter_actionable(await self.fetch_ready_issues())
+
+        seen_keys = set()
+        seen_numbers = set()
+        pr_items = []
+        for item in pr_items:
+            if item["key"] in seen_keys:
+                continue
+            seen_keys.add(item["key"])
+            if item["issue"].number not in seen_numbers:
+                seen_numbers.add(item["issue"].number)
+            pr_items.append(item)
+        in_progress = [issue for issue in in_progress if issue.number not in seen_numbers]
+        ready = [issue for issue in ready if issue.number not in seen_numbers]
+
+        counts = {
+            "pr_comment": len(pr_items),
+            "in_progress": len(in_progress),
+            "ready": len(ready),
+        }
+
+        ordered: list[tuple[Issue, str]] = []
+        self._work_meta_by_key = {}
+        for item in pr_items:
+            ordered.append((item["issue"], item["key"]))
+            self._work_meta_by_key[item["key"]] = item["meta"]
+        for issue in in_progress:
+            key = self._issue_key(issue)
+            ordered.append((issue, key))
+            self._work_meta_by_key[key] = {"work_type": "in_progress"}
+        for issue in ready:
+            key = self._issue_key(issue)
+            ordered.append((issue, key))
+            self._work_meta_by_key[key] = {"work_type": "ready"}
+
+        manager = self._get_manager_agent()
+        if not manager:
+            return ordered, counts
+
+        items = []
+        for item in pr_items:
+            items.append({"category": "pr_comment", "issue": item["issue"], "key": item["key"]})
+        for issue in in_progress:
+            items.append({"category": "in_progress", "issue": issue, "key": self._issue_key(issue)})
+        for issue in ready:
+            items.append({"category": "ready", "issue": issue, "key": self._issue_key(issue)})
+
+        ordered_keys = await manager.order_work_items(items)
+        if not ordered_keys:
+            return ordered, counts
+
+        by_key = {key: issue for issue, key in ordered}
+        queue = []
+        for key in ordered_keys:
+            issue = by_key.get(key)
+            if issue:
+                queue.append((issue, key))
+        for issue, key in ordered:
+            if key not in ordered_keys:
+                queue.append((issue, key))
+        return queue, counts
+
+    async def fetch_pr_comment_issues(self) -> list[Issue]:
+        """Fetch open PRs with comments, filtered for this pool's target."""
+        remote_label = self.settings.github_remote_agent_label
+        local_label = self.settings.github_local_agent_label
+        label = remote_label if self.target == AgentTarget.REMOTE else None
+        if self.target == AgentTarget.LOCAL:
+            label = local_label
+
+        try:
+            issues = await self.issue_queue.list_open_prs_with_comments(
+                self.settings.github_org,
+                label=label,
+            )
+            target_issues = [issue for issue in issues if self._matches_target(issue)]
+            hydrated = await self._hydrate_issues(target_issues)
+            logger.info(
+                "fetched_pr_comment_issues",
+                target=self.target.value,
+                total=len(issues),
+                new=len(target_issues),
+                target_matched=len(target_issues),
+                already_processed=len(self._processed_issues),
+            )
+            return hydrated
+        except Exception as exc:
+            logger.warning("fetch_pr_comment_issues_failed", error=str(exc))
+            return []
+
+    async def fetch_pr_comment_work_items(self) -> list[dict[str, Any]]:
+        """Fetch inline PR review comments as individual work items."""
+        items: list[dict[str, Any]] = []
+        pr_issues = await self.fetch_pr_comment_issues()
+        for pr_issue in pr_issues:
+            if self.settings.github_agent_label not in pr_issue.labels:
+                continue
+            if not pr_issue.repo_owner or not pr_issue.repo_name:
+                continue
+            try:
+                comments = await self.issue_queue.list_pr_review_comments(
+                    pr_issue.repo_owner,
+                    pr_issue.repo_name,
+                    pr_issue.number,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "pr_review_comments_fetch_failed",
+                    issue=pr_issue.number,
+                    error=str(exc),
+                )
+                continue
+            for comment in comments:
+                comment_id = comment.get("id")
+                if not comment_id:
+                    continue
+                key = self._pr_comment_key(pr_issue, int(comment_id))
+                if key in self._processed_issues:
+                    continue
+                items.append(
+                    {
+                        "issue": pr_issue,
+                        "key": key,
+                        "meta": {
+                            "work_type": "pr_comment",
+                            "pr_comment_id": int(comment_id),
+                            "pr_comment_body": comment.get("body") or "",
+                            "pr_comment_path": comment.get("path") or "",
+                            "pr_comment_line": comment.get("line") or comment.get("original_line"),
+                            "pr_comment_side": comment.get("side"),
+                        },
+                    }
+                )
+        logger.info("pr_comment_work_items_fetched", count=len(items))
+        return items
+
     async def fetch_ready_issues(self) -> list[Issue]:
         """Fetch issues that are ready for processing.
 
@@ -372,7 +525,7 @@ class AgentPool:
                 )
 
             # Filter out already processed issues
-            new_issues = [issue for issue in issues if issue.number not in self._processed_issues]
+            new_issues = [issue for issue in issues if self._issue_key(issue) not in self._processed_issues]
 
             # Filter by target environment
             target_issues = [issue for issue in new_issues if self._matches_target(issue)]
@@ -465,7 +618,7 @@ class AgentPool:
             issues = await self._hydrate_issues(issues)
             filtered = []
             for issue in issues:
-                if issue.number in self._processed_issues:
+                if self._issue_key(issue) in self._processed_issues:
                     continue
                 if not self._matches_target(issue):
                     continue
@@ -511,7 +664,7 @@ class AgentPool:
             if self.get_status().idle_slots == 0:
                 skipped += len(in_progress) - spawned - skipped
                 break
-            if await self.spawn_agent(issue):
+            if await self.spawn_agent(issue, self._issue_key(issue)):
                 spawned += 1
             else:
                 skipped += 1
@@ -551,6 +704,9 @@ class AgentPool:
 
         try:
             # Create initial state for the workflow
+            work_key = slot.work_key or self._issue_key(issue)
+            work_meta = self._work_meta_by_key.get(work_key, {})
+            work_type = work_meta.get("work_type", "ready")
             initial_state = WorkerState(
                 issue=issue,
                 issue_number=issue.number,
@@ -561,6 +717,8 @@ class AgentPool:
                     "repo_owner": issue.repo_owner,
                     "repo_name": issue.repo_name,
                     "repo": issue.repo_name,
+                    "work_type": work_type,
+                    **work_meta,
                 },
             )
 
@@ -653,9 +811,10 @@ class AgentPool:
             slot.state = AgentState.IDLE
             slot.issue = None
             slot.task = None
+            slot.work_key = None
             metrics.dec_gauge("ace_active_agents", 1)
 
-    async def spawn_agent(self, issue: Issue) -> bool:
+    async def spawn_agent(self, issue: Issue, work_key: str) -> bool:
         """Spawn an agent for an issue if a slot is available.
 
         Args:
@@ -674,14 +833,201 @@ class AgentPool:
         slot.issue = issue
 
         # Mark as processed to avoid duplicate spawning
-        self._processed_issues.add(issue.number)
+        self._processed_issues.add(work_key)
+        slot.work_key = work_key
 
         # Create and store the task
         slot.task = asyncio.create_task(self._run_agent_for_issue(slot, issue))
         return True
 
+    async def process_work_queue(self) -> dict[str, Any]:
+        """Fetch actionable issues and spawn agents for them.
+
+        Returns:
+            Summary of processing results
+        """
+        logger.info("process_work_queue_starting")
+        if self._fatal_error:
+            raise RuntimeError(self._fatal_error)
+
+        limit = self.max_issues_per_run
+        if limit > 0:
+            remaining = limit - self._session_processed
+            if remaining <= 0:
+                logger.info("max_issues_reached", max_issues=limit)
+                return {
+                    "status": "max_reached",
+                    "spawned": 0,
+                    "skipped": 0,
+                    "pool_status": self.get_status().__dict__,
+                }
+
+        work_queue, counts = await self._build_work_queue()
+
+        if not work_queue:
+            logger.info("no_actionable_issues_found", counts=counts)
+            return {
+                "status": "no_issues",
+                "spawned": 0,
+                "skipped": 0,
+                "pool_status": self.get_status().__dict__,
+            }
+
+        if limit > 0:
+            remaining = limit - self._session_processed
+            work_queue = work_queue[:remaining]
+
+        spawned = 0
+        skipped = 0
+
+        for issue, work_key in work_queue:
+            if self.get_status().idle_slots == 0:
+                logger.info(
+                    "all_slots_busy", remaining_issues=len(work_queue) - spawned - skipped
+                )
+                skipped += len(work_queue) - spawned - skipped
+                break
+
+            if await self.spawn_agent(issue, work_key):
+                spawned += 1
+            else:
+                skipped += 1
+
+        logger.info(
+            "process_work_queue_complete",
+            spawned=spawned,
+            skipped=skipped,
+            counts=counts,
+            pool_status=self.get_status().__dict__,
+        )
+
+        return {
+            "status": "processing",
+            "spawned": spawned,
+            "skipped": skipped,
+            "pool_status": self.get_status().__dict__,
+        }
+
+    async def process_pr_comment_issues(self) -> dict[str, Any]:
+        """Fetch open PRs with comments and spawn agents for them."""
+        logger.info("process_pr_comment_issues_starting")
+        if self._fatal_error:
+            raise RuntimeError(self._fatal_error)
+
+        limit = self.max_issues_per_run
+        if limit > 0:
+            remaining = limit - self._session_processed
+            if remaining <= 0:
+                logger.info("max_issues_reached", max_issues=limit)
+                return {
+                    "status": "max_reached",
+                    "spawned": 0,
+                    "skipped": 0,
+                    "pool_status": self.get_status().__dict__,
+                }
+
+        issues = await self.fetch_pr_comment_issues()
+        if not issues:
+            logger.info("no_pr_comment_issues_found")
+            return {
+                "status": "no_issues",
+                "spawned": 0,
+                "skipped": 0,
+                "pool_status": self.get_status().__dict__,
+            }
+
+        if limit > 0:
+            remaining = limit - self._session_processed
+            issues = issues[:remaining]
+
+        spawned = 0
+        skipped = 0
+        for issue in issues:
+            if self.get_status().idle_slots == 0:
+                logger.info(
+                    "all_slots_busy", remaining_issues=len(issues) - spawned - skipped
+                )
+                skipped += len(issues) - spawned - skipped
+                break
+            if await self.spawn_agent(issue, self._issue_key(issue)):
+                spawned += 1
+            else:
+                skipped += 1
+
+        logger.info(
+            "process_pr_comment_issues_complete",
+            spawned=spawned,
+            skipped=skipped,
+            pool_status=self.get_status().__dict__,
+        )
+        return {
+            "status": "processing",
+            "spawned": spawned,
+            "skipped": skipped,
+            "pool_status": self.get_status().__dict__,
+        }
+
+    async def process_in_progress_issues(self) -> dict[str, Any]:
+        """Fetch in-progress issues and spawn agents for them."""
+        logger.info("process_in_progress_issues_starting")
+        if self._fatal_error:
+            raise RuntimeError(self._fatal_error)
+
+        limit = self.max_issues_per_run
+        if limit > 0:
+            remaining = limit - self._session_processed
+            if remaining <= 0:
+                logger.info("max_issues_reached", max_issues=limit)
+                return {
+                    "status": "max_reached",
+                    "spawned": 0,
+                    "skipped": 0,
+                    "pool_status": self.get_status().__dict__,
+                }
+
+        issues = await self.fetch_in_progress_issues()
+        if not issues:
+            logger.info("no_in_progress_issues_found")
+            return {
+                "status": "no_issues",
+                "spawned": 0,
+                "skipped": 0,
+                "pool_status": self.get_status().__dict__,
+            }
+
+        if limit > 0:
+            remaining = limit - self._session_processed
+            issues = issues[:remaining]
+
+        spawned = 0
+        skipped = 0
+        for issue in issues:
+            if self.get_status().idle_slots == 0:
+                logger.info(
+                    "all_slots_busy", remaining_issues=len(issues) - spawned - skipped
+                )
+                skipped += len(issues) - spawned - skipped
+                break
+            if await self.spawn_agent(issue, self._issue_key(issue)):
+                spawned += 1
+            else:
+                skipped += 1
+
+        logger.info(
+            "process_in_progress_issues_complete",
+            spawned=spawned,
+            skipped=skipped,
+            pool_status=self.get_status().__dict__,
+        )
+        return {
+            "status": "processing",
+            "spawned": spawned,
+            "skipped": skipped,
+            "pool_status": self.get_status().__dict__,
+        }
+
     async def process_ready_issues(self) -> dict[str, Any]:
-        """Fetch ready and in-progress issues and spawn agents for them.
+        """Fetch ready issues and spawn agents for them.
 
         Returns:
             Summary of processing results
@@ -702,18 +1048,10 @@ class AgentPool:
                     "pool_status": self.get_status().__dict__,
                 }
 
-        in_progress_issues = await self.fetch_in_progress_issues()
-
-        # Fetch ready issues from project board
         ready_issues = await self.fetch_ready_issues()
 
-        seen = {issue.number for issue in in_progress_issues}
-        ready_issues = [issue for issue in ready_issues if issue.number not in seen]
-
-        candidate_issues = in_progress_issues + ready_issues
-
-        if not candidate_issues:
-            logger.info("no_ready_or_in_progress_issues_found")
+        if not ready_issues:
+            logger.info("no_ready_issues_found")
             return {
                 "status": "no_issues",
                 "spawned": 0,
@@ -723,20 +1061,20 @@ class AgentPool:
 
         if limit > 0:
             remaining = limit - self._session_processed
-            candidate_issues = candidate_issues[:remaining]
+            ready_issues = ready_issues[:remaining]
 
         spawned = 0
         skipped = 0
 
-        for issue in candidate_issues:
+        for issue in ready_issues:
             if self.get_status().idle_slots == 0:
                 logger.info(
-                    "all_slots_busy", remaining_issues=len(candidate_issues) - spawned - skipped
+                    "all_slots_busy", remaining_issues=len(ready_issues) - spawned - skipped
                 )
-                skipped += len(candidate_issues) - spawned - skipped
+                skipped += len(ready_issues) - spawned - skipped
                 break
 
-            if await self.spawn_agent(issue):
+            if await self.spawn_agent(issue, self._issue_key(issue)):
                 spawned += 1
             else:
                 skipped += 1
@@ -745,8 +1083,6 @@ class AgentPool:
             "process_ready_issues_complete",
             spawned=spawned,
             skipped=skipped,
-            in_progress=len(in_progress_issues),
-            ready=len(ready_issues),
             pool_status=self.get_status().__dict__,
         )
 
@@ -768,13 +1104,10 @@ class AgentPool:
         logger.info("agent_pool_starting", max_agents=self.max_agents, poll_interval=poll_interval)
 
         try:
-            if self.settings.resume_in_progress_issues:
-                await self.resume_in_progress_issues()
-
             while self._running:
                 if self._fatal_error:
                     raise RuntimeError(self._fatal_error)
-                await self.process_ready_issues()
+                await self.process_work_queue()
 
                 await self._maybe_cleanup()
 
@@ -812,8 +1145,8 @@ class AgentPool:
             while self._draining:
                 if self._fatal_error:
                     raise RuntimeError(self._fatal_error)
-                # Fetch and spawn for any ready issues
-                result = await self.process_ready_issues()
+                # Fetch and spawn for actionable work
+                result = await self.process_work_queue()
                 if self._fatal_error:
                     raise RuntimeError(self._fatal_error)
 
@@ -831,8 +1164,8 @@ class AgentPool:
                 # - All agents are idle (no active work)
                 if result["spawned"] == 0 and status.active_agents == 0:
                     # Double-check by fetching again (in case blockers just resolved)
-                    ready_issues = await self.fetch_ready_issues()
-                    if not ready_issues:
+                    work_queue, _ = await self._build_work_queue()
+                    if not work_queue:
                         logger.info(
                             "drain_mode_complete",
                             session_processed=self._session_processed,

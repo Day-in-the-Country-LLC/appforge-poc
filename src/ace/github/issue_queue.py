@@ -96,6 +96,40 @@ class IssueQueue:
         logger.info("issues_listed", count=len(issues))
         return issues
 
+    async def list_open_prs_with_comments(self, org: str, label: str | None = None) -> list[Issue]:
+        """List open PRs with comments (org-wide search)."""
+        query = (
+            f"org:{org} is:pr is:open comments:>0 "
+            '-label:"agent:comments-addressed"'
+        )
+        if label:
+            query += f' label:"{label}"'
+        logger.info("listing_prs_with_comments", org=org, label=label)
+        result = await self.api_client.rest_get("/search/issues", params={"q": query})
+        issues = []
+        for item in result.get("items", []):
+            repo_owner, repo_name = self._parse_repo_from_url(item.get("repository_url", ""))
+            issues.append(self._parse_issue(item, repo_owner=repo_owner, repo_name=repo_name))
+        logger.info("prs_listed_with_comments", count=len(issues))
+        return issues
+
+    async def list_pr_review_comments(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        pr_number: int,
+    ) -> list[dict[str, Any]]:
+        """List inline PR review comments."""
+        logger.info(
+            "listing_pr_review_comments",
+            repo=f"{repo_owner}/{repo_name}",
+            pr=pr_number,
+        )
+        comments = await self.api_client.rest_get(
+            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_number}/comments"
+        )
+        return comments or []
+
     async def list_issues_by_project_status(
         self,
         project_name: str,
@@ -425,3 +459,13 @@ class IssueQueue:
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
+
+    @staticmethod
+    def _parse_repo_from_url(repo_url: str) -> tuple[str | None, str | None]:
+        if "/repos/" not in repo_url:
+            return None, None
+        suffix = repo_url.split("/repos/", 1)[-1].strip("/")
+        parts = suffix.split("/")
+        if len(parts) < 2:
+            return None, None
+        return parts[0], parts[1]

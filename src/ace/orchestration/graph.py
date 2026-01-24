@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from pathlib import Path
@@ -42,8 +43,20 @@ class InstructionBuilder:
         self.instruction_backend = "openai"
         self.instruction_model = self.settings.instruction_model or self.settings.codex_model
 
-    async def build(self, issue, *, agents_md: str | None = None) -> str:
-        prompt = self._build_prompt(issue, agents_md=agents_md)
+    async def build(
+        self,
+        issue,
+        *,
+        agents_md: str | None = None,
+        work_type: str = "ready",
+        pr_context: str | None = None,
+    ) -> str:
+        prompt = self._build_prompt(
+            issue,
+            agents_md=agents_md,
+            work_type=work_type,
+            pr_context=pr_context,
+        )
         instructions = await self._call_model(
             prompt,
             trace_name="issue_instructions",
@@ -107,10 +120,24 @@ class InstructionBuilder:
             )
         return instructions
 
-    def _build_prompt(self, issue, *, agents_md: str | None = None) -> str:
+    def _build_prompt(
+        self,
+        issue,
+        *,
+        agents_md: str | None = None,
+        work_type: str = "ready",
+        pr_context: str | None = None,
+    ) -> str:
         agents_section = ""
         if agents_md:
             agents_section = f"\n\nAGENTS.md (follow these repo practices):\n{agents_md}\n"
+        pr_section = ""
+        if work_type == "pr_comment" and pr_context:
+            pr_section = (
+                "\n\nPR COMMENT CONTEXT (use this to draft fixes):\n"
+                f"{pr_context}\n"
+                "\nFollow the `claude-cli-pr-comment-update` skill.\n"
+            )
         body = f"""
 You are an instruction agent. Write detailed, step-by-step *programmatic* coding instructions
 for the issue below. Output Markdown only. Do not include UI/manual steps.
@@ -121,7 +148,7 @@ If schema changes are needed, generate a timestamped Supabase migration (e.g., s
 Issue Title: {issue.title}
 Issue Body:
 {issue.body}
-{agents_section}
+{agents_section}{pr_section}
 
 Include:
 - Key files/areas to inspect
@@ -170,6 +197,62 @@ def _get_api_client(settings) -> GitHubAPIClient:
     token = resolve_github_token(settings)
     return GitHubAPIClient(token)
 
+
+async def _collect_pr_comment_context(
+    settings,
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int,
+    *,
+    comment_body: str,
+    comment_path: str,
+    comment_line: int | None,
+    context_lines: int = 100,
+) -> str:
+    api_client = _get_api_client(settings)
+    head_sha = None
+    try:
+        pr = await api_client.rest_get(f"/repos/{repo_owner}/{repo_name}/pulls/{pr_number}")
+        head_sha = (pr.get("head") or {}).get("sha")
+    except Exception as exc:
+        logger.warning("pr_head_fetch_failed", issue=pr_number, error=str(exc))
+
+    file_snippet = ""
+    if comment_path and head_sha and comment_line:
+        try:
+            content = await api_client.rest_get(
+                f"/repos/{repo_owner}/{repo_name}/contents/{comment_path}",
+                params={"ref": head_sha},
+            )
+            encoded = content.get("content", "")
+            decoded = base64.b64decode(encoded).decode("utf-8", errors="replace")
+            lines = decoded.splitlines()
+            start = max(comment_line - context_lines - 1, 0)
+            end = min(comment_line + context_lines, len(lines))
+            snippet_lines = lines[start:end]
+            numbered = []
+            for idx, line in enumerate(snippet_lines, start=start + 1):
+                numbered.append(f"{idx:6d}: {line}")
+            file_snippet = "\n".join(numbered)
+        except Exception as exc:
+            logger.warning(
+                "pr_comment_file_context_failed",
+                issue=pr_number,
+                path=comment_path,
+                error=str(exc),
+            )
+
+    payload = {
+        "pr_number": pr_number,
+        "repo": f"{repo_owner}/{repo_name}",
+        "comment": {
+            "body": comment_body,
+            "path": comment_path,
+            "line": comment_line,
+        },
+        "file_context": file_snippet or "File context unavailable.",
+    }
+    return json.dumps(payload, indent=2)
 
 # Workflow steps
 async def fetch_candidates(state: WorkerState) -> WorkerState:
@@ -255,11 +338,13 @@ async def run_agent(state: WorkerState) -> WorkerState:
 
     settings = get_settings()
     github_token = resolve_github_token(settings)
+    work_type = state.metadata.get("work_type", "ready")
     context = {
         "repo_name": state.metadata.get("repo_name", "unknown"),
         "repo_owner": state.metadata.get("repo_owner", "unknown"),
         "issue_number": state.issue_number,
         "labels": state.issue.labels,
+        "work_type": work_type,
     }
 
     repo_owner = state.metadata.get("repo_owner") or state.issue.repo_owner
@@ -293,8 +378,25 @@ async def run_agent(state: WorkerState) -> WorkerState:
         except Exception:
             agents_md = ""
 
+    pr_context = None
+    if work_type == "pr_comment" and repo_owner and repo_name and state.issue_number:
+        pr_context = await _collect_pr_comment_context(
+            settings,
+            repo_owner,
+            repo_name,
+            state.issue_number,
+            comment_body=state.metadata.get("pr_comment_body", ""),
+            comment_path=state.metadata.get("pr_comment_path", ""),
+            comment_line=state.metadata.get("pr_comment_line"),
+        )
+
     instruction_builder = InstructionBuilder(backend=state.backend)
-    instructions = await instruction_builder.build(state.issue, agents_md=agents_md or None)
+    instructions = await instruction_builder.build(
+        state.issue,
+        agents_md=agents_md or None,
+        work_type=work_type,
+        pr_context=pr_context,
+    )
     instructions_path = Path(worktree_path) / "ACE_TASK.md"
     instructions_path.write_text(instructions, encoding="utf-8")
     context["instructions_path"] = str(instructions_path)

@@ -53,6 +53,10 @@ class CliAgent(BaseAgent):
 
         try:
             system_prompt = self._load_system_prompt()
+            if context.get("work_type") == "pr_comment":
+                pr_prompt = self._load_pr_comment_prompt()
+                if pr_prompt:
+                    system_prompt = f"{system_prompt}\n\n{pr_prompt}" if system_prompt else pr_prompt
             prompt_for_cli = prompt
             if system_prompt and self.backend == "codex":
                 prompt_for_cli = f"{system_prompt}\n\n{prompt}"
@@ -67,8 +71,6 @@ class CliAgent(BaseAgent):
             token = resolve_github_token(self.settings)
             env_exports: dict[str, str] = {}
             if token:
-                env_exports[self.settings.github_mcp_token_env] = token
-                env_exports["GITHUB_CONTROL_API_KEY"] = token
                 env_exports["GITHUB_TOKEN"] = token
 
             if self.backend == "codex":
@@ -77,7 +79,6 @@ class CliAgent(BaseAgent):
 
             try:
                 claude_key = resolve_claude_api_key(self.settings)
-                env_exports["CLAUDE_CODE_ADMIN_API_KEY"] = claude_key
                 env_exports["ANTHROPIC_API_KEY"] = claude_key
             except Exception:
                 # If backend is codex, we can skip Claude; otherwise propagate when invoked.
@@ -234,6 +235,18 @@ class CliAgent(BaseAgent):
             return " ".join(text.split())
         except Exception as exc:
             logger.warning("system_prompt_read_failed", path=str(path), error=str(exc))
+            return ""
+
+    def _load_pr_comment_prompt(self) -> str:
+        repo_root = Path(__file__).resolve().parents[3]
+        path = repo_root / "prompts" / "cli_pr_comment_prompt.md"
+        try:
+            if not path.exists():
+                return ""
+            text = path.read_text(encoding="utf-8").strip()
+            return " ".join(text.split())
+        except Exception as exc:
+            logger.warning("pr_comment_prompt_read_failed", path=str(path), error=str(exc))
             return ""
 
     def _session_name(self, context: dict[str, Any]) -> str:

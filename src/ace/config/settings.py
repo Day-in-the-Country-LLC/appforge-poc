@@ -177,7 +177,7 @@ class Settings(BaseSettings):
     # Manager agent
     manager_agent_enabled: bool = True
     manager_agent_model: str = "gpt-5.1-codex-mini"
-    manager_skill_path: str = "~/.codex/skills/appforge-manager-task-cleanup/SKILL.md"
+    manager_skill_path: str = "~/.codex/skills/appforge-manager-work-pickup/SKILL.md"
     manager_agent_tool_loop_enabled: bool = True
     manager_agent_tool_loop_max_steps: int = 6
 
