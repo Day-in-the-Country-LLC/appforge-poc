@@ -283,14 +283,54 @@ class AgentPool:
         self._project_id = project_id
         return project_id
 
+    async def _fetch_blockers_via_appforge_mcp(self, issue: Issue) -> list[Issue]:
+        if not issue.repo_owner or not issue.repo_name:
+            return []
+
+        url = self.settings.appforge_mcp_url.rstrip("/")
+        if not url.endswith("/mcp"):
+            url = f"{url}/mcp"
+
+        try:
+            async with McpClient(url) as client:
+                resp = await client.call_tool(
+                    "list_issue_blockers",
+                    {
+                        "repo_owner": issue.repo_owner,
+                        "repo_name": issue.repo_name,
+                        "issue_number": issue.number,
+                    },
+                )
+        except Exception as exc:
+            raise ValueError(f"❌ ERROR: Failed to fetch issue blockers: {exc}") from exc
+
+        blockers: list[Issue] = []
+        now = datetime.now(UTC)
+        for item in _extract_mcp_items(resp):
+            try:
+                blockers.append(
+                    Issue(
+                        number=int(item["number"]),
+                        title=item.get("title", ""),
+                        body="",
+                        labels=item.get("labels", []),
+                        assignee=None,
+                        state=item.get("state", "open").lower(),
+                        created_at=now,
+                        updated_at=now,
+                        html_url=item.get("html_url", ""),
+                        repo_owner=item.get("repo_owner"),
+                        repo_name=item.get("repo_name"),
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("mcp_blocker_parse_failed", item=item, error=str(exc))
+        return blockers
+
     async def _has_blockers_not_done(self, issue: Issue) -> bool:
         if not issue.repo_owner or not issue.repo_name:
             return False
-        blockers = await self.projects_client.get_issue_blockers(
-            issue.repo_owner,
-            issue.repo_name,
-            issue.number,
-        )
+        blockers = await self._fetch_blockers_via_appforge_mcp(issue)
         if not blockers:
             return False
         project_id = await self._get_project_id()
@@ -559,8 +599,9 @@ class AgentPool:
             return unblocked_issues
 
         except Exception as e:
-            logger.error("fetch_ready_issues_failed", error=str(e))
-            return []
+            error_message = f"❌ ERROR: fetch_ready_issues_failed: {e}"
+            logger.error("fetch_ready_issues_failed", error=error_message)
+            raise ValueError(error_message) from e
 
     async def _fetch_ready_issues_via_mcp(self) -> list[Issue]:
         """Fetch ready issues via appforge MCP server (already filtered by status/label/blockers)."""
@@ -622,7 +663,9 @@ class AgentPool:
                     continue
                 if not self._matches_target(issue):
                     continue
-                if self.settings.github_agent_label not in issue.labels:
+                if not self._filter_actionable([issue]):
+                    continue
+                if await self._has_blockers_not_done(issue):
                     continue
                 if issue.assignee:
                     logger.debug(
@@ -645,8 +688,9 @@ class AgentPool:
             )
             return filtered
         except Exception as e:
-            logger.error("fetch_in_progress_issues_failed", error=str(e))
-            return []
+            error_message = f"❌ ERROR: fetch_in_progress_issues_failed: {e}"
+            logger.error("fetch_in_progress_issues_failed", error=error_message)
+            raise ValueError(error_message) from e
 
     async def resume_in_progress_issues(self) -> dict[str, Any]:
         """Resume issues that were in progress (startup sweep)."""

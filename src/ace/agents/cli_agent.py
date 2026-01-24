@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import time
 from pathlib import Path
 from typing import Any
 
@@ -128,9 +129,11 @@ class CliAgent(BaseAgent):
                 if self.backend == "claude":
                     prompt_to_send = (
                         "Please read ACE_TASK.md in the current directory and execute all instructions end-to-end. "
-                        "If you need action from the developer and cannot complete all instructions, use the `blocked-task-handling` skill to complete the next steps.
-                        "If you are able to finish all instructions, use the `claude-cli-pr-completions` skill to complete the next steps."
-                        "Always finish up by creating ACE_TASK_DONE.json with task_id, summary, files_changed, commands_run"
+                        "If you need action from the developer and cannot complete all instructions, use the "
+                        "`blocked-task-handling` skill to complete the next steps. "
+                        "If you are able to finish all instructions, use the `claude-cli-pr-completion` skill "
+                        "to complete the next steps. "
+                        "Always finish up by creating ACE_TASK_DONE.json with task_id, summary, files_changed, commands_run."
                     )
                 else:
                     prompt_to_send = self._condense_prompt(prompt_for_cli)

@@ -1,12 +1,12 @@
 ---
 name: claude-cli-pr-completion
-description: Use when a coding CLI agent finishes an issue and must create a PR via GitHub MCP, move the issue to In review via Appforge MCP, assign to klday, and write ACE_TASK_DONE.json. Also defer to blocked-task-handling when developer input is required.
+description: Use when all work from ACE_TASK.md is finished to create a PR via GitHub MCP, move the issue to In review with proper issue comments via Appforge MCP, assign to klday, and write ACE_TASK_DONE.json. Also defer to blocked-task-handling when developer input is required.
 ---
 
 # Claude CLI PR Completion
 
 ## Goal
-Finalize completed work with a PR and issue status updates, or handle blocked work by deferring to the blocked workflow.
+Finalize completed work with a PR and issue comments/status updates.
 
 ## Workflow
 
@@ -20,13 +20,16 @@ Finalize completed work with a PR and issue status updates, or handle blocked wo
   - Suggested test steps
 - Add the same agent label as the issue (`agent:remote` or `agent:local`) to the PR.
 
-2) Set issue status to In review (Appforge MCP)
+2) Add issue comment (GitHub MCP)
+- Add a comment to the issue with the PR link and a brief summary of the changes.
+
+3) Set issue status to In review (Appforge MCP)
 - Update the project status to `In review`.
 
-3) Assign issue
+4) Assign issue
 - Assign the issue to `klday` via GitHub MCP.
 
-4) Write `ACE_TASK_DONE.json`
+5) Write `ACE_TASK_DONE.json`
 - Create the file in the repo root (same directory as `ACE_TASK.md`).
 - Use this exact JSON shape:
 
@@ -48,5 +51,5 @@ Finalize completed work with a PR and issue status updates, or handle blocked wo
 
 ## Notes
 - Use GitHub MCP for PR creation, comments, and assignment.
-- Use Appforge MCP for project status updates.
-- Do not open a PR if the issue is blocked.
+- Use Appforge MCP for project status updates and checking blockers in issue relationships.
+- Do not open a PR if the issue is blocked - exit this skill and use `blocked-task-handling` instead.
