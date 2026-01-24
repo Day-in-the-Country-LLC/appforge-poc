@@ -7,6 +7,8 @@ import re
 
 import structlog
 
+from ace.logging_utils import log_key_event
+
 logger = structlog.get_logger(__name__)
 
 SESSION_PREFIX = "ace-"
@@ -108,6 +110,12 @@ class TmuxOps:
                 )
             logger.info("tmux_env_set", session=session_name, keys=list(env.keys()))
         logger.info("tmux_session_started", session=session_name, workdir=str(workdir))
+        log_key_event(
+            logger,
+            "🧵 tmux session started",
+            session=session_name,
+            workdir=str(workdir),
+        )
         return True
 
     def kill_session(self, session_name: str) -> None:

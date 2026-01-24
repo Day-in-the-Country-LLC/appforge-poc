@@ -25,6 +25,7 @@ from ace.github.projects_v2 import ProjectsV2Client
 from ace.github.status_manager import StatusManager
 from ace.metrics import metrics
 from ace.orchestration.state import WorkerState
+from ace.logging_utils import log_key_event
 from ace.workspaces.git_ops import GitOps
 from ace.workspaces.tmux_ops import TmuxOps
 
@@ -41,8 +42,8 @@ class InstructionBuilder:
         self.instruction_backend = "openai"
         self.instruction_model = self.settings.instruction_model or self.settings.codex_model
 
-    async def build(self, issue) -> str:
-        prompt = self._build_prompt(issue)
+    async def build(self, issue, *, agents_md: str | None = None) -> str:
+        prompt = self._build_prompt(issue, agents_md=agents_md)
         instructions = await self._call_model(
             prompt,
             trace_name="issue_instructions",
@@ -58,11 +59,24 @@ class InstructionBuilder:
             or cleaned.startswith("{'id':")
         ):
             preview = cleaned[:400]
-            logger.error("instruction_generation_failed", preview=preview)
+            logger.error(
+                "instruction_generation_failed",
+                issue_number=issue.number,
+                issue_title=issue.title,
+                issue_body=issue.body or "",
+                prompt=prompt,
+                response=instructions or "",
+                preview=preview,
+            )
             raise ValueError(
-                "Instruction agent returned no usable instructions. "
+                "❌ ERROR: Instruction agent returned no usable instructions. "
                 f"Preview: {preview}"
             )
+
+        normalized = cleaned.lower()
+        normalized = normalized.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+        normalized = " ".join(normalized.split())
+
         refusal_markers = [
             "i'm sorry",
             "i am sorry",
@@ -70,28 +84,44 @@ class InstructionBuilder:
             "i can't help",
             "cannot assist",
             "can't assist",
+            "can't help with that",
+            "cannot help with that",
+            "i can't help with that",
+            "i cannot help with that",
+            "i’m sorry",
         ]
-        lower_cleaned = cleaned.lower()
-        if any(marker in lower_cleaned for marker in refusal_markers):
+        if any(marker in normalized for marker in refusal_markers):
             preview = cleaned[:400]
-            logger.error("instruction_generation_refused", preview=preview)
+            logger.error(
+                "instruction_generation_refused",
+                issue_number=issue.number,
+                issue_title=issue.title,
+                issue_body=issue.body or "",
+                prompt=prompt,
+                response=instructions or "",
+                preview=preview,
+            )
             raise ValueError(
-                "Instruction agent refused to provide steps. "
+                "❌ ERROR: Instruction agent refused to provide steps. "
                 f"Preview: {preview}"
             )
         return instructions
 
-    def _build_prompt(self, issue) -> str:
+    def _build_prompt(self, issue, *, agents_md: str | None = None) -> str:
+        agents_section = ""
+        if agents_md:
+            agents_section = f"\n\nAGENTS.md (follow these repo practices):\n{agents_md}\n"
         body = f"""
 You are an instruction agent. Write detailed, step-by-step *programmatic* coding instructions
 for the issue below. Output Markdown only. Do not include UI/manual steps.
-Before writing steps, check if AGENTS.md exists in the repo root and follow any practices listed there.
+Assume the repository is available; do not claim you cannot access files.
 Do not refuse or apologize; if information is missing, make reasonable assumptions and proceed with best-effort coding steps.
 If schema changes are needed, generate a timestamped Supabase migration (e.g., supabase/migrations/<YYYYMMDDHHMMSS>__desc.sql) using the current system time; do not place schema DDL in docs.
 
 Issue Title: {issue.title}
 Issue Body:
 {issue.body}
+{agents_section}
 
 Include:
 - Key files/areas to inspect
@@ -255,8 +285,16 @@ async def run_agent(state: WorkerState) -> WorkerState:
     context["branch_name"] = branch_name
     context["workspace_path"] = workspace_path
 
+    agents_md = ""
+    agents_path = worktree_path / "AGENTS.md"
+    if agents_path.exists():
+        try:
+            agents_md = agents_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            agents_md = ""
+
     instruction_builder = InstructionBuilder(backend=state.backend)
-    instructions = await instruction_builder.build(state.issue)
+    instructions = await instruction_builder.build(state.issue, agents_md=agents_md or None)
     instructions_path = Path(worktree_path) / "ACE_TASK.md"
     instructions_path.write_text(instructions, encoding="utf-8")
     context["instructions_path"] = str(instructions_path)
@@ -265,6 +303,12 @@ async def run_agent(state: WorkerState) -> WorkerState:
         issue=state.issue_number,
         path=str(instructions_path),
         preview=instructions[:400],
+    )
+    log_key_event(
+        logger,
+        "🧭 Instructions created",
+        issue=state.issue_number,
+        path=str(instructions_path),
     )
 
     if settings.agent_execution_mode.lower() in {"tmux", "cli"}:
@@ -302,6 +346,12 @@ async def run_agent(state: WorkerState) -> WorkerState:
             session=session_name,
             attach=f"tmux attach -t {session_name}",
         )
+        log_key_event(
+            logger,
+            f"🧵 TMUX SESSION READY — ATTACH NOW: tmux attach -t {session_name}",
+            session=session_name,
+            attach=f"tmux attach -t {session_name}",
+        )
 
     # If running in tmux/cli, wait for ACE_TASK_DONE.json to appear before success.
     if settings.agent_execution_mode.lower() in {"tmux", "cli"} and session_name:
@@ -311,16 +361,56 @@ async def run_agent(state: WorkerState) -> WorkerState:
         start = time.monotonic()
         while True:
             if done_path.exists():
+                marker: dict[str, Any] = {}
                 try:
                     marker = json.loads(done_path.read_text(encoding="utf-8"))
-                    summary = marker.get("summary", "")
                 except Exception:
-                    summary = ""
+                    marker = {}
+                summary = marker.get("summary", "")
+                files_changed = marker.get("files_changed") if isinstance(marker.get("files_changed"), list) else []
+                commands_run = marker.get("commands_run") if isinstance(marker.get("commands_run"), list) else []
+                normalized_summary = " ".join(str(summary).lower().split())
+                refusal_markers = [
+                    "no actionable instructions",
+                    "refusal",
+                    "refused",
+                    "can't help",
+                    "cannot help",
+                    "i'm sorry",
+                    "i am sorry",
+                ]
+                if any(marker_text in normalized_summary for marker_text in refusal_markers):
+                    error_message = summary or "Instruction refusal detected in ACE_TASK_DONE.json."
+                    log_key_event(
+                        logger,
+                        f"❌ ERROR: {error_message}",
+                        issue=state.issue_number,
+                        path=str(done_path),
+                    )
+                    state.agent_result = AgentResult(
+                        status=AgentStatus.FAILED,
+                        output=error_message,
+                        files_changed=files_changed,
+                        commands_run=commands_run,
+                        error="instruction_refusal",
+                    )
+                    state.error = state.agent_result.error
+                    break
+                log_key_event(
+                    logger,
+                    "✅ ACE_TASK_DONE.json found",
+                    issue=state.issue_number,
+                    task_id=marker.get("task_id"),
+                    summary=summary,
+                    files_changed_count=len(files_changed),
+                    commands_run_count=len(commands_run),
+                    path=str(done_path),
+                )
                 state.agent_result = AgentResult(
                     status=AgentStatus.SUCCESS,
                     output=summary or "Completed via CLI (ACE_TASK_DONE.json found).",
-                    files_changed=[],
-                    commands_run=[],
+                    files_changed=files_changed,
+                    commands_run=commands_run,
                 )
                 break
             if not tmux.session_exists(session_name):
@@ -363,7 +453,12 @@ async def evaluate_result(state: WorkerState) -> WorkerState:
         if not state.error:
             state.error = state.agent_result.error or state.agent_result.output or "agent_failed"
     # If any prior step set an error (e.g., PR creation), treat as failure.
-    if state.error and not (state.agent_result and state.agent_result.status == AgentStatus.SUCCESS):
+    if state.error:
+        log_key_event(
+            logger,
+            f"❌ ERROR: {state.error}",
+            issue=state.issue_number,
+        )
         state.agent_result = AgentResult(
             status=AgentStatus.FAILED,
             output=state.error,
@@ -375,116 +470,76 @@ async def evaluate_result(state: WorkerState) -> WorkerState:
     return state
 
 
-async def handle_blocked(state: WorkerState) -> WorkerState:
-    logger.info("step_handle_blocked", issue=state.issue_number)
-    state.current_step = "handle_blocked"
+async def manager_cleanup(state: WorkerState) -> WorkerState:
+    logger.info("step_manager_cleanup", issue=state.issue_number)
+    state.current_step = "manager_cleanup"
 
-    if state.agent_result and state.agent_result.blocked_questions:
+    workdir = Path(state.workspace_path) if state.workspace_path else None
+    done_path = workdir / "ACE_TASK_DONE.json" if workdir else None
+    task_path = workdir / "ACE_TASK.md" if workdir else None
+
+    status = "unknown"
+    if done_path and done_path.exists():
+        marker: dict[str, Any] = {}
         try:
-            settings = get_settings()
-            api_client = _get_api_client(settings)
-            projects_client = ProjectsV2Client(api_client)
-            issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
-            status_manager = StatusManager(issue_queue)
+            marker = json.loads(done_path.read_text(encoding="utf-8"))
+        except Exception:
+            marker = {}
+        raw_status = str(marker.get("status") or marker.get("state") or "").lower()
+        blocked_value = marker.get("blocked")
+        blocked_questions = marker.get("blocked_questions")
+        if raw_status == "blocked" or blocked_value is True:
+            status = "blocked"
+        elif blocked_questions:
+            status = "blocked"
+        else:
+            status = "completed"
+    elif done_path:
+        status = "missing_done_file"
 
-            repo_owner = state.metadata.get("repo_owner") or state.issue.repo_owner
-            repo_name = state.metadata.get("repo_name") or state.issue.repo_name
-            await status_manager.mark_blocked(
-                state.issue_number,
-                state.agent_result.blocked_questions,
-                assignee="kristinday",
-                repo_owner=repo_owner,
-                repo_name=repo_name,
-            )
-        except Exception as e:
-            logger.error("mark_blocked_failed", issue=state.issue_number, error=str(e))
+    if state.agent_result and state.agent_result.status == AgentStatus.FAILED:
+        status = "failed"
 
-    state.last_update = datetime.now()
-    return state
+    log_key_event(
+        logger,
+        f"🧹 MANAGER CLEANUP: {status}",
+        issue=state.issue_number,
+        status=status,
+        workdir=str(workdir) if workdir else None,
+    )
 
-
-async def open_pr(state: WorkerState) -> WorkerState:
-    logger.info("step_open_pr", issue=state.issue_number)
-    state.current_step = "open_pr"
-
-    if state.issue and state.agent_result and state.agent_result.status == AgentStatus.SUCCESS:
+    session_name = None
+    if state.agent_result and isinstance(state.agent_result.metadata, dict):
+        session_name = state.agent_result.metadata.get("session_name")
+    if session_name:
         try:
-            settings = get_settings()
-            github_token = resolve_github_token(settings)
-            api_client = GitHubAPIClient(github_token)
-            issue_queue = IssueQueue(api_client, state.issue.repo_owner, state.issue.repo_name)
-
-            pr_title = f"Agent: {state.issue.title}"
-            pr_body = f"Closes #{state.issue.number}\n\nWork completed by agent."
-            head = f"{state.issue.repo_owner}:{state.branch_name}"
-            pr = await issue_queue.create_pull_request(
-                title=pr_title,
-                body=pr_body,
-                head=head,
-                base=settings.github_base_branch,
-                repo_owner=state.issue.repo_owner,
-                repo_name=state.issue.repo_name,
+            TmuxOps().kill_session(session_name)
+        except Exception as exc:
+            logger.warning(
+                "manager_cleanup_tmux_kill_failed",
+                issue=state.issue_number,
+                session=session_name,
+                error=str(exc),
             )
-            state.pr_number = pr.get("number")
-            state.pr_url = pr.get("html_url")
-        except Exception as e:
-            logger.error("pr_creation_failed", issue=state.issue_number, error=str(e))
-            state.error = state.error or str(e)
 
-    state.last_update = datetime.now()
-    return state
-
-
-async def post_failure(state: WorkerState) -> WorkerState:
-    logger.info("step_post_failure", issue=state.issue_number, error=state.error)
-    state.current_step = "post_failure"
-
-    if state.issue_number and state.error:
-        try:
-            settings = get_settings()
-            api_client = _get_api_client(settings)
-            projects_client = ProjectsV2Client(api_client)
-            issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
-            status_manager = StatusManager(issue_queue)
-
-            repo_owner = state.metadata.get("repo_owner") or state.issue.repo_owner
-            repo_name = state.metadata.get("repo_name") or state.issue.repo_name
-            await status_manager.mark_failed(
-                state.issue_number,
-                state.error,
-                repo_owner=repo_owner,
-                repo_name=repo_name,
-            )
-        except Exception as e:
-            logger.error("mark_failed_failed", issue=state.issue_number, error=str(e))
-
-    state.last_update = datetime.now()
-    return state
-
-
-async def mark_done(state: WorkerState) -> WorkerState:
-    logger.info("step_mark_done", issue=state.issue_number, pr=state.pr_number)
-    state.current_step = "mark_done"
-
-    if state.issue_number and state.pr_number and state.pr_url:
-        try:
-            settings = get_settings()
-            api_client = _get_api_client(settings)
-            projects_client = ProjectsV2Client(api_client)
-            issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
-            status_manager = StatusManager(issue_queue)
-
-            repo_owner = state.metadata.get("repo_owner") or state.issue.repo_owner
-            repo_name = state.metadata.get("repo_name") or state.issue.repo_name
-            await status_manager.mark_done(
-                state.issue_number,
-                state.pr_number,
-                state.pr_url,
-                repo_owner=repo_owner,
-                repo_name=repo_name,
-            )
-        except Exception as e:
-            logger.error("mark_done_failed", issue=state.issue_number, error=str(e))
+    for path, label in ((done_path, "ACE_TASK_DONE.json"), (task_path, "ACE_TASK.md")):
+        if path and path.exists():
+            try:
+                path.unlink()
+                logger.info(
+                    "manager_cleanup_deleted_file",
+                    issue=state.issue_number,
+                    path=str(path),
+                    label=label,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "manager_cleanup_delete_failed",
+                    issue=state.issue_number,
+                    path=str(path),
+                    label=label,
+                    error=str(exc),
+                )
 
     state.last_update = datetime.now()
     return state
@@ -499,10 +554,7 @@ def create_workflow_graph() -> StateGraph:
     workflow.add_node("select_backend", select_backend)
     workflow.add_node("run_agent", run_agent)
     workflow.add_node("evaluate_result", evaluate_result)
-    workflow.add_node("handle_blocked", handle_blocked)
-    workflow.add_node("open_pr", open_pr)
-    workflow.add_node("post_failure", post_failure)
-    workflow.add_node("mark_done", mark_done)
+    workflow.add_node("manager_cleanup", manager_cleanup)
 
     workflow.set_entry_point("fetch_candidates")
 
@@ -511,30 +563,9 @@ def create_workflow_graph() -> StateGraph:
     workflow.add_edge("hydrate_context", "select_backend")
     workflow.add_edge("select_backend", "run_agent")
     workflow.add_edge("run_agent", "evaluate_result")
+    workflow.add_edge("evaluate_result", "manager_cleanup")
 
-    def route_after_evaluate(state: WorkerState) -> str:
-        if state.agent_result and state.agent_result.blocked_questions:
-            return "handle_blocked"
-        elif state.agent_result and state.agent_result.status.value == "success" and not state.error:
-            return "open_pr"
-        else:
-            return "post_failure"
-
-    workflow.add_conditional_edges(
-        "evaluate_result",
-        route_after_evaluate,
-        {
-            "handle_blocked": "handle_blocked",
-            "open_pr": "open_pr",
-            "post_failure": "post_failure",
-        },
-    )
-
-    workflow.add_edge("handle_blocked", "mark_done")
-    workflow.add_edge("open_pr", "mark_done")
-    workflow.add_edge("post_failure", "mark_done")
-
-    workflow.set_finish_point("mark_done")
+    workflow.set_finish_point("manager_cleanup")
     return workflow
 
 

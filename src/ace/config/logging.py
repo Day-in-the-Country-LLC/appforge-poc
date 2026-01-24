@@ -10,7 +10,7 @@ import structlog
 def configure_logging(debug: bool = False, log_format: str | None = None) -> None:
     """Configure structured logging with structlog."""
     log_level = logging.DEBUG if debug else logging.INFO
-    format_value = (log_format or os.getenv("ACE_LOG_FORMAT", "json")).lower()
+    format_value = (log_format or os.getenv("ACE_LOG_FORMAT", "console")).lower()
 
     shared_processors = [
         structlog.stdlib.filter_by_level,

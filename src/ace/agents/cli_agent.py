@@ -79,16 +79,13 @@ class CliAgent(BaseAgent):
                 claude_key = resolve_claude_api_key(self.settings)
                 env_exports["CLAUDE_CODE_ADMIN_API_KEY"] = claude_key
                 env_exports["ANTHROPIC_API_KEY"] = claude_key
-                env_exports["CLAUDE_API_KEY"] = claude_key
             except Exception:
                 # If backend is codex, we can skip Claude; otherwise propagate when invoked.
                 if self.backend == "claude":
                     raise
 
-            gcp_credentials = context.get("gcp_credentials_path") or self.settings.gcp_credentials_path
-            if gcp_credentials:
-                env_exports["GOOGLE_APPLICATION_CREDENTIALS"] = gcp_credentials
-                env_exports["GCP_CREDENTIALS_FILE"] = gcp_credentials
+            env_exports["DISABLE_LOGIN_COMMAND"] = "1"
+            env_exports["FORCE_CODE_TERMINAL"] = "1"
 
             if token:
                 ensure_mcp_config(workdir, self.backend, token, self.settings)
@@ -97,6 +94,11 @@ class CliAgent(BaseAgent):
 
             # Start bare session, then send exports + exec codex in bash -lc with desired flags
             created = self.tmux.start_session(session_name, workdir, [], env=env_exports)
+            if not self.tmux.session_exists(session_name):
+                raise RuntimeError(
+                    "tmux session failed to start; session not found after creation "
+                    f"(session='{session_name}', workdir='{workdir}')"
+                )
 
             export_parts = [f"export {k}={shlex.quote(v)}" for k, v in env_exports.items()]
             exec_cmd = shlex.join(command)
@@ -143,7 +145,12 @@ class CliAgent(BaseAgent):
                 },
             )
         except Exception as e:
-            logger.error("cli_agent_spawn_failed", error=str(e))
+            logger.error(
+                "cli_agent_spawn_failed",
+                error=str(e),
+                session=session_name if "session_name" in locals() else None,
+                workdir=str(workdir) if "workdir" in locals() else None,
+            )
             return AgentResult(
                 status=AgentStatus.FAILED,
                 output="",
@@ -244,31 +251,28 @@ class CliAgent(BaseAgent):
             return
 
         try:
-            output = ""
-            try:
-                output = self.tmux.capture_session_output(session_name, lines=800)
-            except Exception as exc:
-                logger.warning("claude_onboarding_capture_failed", session=session_name, error=str(exc))
-
-            lowered = output.lower()
-            sent = False
-
-            if "preferred text style" in lowered or "select your text style" in lowered:
-                self.tmux.send_enter(session_name, repeat=1, delay_seconds=0.4)
-                sent = True
-
-            if "detected a custom api key" in lowered and "anthropic_api_key" in lowered:
-                # Choose "Yes" to use the provided API key.
-                self.tmux.send_prompt(session_name, "1", delay_seconds=0.6 if sent else 0.4)
-                sent = True
-
-            if not sent:
-                logger.info("claude_onboarding_no_known_prompt", session=session_name)
-
-            sentinel.parent.mkdir(parents=True, exist_ok=True)
-            sentinel.write_text("claude onboarding inputs sent\n", encoding="utf-8")
+            output = self.tmux.capture_session_output(session_name, lines=800)
         except Exception as exc:
-            logger.warning("claude_onboarding_inputs_failed", session=session_name, error=str(exc))
+            raise RuntimeError(
+                f"❌ ERROR: Claude onboarding capture failed: {exc}"
+            ) from exc
+
+        lowered = output.lower()
+        if "preferred text style" in lowered or "select your text style" in lowered:
+            raise RuntimeError(
+                "❌ ERROR: Claude CLI onboarding prompt detected for text style selection. "
+                "Complete onboarding manually, then rerun."
+            )
+
+        if "detected a custom api key" in lowered and "anthropic_api_key" in lowered:
+            raise RuntimeError(
+                "❌ ERROR: Claude CLI onboarding prompt detected for API key confirmation. "
+                "Complete onboarding manually, then rerun."
+            )
+
+        logger.info("claude_onboarding_no_known_prompt", session=session_name)
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text("claude onboarding inputs sent\n", encoding="utf-8")
 
     def _ensure_claude_guide(self, workdir: Path) -> None:
         """Copy a shared CLAUDE.md into the workspace if one isn't present."""

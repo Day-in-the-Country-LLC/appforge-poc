@@ -175,26 +175,14 @@ class Settings(BaseSettings):
     claude_guide_path: str = os.getenv("CLAUDE_GUIDE_PATH", "~/.ace/CLAUDE.md")
 
     # Manager agent
-    manager_agent_enabled: bool = (
-        os.getenv("MANAGER_AGENT_ENABLED", "false").lower() == "true"
-    )
+    manager_agent_enabled: bool = True
     manager_agent_model: str = os.getenv("MANAGER_AGENT_MODEL", "")
-    manager_skill_path: str = os.getenv(
-        "MANAGER_SKILL_PATH",
-        "~/.codex/skills/appforge-manager-issue-management/SKILL.md",
-    )
-    manager_agent_tool_loop_enabled: bool = (
-        os.getenv("MANAGER_AGENT_TOOL_LOOP_ENABLED", "true").lower() == "true"
-    )
-    manager_agent_tool_loop_max_steps: int = int(
-        os.getenv("MANAGER_AGENT_TOOL_LOOP_MAX_STEPS", "6")
-    )
+    manager_skill_path: str = "~/.codex/skills/appforge-manager-task-cleanup/SKILL.md"
+    manager_agent_tool_loop_enabled: bool = True
+    manager_agent_tool_loop_max_steps: int = 6
 
     # LangSmith tracing
-    langsmith_enabled: bool = (
-        os.getenv("LANGSMITH_ENABLED", os.getenv("LANGCHAIN_TRACING_V2", "false")).lower()
-        == "true"
-    )
+    langsmith_enabled: bool = os.getenv("LANGSMITH_ENABLED", "false").lower() == "true"
     langsmith_api_key: str = os.getenv("LANGSMITH_API_KEY", os.getenv("LANGCHAIN_API_KEY", ""))
     langsmith_secret_name: str = os.getenv(
         "LANGSMITH_SECRET_NAME", "LANGSMITH_ADS_OPTIMIZATION_KEY"

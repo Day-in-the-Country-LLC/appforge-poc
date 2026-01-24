@@ -20,6 +20,7 @@ from ace.github.status_manager import IssueStatus
 from ace.metrics import metrics
 from ace.orchestration.graph import get_compiled_graph
 from ace.orchestration.state import WorkerState
+from ace.logging_utils import log_key_event
 from ace.workspaces.git_ops import GitOps
 from ace.workspaces.tmux_ops import (
     TmuxOps,
@@ -163,11 +164,24 @@ class AgentPool:
         self._draining = False  # Drain mode: process until queue empty
         self._completed_count = 0
         self._failed_count = 0
+        self._fatal_error: str | None = None
         self._processed_issues: set[int] = set()
         self._session_processed: int = 0  # Issues processed in current session
         self._resume_completed: bool = False
         self._last_cleanup_at: datetime | None = None
         self.max_issues_per_run = max_issues_per_run
+
+    def _format_fatal_error(self, error: str) -> str:
+        message = (error or "unexpected failure").strip()
+        if not message.startswith("❌ ERROR"):
+            message = f"❌ ERROR: {message}"
+        return message
+
+    def _set_fatal_error(self, error: str) -> None:
+        if self._fatal_error:
+            return
+        self._fatal_error = self._format_fatal_error(error)
+        self.stop()
 
     @property
     def api_client(self) -> GitHubAPIClient:
@@ -554,11 +568,6 @@ class AgentPool:
             graph = get_compiled_graph()
             final_state = await graph.ainvoke(initial_state)
 
-            slot.state = AgentState.COMPLETED
-            slot.completed_at = datetime.now()
-            self._completed_count += 1
-            self._session_processed += 1
-
             # Handle both dict and WorkerState return types from graph
             agent_result = None
             if isinstance(final_state, dict):
@@ -571,6 +580,7 @@ class AgentPool:
                 agent_result = final_state.agent_result
 
             result_status = "success"
+            status_value = None
             if agent_result:
                 if isinstance(agent_result, dict):
                     status_value = agent_result.get("status")
@@ -578,6 +588,21 @@ class AgentPool:
                     status_value = agent_result.status.value
                 if status_value != "success":
                     result_status = "failed"
+
+            if result_status == "failed":
+                error_message = None
+                if agent_result:
+                    if isinstance(agent_result, dict):
+                        error_message = agent_result.get("error") or agent_result.get("output")
+                    else:
+                        error_message = agent_result.error or agent_result.output
+                error_message = error_message or "agent reported failure"
+                raise RuntimeError(self._format_fatal_error(error_message))
+
+            slot.state = AgentState.COMPLETED
+            slot.completed_at = datetime.now()
+            self._completed_count += 1
+            self._session_processed += 1
 
             duration_seconds = (slot.completed_at - slot.started_at).total_seconds()
             metrics.observe_summary(
@@ -603,6 +628,7 @@ class AgentPool:
             slot.completed_at = datetime.now()
             slot.error = str(e)
             self._failed_count += 1
+            self._session_processed += 1
             duration_seconds = (slot.completed_at - slot.started_at).total_seconds()
             metrics.observe_summary(
                 "ace_agent_duration_seconds",
@@ -620,6 +646,7 @@ class AgentPool:
                 issue=issue.number,
                 error=str(e),
             )
+            self._set_fatal_error(str(e))
 
         finally:
             # Mark slot as idle for next issue
@@ -654,12 +681,14 @@ class AgentPool:
         return True
 
     async def process_ready_issues(self) -> dict[str, Any]:
-        """Fetch ready issues and spawn agents for them.
+        """Fetch ready and in-progress issues and spawn agents for them.
 
         Returns:
             Summary of processing results
         """
         logger.info("process_ready_issues_starting")
+        if self._fatal_error:
+            raise RuntimeError(self._fatal_error)
 
         limit = self.max_issues_per_run
         if limit > 0:
@@ -673,11 +702,18 @@ class AgentPool:
                     "pool_status": self.get_status().__dict__,
                 }
 
+        in_progress_issues = await self.fetch_in_progress_issues()
+
         # Fetch ready issues from project board
         ready_issues = await self.fetch_ready_issues()
 
-        if not ready_issues:
-            logger.info("no_ready_issues_found")
+        seen = {issue.number for issue in in_progress_issues}
+        ready_issues = [issue for issue in ready_issues if issue.number not in seen]
+
+        candidate_issues = in_progress_issues + ready_issues
+
+        if not candidate_issues:
+            logger.info("no_ready_or_in_progress_issues_found")
             return {
                 "status": "no_issues",
                 "spawned": 0,
@@ -687,17 +723,17 @@ class AgentPool:
 
         if limit > 0:
             remaining = limit - self._session_processed
-            ready_issues = ready_issues[:remaining]
+            candidate_issues = candidate_issues[:remaining]
 
         spawned = 0
         skipped = 0
 
-        for issue in ready_issues:
+        for issue in candidate_issues:
             if self.get_status().idle_slots == 0:
                 logger.info(
-                    "all_slots_busy", remaining_issues=len(ready_issues) - spawned - skipped
+                    "all_slots_busy", remaining_issues=len(candidate_issues) - spawned - skipped
                 )
-                skipped += len(ready_issues) - spawned - skipped
+                skipped += len(candidate_issues) - spawned - skipped
                 break
 
             if await self.spawn_agent(issue):
@@ -709,6 +745,8 @@ class AgentPool:
             "process_ready_issues_complete",
             spawned=spawned,
             skipped=skipped,
+            in_progress=len(in_progress_issues),
+            ready=len(ready_issues),
             pool_status=self.get_status().__dict__,
         )
 
@@ -729,22 +767,25 @@ class AgentPool:
         self._session_processed = 0
         logger.info("agent_pool_starting", max_agents=self.max_agents, poll_interval=poll_interval)
 
-        if self.settings.resume_in_progress_issues:
-            try:
+        try:
+            if self.settings.resume_in_progress_issues:
                 await self.resume_in_progress_issues()
-            except Exception as e:
-                logger.error("resume_in_progress_failed", error=str(e))
 
-        while self._running:
-            try:
+            while self._running:
+                if self._fatal_error:
+                    raise RuntimeError(self._fatal_error)
                 await self.process_ready_issues()
-            except Exception as e:
-                logger.error("pool_cycle_error", error=str(e))
 
-            await self._maybe_cleanup()
+                await self._maybe_cleanup()
 
-            # Wait before next poll
-            await asyncio.sleep(poll_interval)
+                if self._fatal_error:
+                    raise RuntimeError(self._fatal_error)
+
+                # Wait before next poll
+                await asyncio.sleep(poll_interval)
+        except Exception as e:
+            self._set_fatal_error(str(e))
+            raise RuntimeError(self._fatal_error) from e
 
         logger.info("agent_pool_stopped")
 
@@ -767,38 +808,48 @@ class AgentPool:
 
         logger.info("drain_mode_starting", max_agents=self.max_agents)
 
-        while self._draining:
-            # Fetch and spawn for any ready issues
-            result = await self.process_ready_issues()
+        try:
+            while self._draining:
+                if self._fatal_error:
+                    raise RuntimeError(self._fatal_error)
+                # Fetch and spawn for any ready issues
+                result = await self.process_ready_issues()
+                if self._fatal_error:
+                    raise RuntimeError(self._fatal_error)
 
-            status = self.get_status()
+                status = self.get_status()
 
-            if result.get("status") == "max_reached":
-                logger.info(
-                    "drain_mode_max_issues_reached",
-                    session_processed=self._session_processed,
-                )
-                break
-
-            # Check if we're done:
-            # - No issues were spawned or available
-            # - All agents are idle (no active work)
-            if result["spawned"] == 0 and status.active_agents == 0:
-                # Double-check by fetching again (in case blockers just resolved)
-                ready_issues = await self.fetch_ready_issues()
-                if not ready_issues:
+                if result.get("status") == "max_reached":
                     logger.info(
-                        "drain_mode_complete",
+                        "drain_mode_max_issues_reached",
                         session_processed=self._session_processed,
-                        duration_seconds=(datetime.now() - session_start).total_seconds(),
                     )
                     break
 
-            # Wait before next check
-            await self._maybe_cleanup()
-            await asyncio.sleep(check_interval)
+                # Check if we're done:
+                # - No issues were spawned or available
+                # - All agents are idle (no active work)
+                if result["spawned"] == 0 and status.active_agents == 0:
+                    # Double-check by fetching again (in case blockers just resolved)
+                    ready_issues = await self.fetch_ready_issues()
+                    if not ready_issues:
+                        logger.info(
+                            "drain_mode_complete",
+                            session_processed=self._session_processed,
+                            duration_seconds=(datetime.now() - session_start).total_seconds(),
+                        )
+                        break
 
-        self._draining = False
+                # Wait before next check
+                await self._maybe_cleanup()
+                if self._fatal_error:
+                    raise RuntimeError(self._fatal_error)
+                await asyncio.sleep(check_interval)
+        except Exception as e:
+            self._set_fatal_error(str(e))
+            raise RuntimeError(self._fatal_error) from e
+        finally:
+            self._draining = False
 
         return {
             "status": "complete",
@@ -901,6 +952,11 @@ class AgentPool:
 
             logger.info(
                 "cleanup_tmux_session",
+                session=session_name,
+            )
+            log_key_event(
+                logger,
+                "🧹 tmux session cleaned up",
                 session=session_name,
             )
             tmux.kill_session(session_name)
