@@ -18,6 +18,7 @@ Finalize completed work with a PR and issue status updates, or handle blocked wo
 - Body must include:
   - Summary of work completed
   - Suggested test steps
+- Add the same agent label as the issue (`agent:remote` or `agent:local`) to the PR.
 
 2) Set issue status to In review (Appforge MCP)
 - Update the project status to `In review`.

@@ -18,7 +18,11 @@ Stop cleanly when developer input is required, leave a clear blocking note, and 
 - Post a single comment to the GitHub issue starting with `BLOCKED:`.
 - Keep it short and actionable (what is needed, where to find it, who should provide it).
 
-3) Write `ACE_TASK_DONE.json`
+3) Update project status and assignment
+- Set project status to `Blocked` via Appforge MCP.
+- Assign the issue to `klday` via GitHub MCP.
+
+4) Write `ACE_TASK_DONE.json`
 - Create the file in the repo root (same directory as `ACE_TASK.md`).
 - Use this exact JSON shape:
 
@@ -31,7 +35,7 @@ Stop cleanly when developer input is required, leave a clear blocking note, and 
 }
 ```
 
-4) Stop execution
+5) Stop execution
 - Do not keep working until the blocker is resolved.
 - Exit after writing `ACE_TASK_DONE.json`.
 

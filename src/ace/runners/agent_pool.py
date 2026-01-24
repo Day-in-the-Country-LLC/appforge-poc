@@ -142,7 +142,7 @@ class AgentPool:
     def __init__(
         self,
         max_agents: int = MAX_CONCURRENT_AGENTS,
-        target: AgentTarget = AgentTarget.ANY,
+        target: AgentTarget = AgentTarget.REMOTE,
         max_issues_per_run: int = 0,
     ):
         """Initialize the agent pool.
@@ -353,8 +353,11 @@ class AgentPool:
 
     def _filter_actionable(self, issues: list[Issue]) -> list[Issue]:
         """Filter out issues that are blocked or waiting on developer input."""
-        agent_label = self.settings.github_agent_label
-        return [issue for issue in issues if agent_label in issue.labels]
+        labels = {
+            self.settings.github_remote_agent_label,
+            self.settings.github_local_agent_label,
+        }
+        return [issue for issue in issues if any(label in issue.labels for label in labels)]
 
     async def _build_work_queue(self) -> tuple[list[tuple[Issue, str]], dict[str, int]]:
         """Build an ordered work queue: PR comments, in-progress, then ready."""
@@ -426,7 +429,7 @@ class AgentPool:
         """Fetch open PRs with comments, filtered for this pool's target."""
         remote_label = self.settings.github_remote_agent_label
         local_label = self.settings.github_local_agent_label
-        label = remote_label if self.target == AgentTarget.REMOTE else None
+        label = remote_label if self.target in {AgentTarget.REMOTE, AgentTarget.ANY} else None
         if self.target == AgentTarget.LOCAL:
             label = local_label
 
@@ -435,14 +438,13 @@ class AgentPool:
                 self.settings.github_org,
                 label=label,
             )
-            target_issues = [issue for issue in issues if self._matches_target(issue)]
-            hydrated = await self._hydrate_issues(target_issues)
+            hydrated = await self._hydrate_issues(issues)
             logger.info(
                 "fetched_pr_comment_issues",
                 target=self.target.value,
                 total=len(issues),
-                new=len(target_issues),
-                target_matched=len(target_issues),
+                new=len(issues),
+                target_matched=len(issues),
                 already_processed=len(self._processed_issues),
             )
             return hydrated
@@ -455,8 +457,6 @@ class AgentPool:
         items: list[dict[str, Any]] = []
         pr_issues = await self.fetch_pr_comment_issues()
         for pr_issue in pr_issues:
-            if self.settings.github_agent_label not in pr_issue.labels:
-                continue
             if not pr_issue.repo_owner or not pr_issue.repo_name:
                 continue
             try:
@@ -1318,7 +1318,7 @@ class AgentPool:
 _pools: dict[AgentTarget, AgentPool] = {}
 
 
-def get_pool(target: AgentTarget = AgentTarget.ANY) -> AgentPool:
+def get_pool(target: AgentTarget = AgentTarget.REMOTE) -> AgentPool:
     """Get or create an agent pool for the specified target.
 
     Args:

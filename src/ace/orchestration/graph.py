@@ -442,18 +442,6 @@ async def run_agent(state: WorkerState) -> WorkerState:
     session_name = None
     if result.metadata and isinstance(result.metadata, dict):
         session_name = result.metadata.get("session_name")
-    if session_name:
-        logger.info(
-            "tmux_session_ready",
-            session=session_name,
-            attach=f"tmux attach -t {session_name}",
-        )
-        log_key_event(
-            logger,
-            f"🧵 TMUX SESSION READY — ATTACH NOW: tmux attach -t {session_name}",
-            session=session_name,
-            attach=f"tmux attach -t {session_name}",
-        )
 
     # If running in tmux/cli, wait for ACE_TASK_DONE.json to appear before success.
     if settings.agent_execution_mode.lower() in {"tmux", "cli"} and session_name:

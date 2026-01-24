@@ -13,7 +13,7 @@ class IssueStatus(str, Enum):
     """Project status values for issues."""
 
     READY = "Ready"
-    IN_PROGRESS = "In Progress"
+    IN_PROGRESS = "In progress"
     BLOCKED = "Blocked"
     DONE = "Done"
 

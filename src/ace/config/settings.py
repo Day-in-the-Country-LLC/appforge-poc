@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     disable_issue_status: bool = (
         os.getenv("DISABLE_ISSUE_STATUS", "false").lower() == "true"
     )
-    github_base_branch: str = os.getenv("GITHUB_BASE_BRANCH", "main")
+    github_base_branch: str = os.getenv("GITHUB_BASE_BRANCH", "qa")
     github_token_secret_name: str = os.getenv(
         "GITHUB_TOKEN_SECRET_NAME", "github-control-api-key"
     )

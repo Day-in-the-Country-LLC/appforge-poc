@@ -11,6 +11,7 @@ import structlog
 from ace.config.settings import get_settings
 from ace.config.secrets import resolve_github_token, resolve_openai_api_key, resolve_claude_api_key
 from ace.workspaces.tmux_ops import TmuxOps, session_name_for_issue
+from ace.logging_utils import log_key_event
 
 from .base import AgentResult, AgentStatus, BaseAgent
 from .mcp_config import ensure_mcp_config
@@ -100,6 +101,19 @@ class CliAgent(BaseAgent):
                     "tmux session failed to start; session not found after creation "
                     f"(session='{session_name}', workdir='{workdir}')"
                 )
+            logger.info(
+                "tmux_session_ready",
+                session=session_name,
+                attach=f"tmux attach -t {session_name}",
+                issue=context.get("issue_number"),
+            )
+            log_key_event(
+                logger,
+                f"🧵 TMUX SESSION READY — ATTACH NOW: tmux attach -t {session_name}",
+                session=session_name,
+                attach=f"tmux attach -t {session_name}",
+                issue=context.get("issue_number"),
+            )
 
             export_parts = [f"export {k}={shlex.quote(v)}" for k, v in env_exports.items()]
             exec_cmd = shlex.join(command)
@@ -114,15 +128,37 @@ class CliAgent(BaseAgent):
                 if self.backend == "claude":
                     prompt_to_send = (
                         "Please read ACE_TASK.md in the current directory and execute all instructions end-to-end. "
-                        "When finished, write ACE_TASK_DONE.json with task_id, summary, files_changed, commands_run, "
-                        "then summarize the changes and status."
+                        "If you need action from the developer and cannot complete all instructions, use the `blocked-task-handling` skill to complete the next steps.
+                        "If you are able to finish all instructions, use the `claude-cli-pr-completions` skill to complete the next steps."
+                        "Always finish up by creating ACE_TASK_DONE.json with task_id, summary, files_changed, commands_run"
                     )
                 else:
                     prompt_to_send = self._condense_prompt(prompt_for_cli)
-                self.tmux.send_prompt(session_name, prompt_to_send, delay_seconds=0.8)
+                self.tmux.send_prompt(session_name, prompt_to_send, delay_seconds=1.5)
                 if self.backend == "claude":
                     # Ensure the instruction is submitted even if the CLI is waiting on a blank line.
                     self.tmux.send_enter(session_name, repeat=1, delay_seconds=0.2)
+                    attempts = 2
+                    last_error = None
+                    for _ in range(attempts):
+                        try:
+                            output = self.tmux.capture_session_output(session_name, lines=200)
+                        except Exception as exc:
+                            last_error = exc
+                            time.sleep(0.5)
+                            continue
+                        if "ACE_TASK.md" in output:
+                            last_error = None
+                            break
+                        last_error = RuntimeError(
+                            "Claude prompt not visible in tmux output after send."
+                        )
+                        time.sleep(0.5)
+                    if last_error:
+                        raise RuntimeError(
+                            "❌ ERROR: Claude prompt not visible in tmux output after send. "
+                            "Session may be idle or prompt delivery failed."
+                        ) from last_error
 
             if created:
                 output = (
