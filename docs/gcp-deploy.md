@@ -1,6 +1,6 @@
 # GCP Deployment Guide
 
-This guide walks through deploying the Agentic Coding Engine to Google Cloud Platform using a persistent VM (non-HTTP; runs a drain and exits).
+This guide walks through deploying the Appforge Coding Engine to Google Cloud Platform using a persistent VM (non-HTTP; runs a drain and exits).
 
 ## Architecture
 
@@ -70,17 +70,15 @@ UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/run_agent_pool.py --target remo
 
 In your repository, create the following labels:
 
-- `agent:ready` - Issue ready for agent pickup
-- `agent:in-progress` - Agent is working on it
-- `agent:blocked` - Agent is blocked, waiting for input
-- `agent:done` - Agent completed work
-- `agent:failed` - Agent encountered error
+- `agent:remote` - Issue can be processed by cloud VM agents
+- `agent:local` - Issue requires local machine access
+- `difficulty:easy` / `difficulty:medium` / `difficulty:hard`
 
 ## Monitoring
 
 ```bash
 gcloud secrets list
-gcloud secrets versions list github-token
+gcloud secrets versions list github-control-api-key
 ```
 
 ## Troubleshooting
@@ -103,6 +101,5 @@ For issues requiring local machine access (e.g., Redis migration), run the CLI d
 
 ```bash
 cd appforge-poc
-source .venv/bin/activate
-UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/run_agent_pool.py --target local --max-issues 0
+UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/run_agent_pool.py --target local --max-issues 0 --secrets-backend env
 ```

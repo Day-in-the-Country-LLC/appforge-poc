@@ -55,7 +55,7 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python -m ace.runners.worker <issue_number>")
+        logger.error("missing_issue_number", usage="python -m ace.runners.worker <issue_number>")
         sys.exit(1)
 
     issue_number = int(sys.argv[1])

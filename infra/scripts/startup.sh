@@ -3,22 +3,14 @@ set -e
 
 # Install dependencies
 apt-get update
-apt-get install -y python3 python3-pip python3-venv git
-
-# Get GitHub token from Secret Manager for repo access
-GITHUB_TOKEN=$(gcloud secrets versions access latest --secret=GITHUB_CONTROL_API_KEY 2>/dev/null || echo "")
-
-if [ -z "$GITHUB_TOKEN" ]; then
-    echo "ERROR: Could not retrieve GitHub token from Secret Manager"
-    exit 1
-fi
+apt-get install -y curl ca-certificates git
 
 # Create app directory
 mkdir -p /opt/ace
 cd /opt/ace
 
-# Clone or update repo (using token for private repo access)
-REPO_URL="https://${GITHUB_TOKEN}@github.com/Day-in-the-Country-LLC/appforge-poc.git"
+# Clone or update repo
+REPO_URL="${REPO_URL:-https://github.com/your-org/appforge-poc.git}"
 
 if [ -d "/opt/ace/appforge-poc" ]; then
     cd /opt/ace/appforge-poc
@@ -29,13 +21,17 @@ else
     cd /opt/ace/appforge-poc
 fi
 
-# Create virtual environment
-python3 -m venv /opt/ace/venv
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# Install Python and create virtual environment
+uv python install 3.12
+uv venv /opt/ace/venv --python 3.12
 source /opt/ace/venv/bin/activate
 
 # Install dependencies
-pip install --upgrade pip
-pip install -e .
+uv sync --frozen --no-dev --active
 
 # NOTE: FastAPI/HTTP service removed. Configure your own scheduler/cron to run:
 # UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/run_agent_pool.py --target remote --max-issues 0

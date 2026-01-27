@@ -83,7 +83,7 @@ class StatusManager:
         self,
         issue_number: int,
         questions: list[str],
-        assignee: str = "kristinday",
+        assignee: str | None = None,
         repo_owner: str | None = None,
         repo_name: str | None = None,
     ) -> None:
@@ -116,9 +116,10 @@ class StatusManager:
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
+        target_assignee = assignee or self.settings.blocked_assignee
         await self.issue_queue.assign_issue(
             issue_number,
-            assignee,
+            target_assignee,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
@@ -135,7 +136,7 @@ class StatusManager:
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
-        logger.info("issue_blocked", issue=issue_number, assignee=assignee)
+        logger.info("issue_blocked", issue=issue_number, assignee=target_assignee)
 
     async def mark_blocked_from_comment(
         self,

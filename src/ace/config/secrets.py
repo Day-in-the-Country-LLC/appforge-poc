@@ -52,8 +52,22 @@ def _should_use_secret_manager(settings: Settings, secret_name: str) -> bool:
     return bool(settings.gcp_project_id)
 
 
+def _validate_backend(settings: Settings) -> None:
+    if settings.secrets_backend not in ("secret-manager", "env"):
+        raise ValueError(
+            f"❌ ERROR: Unsupported secrets backend: {settings.secrets_backend}"
+        )
+
+
 def resolve_github_token(settings: Settings) -> str:
-    """Resolve the GitHub token. Must come from Secret Manager; no env fallback."""
+    """Resolve the GitHub token."""
+    _validate_backend(settings)
+    if settings.secrets_backend == "env":
+        token = settings.github_token
+        if not token:
+            raise ValueError("❌ ERROR: GitHub token missing from environment")
+        return token
+
     if not _should_use_secret_manager(settings, settings.github_token_secret_name):
         raise ValueError("❌ ERROR: GitHub token secret not configured")
 
@@ -74,9 +88,15 @@ def resolve_github_token(settings: Settings) -> str:
 
 
 def resolve_langsmith_api_key(settings: Settings) -> str:
-    """Resolve the LangSmith API key. Must come from Secret Manager; no env fallback."""
+    """Resolve the LangSmith API key."""
+    _validate_backend(settings)
     if not settings.langsmith_enabled:
         return ""
+    if settings.secrets_backend == "env":
+        api_key = settings.langsmith_api_key
+        if not api_key:
+            raise ValueError("❌ ERROR: LangSmith API key missing from environment")
+        return api_key
     if not _should_use_secret_manager(settings, settings.langsmith_secret_name):
         raise ValueError("❌ ERROR: LangSmith API key secret not configured")
 
@@ -97,7 +117,13 @@ def resolve_langsmith_api_key(settings: Settings) -> str:
 
 
 def resolve_openai_api_key(settings: Settings) -> str:
-    """Resolve the OpenAI API key. Must come from Secret Manager; no env fallback."""
+    """Resolve the OpenAI API key."""
+    _validate_backend(settings)
+    if settings.secrets_backend == "env":
+        api_key = settings.openai_api_key
+        if not api_key:
+            raise ValueError("❌ ERROR: OpenAI API key missing from environment")
+        return api_key
     if not _should_use_secret_manager(settings, settings.openai_secret_name):
         raise ValueError("❌ ERROR: OpenAI API key secret not configured")
 
@@ -118,7 +144,13 @@ def resolve_openai_api_key(settings: Settings) -> str:
 
 
 def resolve_claude_api_key(settings: Settings) -> str:
-    """Resolve the Claude API key. Must come from Secret Manager; no env fallback."""
+    """Resolve the Claude API key."""
+    _validate_backend(settings)
+    if settings.secrets_backend == "env":
+        api_key = settings.claude_api_key
+        if not api_key:
+            raise ValueError("❌ ERROR: Claude API key missing from environment")
+        return api_key
     if not _should_use_secret_manager(settings, settings.claude_secret_name):
         raise ValueError("❌ ERROR: Claude API key secret not configured")
 

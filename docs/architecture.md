@@ -2,11 +2,11 @@
 
 ## High-Level Design
 
-The Agentic Coding Engine is a multi-repo orchestration system that:
+The Appforge Coding Engine is a multi-repo orchestration system that:
 
-1. **Monitors GitHub issues** for tasks labeled `agent:ready`
+1. **Monitors GitHub issues** in the project board with status **Ready** and a target label (`agent:remote` or `agent:local`)
 2. **Orchestrates agents** to execute work in isolated workspaces
-3. **Manages state** through GitHub labels and comments
+3. **Manages state** through project status, labels, and comments
 4. **Opens PRs** with completed work
 5. **Handles blockers** via a human-in-the-loop protocol
 
@@ -23,13 +23,10 @@ The ACE framework communicates with GitHub via REST/GraphQL APIs for orchestrati
 
 ### 2. Agent Layer (`src/ace/agents/`)
 
-- **`base.py`** - Abstract base class defining the agent interface
-  - `plan()` - Generate execution plan
-  - `run()` - Execute task in workspace
-  - `respond_to_answer()` - Resume after blocked question answered
+- **`cli_agent.py`** - Spawns tmux sessions for Codex/Claude CLI
 - **`policy.py`** - Safety constraints and execution rules injected into every task
+- **`types.py`** - Agent result status/types
 
-Agents are pluggable implementations (Codex CLI, Claude, etc.) that conform to this interface.
 The CLI path runs inside tmux and reads `ACE_TASK.md` for detailed task instructions.
 
 ### 3. Orchestration (`src/ace/orchestration/`)
@@ -48,21 +45,17 @@ hydrate_context
     ↓
 select_backend
     ↓
-run_agent
+    run_agent
     ↓
-evaluate_result
-    ├→ handle_blocked (if questions)
-    ├→ open_pr (if success)
-    └→ post_failure (if error)
-    ↓
-mark_done
+    evaluate_result
+    ├→ blocked handling (if questions)
+    └→ success/failure handling
 ```
 
-In CLI/tmux mode, `run_agent` coordinates sequential tasks inside a single worktree.
-Each task writes `ACE_TASK.md` for the coding CLI and completes by dropping
-`ACE_TASK_DONE.json`. When all tasks are complete, the manager opens the PR.
-While waiting, the manager monitors git activity and sends tmux nudges to
-idle sessions. After repeated nudges it will restart the session or fail the task.
+In CLI/tmux mode, `run_agent` coordinates a single work item inside a worktree.
+Instructions are written to `ACE_TASK.md` and the coding CLI completes by dropping
+`ACE_TASK_DONE.json`. PR creation and issue/project updates are handled by the
+CLI via the required completion/blocked skills.
 
 ### 4. Runners/Scheduler (`src/ace/runners/`)
 
@@ -85,11 +78,9 @@ idle sessions. After repeated nudges it will restart the session or fail the tas
 ### Ticket Pickup Flow
 
 ```
-GitHub Issue (agent:ready)
+GitHub Issue (Status: Ready + target label)
     ↓
-Webhook / Polling
-    ↓
-Service receives event
+Scheduled/CLI run (agent pool)
     ↓
 Worker spawned with issue_number
     ↓
@@ -97,13 +88,13 @@ LangGraph executes workflow
     ↓
 Worktree + branch created
     ↓
-Task plan + instructions written (ACE_TASK.md)
+Instructions written (ACE_TASK.md)
     ↓
-CLI agent executes in tmux (sequential tasks)
+CLI agent executes in tmux
     ↓
-PR opened, labels updated
+PR opened, status updated
     ↓
-GitHub Issue (agent:done)
+GitHub Issue (Status: Done)
 ```
 
 ### Blocked Flow
@@ -111,19 +102,17 @@ GitHub Issue (agent:done)
 ```
 Agent encounters question
     ↓
-Posts BLOCKED: comment
+Posts BLOCKED comment
     ↓
-Sets agent:blocked label
+Sets status to Blocked
     ↓
 Assigns to human
     ↓
-Human replies ANSWER:
+Human replies with answers
     ↓
-Webhook detects ANSWER:
+Status set back to Ready/In Progress
     ↓
 Worker resumes with answer
-    ↓
-Agent continues execution
 ```
 
 ## Deployment Model (non-HTTP)

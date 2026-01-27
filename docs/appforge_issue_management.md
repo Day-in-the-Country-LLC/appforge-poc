@@ -14,7 +14,7 @@ There are two levels of issue management in appforge:
 2) CLI Coding Agent Issue Management - change status for
     a) issues that need developer input
         - change status to Blocked
-        - assign to klday
+        - assign to repo-owner
         - comment with details about what needs to be done
         - unclaim issue so when developer finishes, they can put it back in In progress to be picked up again by another agent
     b) issues that are ready for review
@@ -23,8 +23,8 @@ There are two levels of issue management in appforge:
             * summary of work completed
             * any suggestions for how to test
         - comment in issue with link to PR
-        - assign to klday
-        - text message to 812-606-3251 from Twilio with link to PR for review and brief message of work to review (TODO later because the campaign is still under review)
+        - assign to repo-owner
+        - optional: send a notification via Twilio with link to the PR and a brief summary
 
 
 # Need a whole system for handling PR comments - there's a skill but it needs to be reviewed and refined.

@@ -41,23 +41,16 @@ The actual spawn happens in `CliAgent.run()` which calls `TmuxOps.start_session(
 Source: `src/ace/orchestration/graph.py`, `src/ace/agents/cli_agent.py`,
 `src/ace/workspaces/tmux_ops.py`.
 
-## 4) Does it use a script? What is in the script?
+## 4) Does it use a script?
 
-Yes, for **Codex** the default command is:
+No. The CLI command is built directly from settings.
 
-- `./scripts/codex-gh --model {model} --ask-for-approval 3 --sandbox workspace-write`
+Defaults (from `src/ace/config/settings.py`):
 
-That script just makes sure the GitHub token is set, then runs `codex`:
+- **Codex**: `codex --ask-for-approval never --full-auto --sandbox danger-full-access --model {model}`
+- **Claude**: `claude --permission-mode dontAsk --dangerously-skip-permissions --model {model}`
 
-- If `GITHUB_TOKEN` is missing, it copies `GITHUB_CONTROL_API_KEY` into it.
-- If `GITHUB_MCP_TOKEN_ENV` is set, it exports that too.
-- Then it runs `codex`.
-
-Claude does **not** use a script by default. It uses:
-
-- `claude --model {model}`
-
-Source: `scripts/codex-gh`, `src/ace/config/settings.py`.
+Source: `src/ace/config/settings.py`, `src/ace/agents/cli_agent.py`.
 
 ## 5) How instructions get into the tmux session
 
@@ -87,9 +80,9 @@ So the **command inside tmux** inherits those environment variables.
 
 Injected keys can include:
 
-- `GITHUB_TOKEN`, `GITHUB_CONTROL_API_KEY`, `GITHUB_MCP_TOKEN_ENV`
+- `GITHUB_TOKEN`, `GITHUB_MCP_TOKEN_ENV`
 - `OPENAI_API_KEY` (Codex/OpenAI)
-- `CLAUDE_CODE_ADMIN_API_KEY` (Claude)
+- `ANTHROPIC_API_KEY` (Claude CLI; sourced from `CLAUDE_CODE_ADMIN_API_KEY` / Secret Manager)
 - `GOOGLE_APPLICATION_CREDENTIALS`, `GCP_CREDENTIALS_FILE`
 
 Also:

@@ -1,6 +1,6 @@
 # Twilio SMS Notifications
 
-The Agentic Coding Engine can send SMS notifications via Twilio when PRs are created, so you're immediately notified of completed work.
+The Appforge Coding Engine can send SMS notifications via Twilio when PRs are created, so you're immediately notified of completed work.
 
 ## Setup
 
@@ -90,7 +90,7 @@ gcloud secrets versions add twilio-enabled --data-file=- <<< "false"
 grep "sms_send_failed" /tmp/agent-hq/logs/*.log
 
 # GCP
-gcloud run services logs read agentic-coding-engine --region us-central1 | grep sms
+gcloud run services logs read appforge-coding-engine --region us-central1 | grep sms
 ```
 
 ### Wrong phone number receiving messages
@@ -126,7 +126,7 @@ Notifications will be logged but not sent. Check logs to verify formatting.
 
 ## Advanced: Custom Message Format
 
-To customize notification messages, edit `@/Users/kristinday/appforge-poc/src/ace/notifications/twilio_client.py`:
+To customize notification messages, edit `src/ace/notifications/twilio_client.py`:
 
 - `_format_pr_message()` - PR notification format
 - `_format_blocked_message()` - Blocked notification format

@@ -1,6 +1,6 @@
 ---
 name: github-issue-workflow
-description: Create and mark agent-ready GitHub issues for the DITC TODO project (labels, status, template, readiness checks).
+description: Create and mark agent-ready GitHub issues for the your-project project (labels, status, template, readiness checks).
 ---
 
 # GitHub Issue Workflow

@@ -109,11 +109,18 @@ class TmuxOps:
                     timeout=5,
                 )
             logger.info("tmux_env_set", session=session_name, keys=list(env.keys()))
-        logger.info("tmux_session_started", session=session_name, workdir=str(workdir))
+        attach_cmd = f"tmux attach -t {session_name}"
+        logger.info(
+            "tmux_session_started",
+            session=session_name,
+            workdir=str(workdir),
+            attach=attach_cmd,
+        )
         log_key_event(
             logger,
-            "🧵 tmux session started",
+            f"🧵 TMUX SESSION READY — ATTACH NOW: {attach_cmd}",
             session=session_name,
+            attach=attach_cmd,
             workdir=str(workdir),
         )
         return True

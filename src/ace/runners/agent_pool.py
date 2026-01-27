@@ -2,33 +2,33 @@
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Any
 from pathlib import Path
-import time
+from typing import Any
 
 import structlog
+from fastmcp import Client as McpClient
 
-from ace.config.settings import get_settings
+from ace.agents.manager_agent import ManagerAgent
 from ace.config.secrets import resolve_github_token
+from ace.config.settings import get_settings
 from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import Issue, IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client
 from ace.github.status_manager import IssueStatus
+from ace.logging_utils import log_key_event
 from ace.metrics import metrics
 from ace.orchestration.graph import get_compiled_graph
 from ace.orchestration.state import WorkerState
-from ace.logging_utils import log_key_event
 from ace.workspaces.git_ops import GitOps
 from ace.workspaces.tmux_ops import (
     TmuxOps,
     parse_issue_from_session,
     session_name_for_issue,
 )
-from fastmcp import Client as McpClient
-from ace.agents.manager_agent import ManagerAgent
 
 logger = structlog.get_logger(__name__)
 
@@ -107,7 +107,6 @@ class AgentTarget(str, Enum):
 
     LOCAL = "local"  # Issues requiring local machine access
     REMOTE = "remote"  # Issues that can run on cloud VM
-    ANY = "any"  # Process any issue regardless of target
 
 
 @dataclass
@@ -149,7 +148,7 @@ class AgentPool:
 
         Args:
             max_agents: Maximum number of concurrent agents (default: 5)
-            target: Which issues to process (local, remote, or any)
+            target: Which issues to process (local or remote)
             max_issues_per_run: Limit issues processed per run (0 = unlimited)
         """
         self.max_agents = max_agents
@@ -171,7 +170,30 @@ class AgentPool:
         self._work_meta_by_key: dict[str, dict[str, Any]] = {}
         self._resume_completed: bool = False
         self._last_cleanup_at: datetime | None = None
+        self._refill_lock = asyncio.Lock()
+        self._refill_scheduled = False
         self.max_issues_per_run = max_issues_per_run
+
+    async def _refill_slots(self) -> None:
+        if self._fatal_error or not (self._running or self._draining):
+            return
+        async with self._refill_lock:
+            if self._fatal_error or not (self._running or self._draining):
+                return
+            await self.process_work_queue()
+
+    def _schedule_refill(self) -> None:
+        if self._refill_scheduled:
+            return
+        self._refill_scheduled = True
+
+        async def _run() -> None:
+            try:
+                await self._refill_slots()
+            finally:
+                self._refill_scheduled = False
+
+        asyncio.create_task(_run())
 
     def _format_fatal_error(self, error: str) -> str:
         message = (error or "unexpected failure").strip()
@@ -356,7 +378,9 @@ class AgentPool:
     def set_max_issues_per_run(self, limit: int) -> None:
         """Set the maximum issues to process in this run (0 = unlimited)."""
         self.max_issues_per_run = max(0, limit)
-        logger.info("max_issues_per_run_set", limit=self.max_issues_per_run, target=self.target.value)
+        logger.info(
+            "max_issues_per_run_set", limit=self.max_issues_per_run, target=self.target.value
+        )
 
     def _matches_target(self, issue: Issue) -> bool:
         """Check if issue matches the pool's target environment.
@@ -367,9 +391,6 @@ class AgentPool:
         Returns:
             True if issue should be processed by this pool
         """
-        if self.target == AgentTarget.ANY:
-            return True
-
         local_label = self.settings.github_local_agent_label
         remote_label = self.settings.github_remote_agent_label
 
@@ -377,8 +398,8 @@ class AgentPool:
         has_remote = remote_label in issue.labels
 
         if self.target == AgentTarget.LOCAL:
-            # Process only if explicitly marked local
-            return has_local
+            # Local can process either local or remote labeled work.
+            return has_local or has_remote
         elif self.target == AgentTarget.REMOTE:
             # Process only if explicitly marked remote
             return has_remote
@@ -387,9 +408,6 @@ class AgentPool:
 
     def _issue_key(self, issue: Issue) -> str:
         return f"issue:{issue.repo_owner}/{issue.repo_name}#{issue.number}"
-
-    def _pr_comment_key(self, issue: Issue, comment_id: int) -> str:
-        return f"pr_comment:{issue.repo_owner}/{issue.repo_name}#{issue.number}:{comment_id}"
 
     def _filter_actionable(self, issues: list[Issue]) -> list[Issue]:
         """Filter out issues that are blocked or waiting on developer input."""
@@ -400,51 +418,29 @@ class AgentPool:
         return [issue for issue in issues if any(label in issue.labels for label in labels)]
 
     async def _build_work_queue(self) -> tuple[list[tuple[Issue, str]], dict[str, int]]:
-        """Build an ordered work queue: PR comments, in-progress, then ready."""
-        pr_items = await self.fetch_pr_comment_work_items()
+        """Build an ordered work queue: in-progress first, then ready."""
         in_progress = self._filter_actionable(await self.fetch_in_progress_issues())
         ready = self._filter_actionable(await self.fetch_ready_issues())
 
-        seen_keys = set()
-        seen_numbers = set()
-        pr_items = []
-        for item in pr_items:
-            if item["key"] in seen_keys:
-                continue
-            seen_keys.add(item["key"])
-            if item["issue"].number not in seen_numbers:
-                seen_numbers.add(item["issue"].number)
-            pr_items.append(item)
-        in_progress = [issue for issue in in_progress if issue.number not in seen_numbers]
-        ready = [issue for issue in ready if issue.number not in seen_numbers]
-
         counts = {
-            "pr_comment": len(pr_items),
             "in_progress": len(in_progress),
             "ready": len(ready),
         }
 
         ordered: list[tuple[Issue, str]] = []
         self._work_meta_by_key = {}
-        for item in pr_items:
-            ordered.append((item["issue"], item["key"]))
-            self._work_meta_by_key[item["key"]] = item["meta"]
         for issue in in_progress:
             key = self._issue_key(issue)
             ordered.append((issue, key))
-            self._work_meta_by_key[key] = {"work_type": "in_progress"}
         for issue in ready:
             key = self._issue_key(issue)
             ordered.append((issue, key))
-            self._work_meta_by_key[key] = {"work_type": "ready"}
 
         manager = self._get_manager_agent()
         if not manager:
             return ordered, counts
 
         items = []
-        for item in pr_items:
-            items.append({"category": "pr_comment", "issue": item["issue"], "key": item["key"]})
         for issue in in_progress:
             items.append({"category": "in_progress", "issue": issue, "key": self._issue_key(issue)})
         for issue in ready:
@@ -465,77 +461,6 @@ class AgentPool:
                 queue.append((issue, key))
         return queue, counts
 
-    async def fetch_pr_comment_issues(self) -> list[Issue]:
-        """Fetch open PRs with comments, filtered for this pool's target."""
-        remote_label = self.settings.github_remote_agent_label
-        local_label = self.settings.github_local_agent_label
-        label = remote_label if self.target in {AgentTarget.REMOTE, AgentTarget.ANY} else None
-        if self.target == AgentTarget.LOCAL:
-            label = local_label
-
-        try:
-            issues = await self.issue_queue.list_open_prs_with_comments(
-                self.settings.github_org,
-                label=label,
-            )
-            hydrated = await self._hydrate_issues(issues)
-            logger.info(
-                "fetched_pr_comment_issues",
-                target=self.target.value,
-                total=len(issues),
-                new=len(issues),
-                target_matched=len(issues),
-                already_processed=len(self._processed_issues),
-            )
-            return hydrated
-        except Exception as exc:
-            logger.warning("fetch_pr_comment_issues_failed", error=str(exc))
-            return []
-
-    async def fetch_pr_comment_work_items(self) -> list[dict[str, Any]]:
-        """Fetch inline PR review comments as individual work items."""
-        items: list[dict[str, Any]] = []
-        pr_issues = await self.fetch_pr_comment_issues()
-        for pr_issue in pr_issues:
-            if not pr_issue.repo_owner or not pr_issue.repo_name:
-                continue
-            try:
-                comments = await self.issue_queue.list_pr_review_comments(
-                    pr_issue.repo_owner,
-                    pr_issue.repo_name,
-                    pr_issue.number,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "pr_review_comments_fetch_failed",
-                    issue=pr_issue.number,
-                    error=str(exc),
-                )
-                continue
-            for comment in comments:
-                comment_id = comment.get("id")
-                if not comment_id:
-                    continue
-                key = self._pr_comment_key(pr_issue, int(comment_id))
-                if key in self._processed_issues:
-                    continue
-                items.append(
-                    {
-                        "issue": pr_issue,
-                        "key": key,
-                        "meta": {
-                            "work_type": "pr_comment",
-                            "pr_comment_id": int(comment_id),
-                            "pr_comment_body": comment.get("body") or "",
-                            "pr_comment_path": comment.get("path") or "",
-                            "pr_comment_line": comment.get("line") or comment.get("original_line"),
-                            "pr_comment_side": comment.get("side"),
-                        },
-                    }
-                )
-        logger.info("pr_comment_work_items_fetched", count=len(items))
-        return items
-
     async def fetch_ready_issues(self) -> list[Issue]:
         """Fetch issues that are ready for processing.
 
@@ -547,8 +472,8 @@ class AgentPool:
         Returns:
             List of issues with "Ready" status and no open blockers
         """
-        # Prefer appforge MCP server when enabled and target is remote/any (server filters remote label + blockers)
-        if self.settings.appforge_mcp_enabled and self.target in {AgentTarget.REMOTE, AgentTarget.ANY}:
+        # Prefer appforge MCP server when enabled and target is remote (server filters remote label + blockers)
+        if self.settings.appforge_mcp_enabled and self.target == AgentTarget.REMOTE:
             mcp_issues = await self._fetch_ready_issues_via_mcp()
             if mcp_issues:
                 issues = mcp_issues
@@ -565,7 +490,9 @@ class AgentPool:
                 )
 
             # Filter out already processed issues
-            new_issues = [issue for issue in issues if self._issue_key(issue) not in self._processed_issues]
+            new_issues = [
+                issue for issue in issues if self._issue_key(issue) not in self._processed_issues
+            ]
 
             # Filter by target environment
             target_issues = [issue for issue in new_issues if self._matches_target(issue)]
@@ -750,7 +677,6 @@ class AgentPool:
             # Create initial state for the workflow
             work_key = slot.work_key or self._issue_key(issue)
             work_meta = self._work_meta_by_key.get(work_key, {})
-            work_type = work_meta.get("work_type", "ready")
             initial_state = WorkerState(
                 issue=issue,
                 issue_number=issue.number,
@@ -761,7 +687,6 @@ class AgentPool:
                     "repo_owner": issue.repo_owner,
                     "repo_name": issue.repo_name,
                     "repo": issue.repo_name,
-                    "work_type": work_type,
                     **work_meta,
                 },
             )
@@ -857,6 +782,7 @@ class AgentPool:
             slot.task = None
             slot.work_key = None
             metrics.dec_gauge("ace_active_agents", 1)
+            self._schedule_refill()
 
     async def spawn_agent(self, issue: Issue, work_key: str) -> bool:
         """Spawn an agent for an issue if a slot is available.
@@ -926,9 +852,7 @@ class AgentPool:
 
         for issue, work_key in work_queue:
             if self.get_status().idle_slots == 0:
-                logger.info(
-                    "all_slots_busy", remaining_issues=len(work_queue) - spawned - skipped
-                )
+                logger.info("all_slots_busy", remaining_issues=len(work_queue) - spawned - skipped)
                 skipped += len(work_queue) - spawned - skipped
                 break
 
@@ -945,65 +869,6 @@ class AgentPool:
             pool_status=self.get_status().__dict__,
         )
 
-        return {
-            "status": "processing",
-            "spawned": spawned,
-            "skipped": skipped,
-            "pool_status": self.get_status().__dict__,
-        }
-
-    async def process_pr_comment_issues(self) -> dict[str, Any]:
-        """Fetch open PRs with comments and spawn agents for them."""
-        logger.info("process_pr_comment_issues_starting")
-        if self._fatal_error:
-            raise RuntimeError(self._fatal_error)
-
-        limit = self.max_issues_per_run
-        if limit > 0:
-            remaining = limit - self._session_processed
-            if remaining <= 0:
-                logger.info("max_issues_reached", max_issues=limit)
-                return {
-                    "status": "max_reached",
-                    "spawned": 0,
-                    "skipped": 0,
-                    "pool_status": self.get_status().__dict__,
-                }
-
-        issues = await self.fetch_pr_comment_issues()
-        if not issues:
-            logger.info("no_pr_comment_issues_found")
-            return {
-                "status": "no_issues",
-                "spawned": 0,
-                "skipped": 0,
-                "pool_status": self.get_status().__dict__,
-            }
-
-        if limit > 0:
-            remaining = limit - self._session_processed
-            issues = issues[:remaining]
-
-        spawned = 0
-        skipped = 0
-        for issue in issues:
-            if self.get_status().idle_slots == 0:
-                logger.info(
-                    "all_slots_busy", remaining_issues=len(issues) - spawned - skipped
-                )
-                skipped += len(issues) - spawned - skipped
-                break
-            if await self.spawn_agent(issue, self._issue_key(issue)):
-                spawned += 1
-            else:
-                skipped += 1
-
-        logger.info(
-            "process_pr_comment_issues_complete",
-            spawned=spawned,
-            skipped=skipped,
-            pool_status=self.get_status().__dict__,
-        )
         return {
             "status": "processing",
             "spawned": spawned,
@@ -1047,9 +912,7 @@ class AgentPool:
         skipped = 0
         for issue in issues:
             if self.get_status().idle_slots == 0:
-                logger.info(
-                    "all_slots_busy", remaining_issues=len(issues) - spawned - skipped
-                )
+                logger.info("all_slots_busy", remaining_issues=len(issues) - spawned - skipped)
                 skipped += len(issues) - spawned - skipped
                 break
             if await self.spawn_agent(issue, self._issue_key(issue)):
@@ -1366,7 +1229,7 @@ def get_pool(target: AgentTarget = AgentTarget.REMOTE) -> AgentPool:
     """Get or create an agent pool for the specified target.
 
     Args:
-        target: Which issues to process (local, remote, or any)
+        target: Which issues to process (local or remote)
 
     Returns:
         AgentPool instance for the specified target

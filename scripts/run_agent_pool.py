@@ -6,17 +6,23 @@ import argparse
 import asyncio
 
 from ace.config.logging import configure_logging
-from ace.config.settings import get_settings
+from ace.config.settings import get_settings, set_settings_overrides
 from ace.runners.agent_pool import AgentTarget, get_pool
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the agent pool once (drain mode).")
     parser.add_argument(
+        "--secrets-backend",
+        choices=["secret-manager", "env"],
+        default="secret-manager",
+        help="Where to load secrets from (default: secret-manager).",
+    )
+    parser.add_argument(
         "--target",
         choices=[t.value for t in AgentTarget],
         default=AgentTarget.REMOTE.value,
-        help="Which issues to process (remote/local/any). Default: remote",
+        help="Which issues to process (remote/local). Default: remote",
     )
     parser.add_argument(
         "--max-issues",
@@ -48,6 +54,7 @@ async def _run_once(target: AgentTarget, max_issues: int | None, check_interval:
 
 def main() -> None:
     args = _parse_args()
+    set_settings_overrides(secrets_backend=args.secrets_backend)
     target = AgentTarget(args.target)
     max_issues = args.max_issues
     if max_issues is not None and max_issues < 0:

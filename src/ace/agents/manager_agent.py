@@ -135,7 +135,7 @@ class ManagerAgent:
         prompt = (
             "You are the Appforge manager agent. "
             "Order these work items in the exact sequence they should be processed.\n"
-            "Priority order: pr_comment first, then in_progress, then ready.\n"
+            "Priority order: in_progress first, then ready.\n"
             "Within a category, preserve sensible ordering based on urgency.\n"
             "Return ONLY a JSON array of item keys, in order.\n"
             f"{skill_section}\n"

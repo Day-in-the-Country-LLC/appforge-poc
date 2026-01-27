@@ -1,11 +1,11 @@
 # Issue Readiness Protocol
 
-The Agentic Coding Engine uses a combination of **project status** and **agent label** to determine which issues are ready for processing across your organization's projects.
+The Appforge Coding Engine uses a combination of **project status** and **target labels** to determine which issues are ready for processing across your organization's projects.
 
 ## How It Works
 
 ### 1. Project Status: "Ready"
-Issues in the **DITC TODO** org project with status **"Ready"** are candidates for agent processing.
+Issues in the **your-project** org project with status **"Ready"** are candidates for agent processing.
 
 The project status field indicates the issue's readiness state:
 - **Ready** - Issue is prepared and ready for an agent to pick up
@@ -14,13 +14,10 @@ The project status field indicates the issue's readiness state:
 - **Done** - Agent completed the work
 - **Other statuses** - Not ready for agents (Backlog, On Hold, etc.)
 
-### 2. Agent Label: "agent"
-Issues must have the **`agent`** label to be processed by the engine.
-
-This label indicates:
-- The issue is suitable for agent automation
-- The issue has all necessary context and acceptance criteria
-- The issue is not blocked by dependencies
+### 2. Target Label: `agent:remote` or `agent:local`
+Issues must have **one** target label:
+- `agent:remote` for cloud/VM execution
+- `agent:local` for local-machine execution
 
 ### 3. Difficulty Label
 Issues must also have **one** difficulty label:
@@ -33,7 +30,7 @@ Issues must also have **one** difficulty label:
 Before marking an issue as "Ready", ensure:
 
 - [ ] Issue has clear title and description
-- [ ] Issue has `agent` label
+- [ ] Issue has `agent:remote` or `agent:local` label
 - [ ] Issue has exactly one `difficulty:*` label
 - [ ] Issue has project status set to "Ready"
 - [ ] Issue specifies target repo (in body or via linked PR/branch)
@@ -43,17 +40,17 @@ Before marking an issue as "Ready", ensure:
 ## Example Workflow
 
 ```
-1. You create issue in DITC TODO project
+1. You create issue in your-project project
    Title: "Add dark mode support to frontend-repo"
    Body: "Target repo: frontend-repo\n..."
-   Labels: [agent, difficulty:medium]
+   Labels: [agent:remote, difficulty:medium]
    Status: Backlog
 
 2. When ready, you update status to "Ready"
 
 3. Engine polls and finds:
    - Status = "Ready" ✓
-   - Label "agent" present ✓
+   - Label `agent:remote` (or `agent:local`) present ✓
    - Label "difficulty:medium" present ✓
 
 4. Engine picks up the issue
@@ -70,14 +67,14 @@ Before marking an issue as "Ready", ensure:
 ## Configuration
 
 The engine looks for:
-- **Project**: DITC TODO (configurable via `GITHUB_PROJECT_NAME`)
+- **Project**: your-project (configurable via `GITHUB_PROJECT_NAME`)
 - **Status**: "Ready" (configurable via `GITHUB_READY_STATUS`)
-- **Label**: "agent" (configurable via `GITHUB_AGENT_LABEL`)
+- **Target labels**: `agent:remote` / `agent:local` (configurable via `GITHUB_REMOTE_AGENT_LABEL` / `GITHUB_LOCAL_AGENT_LABEL`)
 - **Difficulty**: One of `difficulty:easy`, `difficulty:medium`, `difficulty:hard`
 
 ## Multi-Repo Handling
 
-Since DITC TODO is an org project tracking issues across multiple repos:
+Since your-project is an org project tracking issues across multiple repos:
 
 1. Each issue should specify its target repo in the issue body or description
 2. The engine extracts the repo name and clones it
@@ -106,16 +103,16 @@ The engine manages status transitions automatically:
 Ready (you set)
   ↓
 In Progress (engine sets when claiming)
-  ├─ Agent keeps "agent" label while working
+  ├─ Agent keeps `agent:remote`/`agent:local` label while working
   ├─ Agent posts updates in comments
   │
   ├→ Blocked (if agent needs input)
-  │   ├─ Engine removes "agent" label
+  │   ├─ Engine may remove the optional `agent` label (if your workflow uses it)
   │   ├─ Engine assigns to you
   │   ├─ Engine posts questions in comment
   │   ↓
   │   You respond:
-  │   ├─ Re-add "agent" label
+  │   ├─ Re-add the optional `agent` label (if your workflow uses it)
   │   ├─ Unassign yourself
   │   ├─ Post answer in comment
   │   ↓
@@ -124,7 +121,7 @@ In Progress (engine sets when claiming)
   │   Done (when complete)
   │
   └→ Done (if successful)
-     ├─ Engine removes "agent" label
+     ├─ Engine may remove the optional `agent` label (if used)
      ├─ Engine posts PR link in comment
      └─ Status set to Done
 ```
@@ -134,20 +131,20 @@ In Progress (engine sets when claiming)
 When an agent gets blocked:
 
 1. **Agent posts question** in comment with `BLOCKED` prefix
-2. **Engine removes `agent` label** from issue
-3. **Engine assigns issue to you** (kristinday)
+2. **Engine removes optional `agent` label** from issue (if present)
+3. **Engine assigns issue to you** (your-handle)
 4. **Engine sets status to Blocked**
 
 When you're ready to help:
 
 1. **Read the question** in the issue comments
 2. **Post your answer** in a comment
-3. **Re-add the `agent` label** to the issue
+3. **Re-add the optional `agent` label** to the issue (if your workflow uses it)
 4. **Unassign yourself** from the issue
-5. **Engine detects `agent` label re-added** and resumes
+5. **Engine resumes** once the issue is set back to Ready/In Progress with the target label intact
 
 The engine will:
-- Detect the label change
+- Detect the status change
 - Read your answer from comments
 - Resume execution with your input
 - Continue to completion or next blocker
@@ -160,15 +157,15 @@ Check which issues are ready:
 # Local development
 grep "listing_issues_by_agent_label" /tmp/agent-hq/logs/*.log
 
-# GCP Cloud Run
-gcloud run services logs read agentic-coding-engine --region us-central1 | grep "listing_issues_by_agent_label"
+# Runtime logs
+grep "listing_issues_by_agent_label" /tmp/agent-hq/logs/*.log
 ```
 
 ## Troubleshooting
 
 **Issue not being picked up?**
 - Verify status is "Ready" (not "Backlog" or other)
-- Verify `agent` label is present
+- Verify `agent:remote` or `agent:local` label is present
 - Verify `difficulty:*` label is present
 - Check engine logs for filtering details
 
@@ -178,4 +175,4 @@ gcloud run services logs read agentic-coding-engine --region us-central1 | grep 
 
 **Status not updating?**
 - Verify engine has permission to update project status
-- Check that `GITHUB_CONTROL_API_KEY` has appropriate scopes
+- Check that `GITHUB_TOKEN` has appropriate scopes

@@ -21,11 +21,11 @@ gcloud services enable \
     cloudbuild.googleapis.com
 
 echo "Creating service account..."
-gcloud iam service-accounts create agentic-coding-engine \
-    --display-name="Agentic Coding Engine Service Account" \
+gcloud iam service-accounts create appforge-coding-engine \
+    --display-name="Appforge Coding Engine Service Account" \
     || echo "Service account already exists"
 
-SA_EMAIL="agentic-coding-engine@${PROJECT_ID}.iam.gserviceaccount.com"
+SA_EMAIL="appforge-coding-engine@${PROJECT_ID}.iam.gserviceaccount.com"
 
 echo "Granting IAM roles to service account..."
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
@@ -37,10 +37,10 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --role="roles/run.invoker"
 
 echo "Creating secrets in Secret Manager..."
-read -sp "GitHub Control API Key: " GITHUB_CONTROL_API_KEY
+read -sp "GitHub Token: " GITHUB_TOKEN
 echo
-gcloud secrets create github-control-api-key --data-file=- <<< "$GITHUB_CONTROL_API_KEY" 2>/dev/null || \
-    gcloud secrets versions add github-control-api-key --data-file=- <<< "$GITHUB_CONTROL_API_KEY"
+gcloud secrets create github-control-api-key --data-file=- <<< "$GITHUB_TOKEN" 2>/dev/null || \
+    gcloud secrets versions add github-control-api-key --data-file=- <<< "$GITHUB_TOKEN"
 
 read -sp "GitHub Webhook Secret: " WEBHOOK_SECRET
 echo
@@ -81,4 +81,4 @@ echo "Bootstrap complete!"
 echo "Service Account: $SA_EMAIL"
 echo "Next steps:"
 echo "1. Build and push Docker image to GCR"
-echo "2. Deploy with Terraform: terraform apply -var gcp_project_id=$PROJECT_ID -var image_url=gcr.io/$PROJECT_ID/agentic-coding-engine:latest"
+echo "2. Deploy with Terraform: terraform apply -var gcp_project_id=$PROJECT_ID -var image_url=gcr.io/$PROJECT_ID/appforge-coding-engine:latest"

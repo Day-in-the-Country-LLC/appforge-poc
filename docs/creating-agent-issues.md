@@ -4,7 +4,7 @@ This guide is for humans creating issues that will be automated by coding agents
 
 **Quick Start:** See `docs/github-mcp-setup.md` to configure the GitHub MCP server, then use `AGENT_ISSUE_TEMPLATE.md` for issue format guidance.
 
-This guide walks you through creating and labeling issues in the **DITC TODO** org project so agents can pick them up and execute work.
+This guide walks you through creating and labeling issues in the **your-project** org project so agents can pick them up and execute work.
 
 ## Quick Checklist
 
@@ -12,7 +12,7 @@ Before marking an issue as "Ready", ensure:
 
 - [ ] Issue has clear, descriptive title
 - [ ] Issue body includes target repository name
-- [ ] Issue has `agent` label
+- [ ] Issue has `agent:remote` or `agent:local` label
 - [ ] Issue has exactly one `difficulty:*` label
 - [ ] Issue has clear acceptance criteria
 - [ ] No blocking dependencies
@@ -22,7 +22,7 @@ Before marking an issue as "Ready", ensure:
 
 ### 1. Create the Issue
 
-In the **DITC TODO** org project:
+In the **your-project** org project:
 - Click **New issue**
 - Write a clear title (e.g., "Add dark mode support to frontend-repo")
 - Fill in the description
@@ -72,7 +72,8 @@ Related issue: #456
 
 **Required labels:**
 
-- **`agent`** - Marks the issue for agent processing
+- **`agent:remote`** - Runs on cloud/VM agents (default)
+- **`agent:local`** - Requires local machine access
 - **`difficulty:easy`** - Simple tasks (bug fixes, small features, docs)
 - **`difficulty:medium`** - Moderate complexity (feature implementations, integrations)
 - **`difficulty:hard`** - Complex tasks (architecture changes, major refactors)
@@ -85,12 +86,12 @@ Related issue: #456
 
 **Example label set:**
 ```
-agent, difficulty:medium, enhancement
+agent:remote, difficulty:medium, enhancement
 ```
 
 ### 4. Set Project Status
 
-In the **DITC TODO** project board:
+In the **your-project** project board:
 - Set the issue status to **"Ready"** when it's prepared for an agent
 - Leave as **"Backlog"** if it's not ready yet
 
@@ -145,14 +146,14 @@ In the **DITC TODO** project board:
 - "Optimize database queries"
 - "Redesign state management"
 
-**Model:** Claude Opus (claude-opus-4-5) - Most capable
+**Model:** Claude Opus (claude-opus-4-1) - Most capable
 
 ## Common Mistakes to Avoid
 
 ❌ **Don't:**
 - Create issues without target repository
 - Use multiple difficulty labels (pick ONE)
-- Forget to add the `agent` label
+- Forget to add a target label (`agent:remote` or `agent:local`)
 - Set status to "Ready" before issue is complete
 - Include vague acceptance criteria
 - Create issues with blocking dependencies
@@ -162,13 +163,13 @@ In the **DITC TODO** project board:
 - Include clear acceptance criteria
 - Specify the target repository explicitly
 - Use one difficulty label
-- Always add the `agent` label
+- Always add a target label (`agent:remote` or `agent:local`)
 - Only mark "Ready" when the issue is fully prepared
 
 ## What Happens After You Mark "Ready"
 
-1. **Engine polls** the DITC TODO project
-2. **Engine finds** your issue with status "Ready" and `agent` label
+1. **Engine polls** the your-project project
+2. **Engine finds** your issue with status "Ready" and a target label (`agent:remote` or `agent:local`)
 3. **Engine selects model** based on `difficulty:*` label
 4. **Engine claims** the issue (sets status to "In Progress")
 5. **Agent executes** the work in the target repository
@@ -180,32 +181,32 @@ In the **DITC TODO** project board:
 When an agent needs your input:
 
 1. **Issue status** becomes "Blocked"
-2. **Agent label** is removed
+2. **Optional `agent` label** is removed (if your workflow uses it)
 3. **Issue is assigned** to you
 4. **Question posted** in comments
 
 **To resume:**
 1. Read the question in comments
 2. Post your answer in a comment
-3. **Re-add the `agent` label**
+3. **Re-add the optional `agent` label** (if your workflow uses it)
 4. **Unassign yourself**
-5. Engine detects the label and resumes
+5. Engine resumes once the issue is set back to Ready/In Progress with the target label intact
 
 ## If Agent Fails
 
 When an agent encounters an error:
 
 1. **Issue status** becomes "Blocked"
-2. **Agent label** is removed
+2. **Optional `agent` label** is removed (if your workflow uses it)
 3. **Issue is assigned** to you
 4. **Error details** posted in comments
 
 **To retry:**
 1. Review the error
 2. Fix the issue (update description, clarify requirements, etc.)
-3. **Re-add the `agent` label**
+3. **Re-add the optional `agent` label** (if your workflow uses it)
 4. **Unassign yourself**
-5. Engine will retry
+5. Engine will retry once the issue is set back to Ready/In Progress with the target label intact
 
 ## Example: Complete Workflow
 
@@ -220,7 +221,7 @@ Labels: (none yet)
 ```
 Title: Add dark mode support to frontend-repo
 Status: Ready
-Labels: agent, difficulty:medium, enhancement
+Labels: agent:remote, difficulty:medium, enhancement
 Body: [Complete with target repo, description, acceptance criteria]
 ```
 
@@ -233,7 +234,7 @@ Agent: Selects Claude Haiku (medium difficulty)
 ### Agent works and completes:
 ```
 Status: Done
-Labels: (agent label removed)
+Labels: (optional `agent` label removed)
 Comment: PR #789 opened
 ```
 

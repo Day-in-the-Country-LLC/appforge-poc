@@ -73,7 +73,7 @@ gcloud secrets versions add <secret-name> --data-file=-
 Add a new version from an env var:
 
 ```bash
-printf '%s' "$CLAUDE_CODE_ADMIN_API_KEY" | gcloud secrets versions add appforge-anthropic-api-key --data-file=- --project appforge-483920
+printf '%s' "$CLAUDE_CODE_ADMIN_API_KEY" | gcloud secrets versions add appforge-anthropic-api-key --data-file=- --project your-gcp-project-id
 ```
 
 Access a secret (latest version):

@@ -14,13 +14,13 @@ from ace.config.secrets import resolve_github_token, resolve_openai_api_key, res
 from ace.workspaces.tmux_ops import TmuxOps, session_name_for_issue
 from ace.logging_utils import log_key_event
 
-from .base import AgentResult, AgentStatus, BaseAgent
+from .types import AgentResult, AgentStatus
 from .mcp_config import ensure_mcp_config
 
 logger = structlog.get_logger(__name__)
 
 
-class CliAgent(BaseAgent):
+class CliAgent:
     """Spawn a tmux session running a local CLI agent."""
 
     def __init__(self, backend: str, model: str | None = None):
@@ -28,9 +28,6 @@ class CliAgent(BaseAgent):
         self.backend = backend.lower()
         self.model = model or self._default_model()
         self.tmux = TmuxOps()
-
-    async def plan(self, task: str, context: dict[str, Any]) -> str:
-        return "CLI agent runs in tmux; plan is included in the prompt file."
 
     async def run(
         self,
@@ -55,20 +52,14 @@ class CliAgent(BaseAgent):
 
         try:
             system_prompt = self._load_system_prompt()
-            if context.get("work_type") == "pr_comment":
-                pr_prompt = self._load_pr_comment_prompt()
-                if pr_prompt:
-                    system_prompt = f"{system_prompt}\n\n{pr_prompt}" if system_prompt else pr_prompt
             prompt_for_cli = prompt
             if system_prompt and self.backend == "codex":
                 prompt_for_cli = f"{system_prompt}\n\n{prompt}"
 
-            command, command_display, template_has_prompt = self._build_command(
+            command, command_display = self._build_command(
                 prompt_for_cli,
                 system_prompt=system_prompt,
             )
-            # Always send the prompt after starting codex; ignore template prompt embedding.
-            template_has_prompt = False
             session_name = self._session_name(context)
             token = resolve_github_token(self.settings)
             env_exports: dict[str, str] = {}
@@ -102,20 +93,6 @@ class CliAgent(BaseAgent):
                     "tmux session failed to start; session not found after creation "
                     f"(session='{session_name}', workdir='{workdir}')"
                 )
-            logger.info(
-                "tmux_session_ready",
-                session=session_name,
-                attach=f"tmux attach -t {session_name}",
-                issue=context.get("issue_number"),
-            )
-            log_key_event(
-                logger,
-                f"🧵 TMUX SESSION READY — ATTACH NOW: tmux attach -t {session_name}",
-                session=session_name,
-                attach=f"tmux attach -t {session_name}",
-                issue=context.get("issue_number"),
-            )
-
             export_parts = [f"export {k}={shlex.quote(v)}" for k, v in env_exports.items()]
             exec_cmd = shlex.join(command)
             launch_cmd = "bash -lc " + shlex.quote("; ".join(export_parts + [f"exec {exec_cmd}"]))
@@ -125,43 +102,45 @@ class CliAgent(BaseAgent):
                 # First-run onboarding: accept default style if prompted.
                 self._maybe_send_claude_onboarding_inputs(session_name)
 
-            if not template_has_prompt:
-                if self.backend == "claude":
-                    prompt_to_send = (
-                        "Please read ACE_TASK.md in the current directory and execute all instructions end-to-end. "
-                        "If you need action from the developer and cannot complete all instructions, use the "
-                        "`blocked-task-handling` skill to complete the next steps. "
-                        "If you are able to finish all instructions, use the `claude-cli-pr-completion` skill "
-                        "to complete the next steps. "
-                        "Always finish up by creating ACE_TASK_DONE.json with task_id, summary, files_changed, commands_run."
-                    )
-                else:
-                    prompt_to_send = self._condense_prompt(prompt_for_cli)
-                self.tmux.send_prompt(session_name, prompt_to_send, delay_seconds=1.5)
-                if self.backend == "claude":
-                    # Ensure the instruction is submitted even if the CLI is waiting on a blank line.
-                    self.tmux.send_enter(session_name, repeat=1, delay_seconds=0.2)
-                    attempts = 2
-                    last_error = None
-                    for _ in range(attempts):
-                        try:
-                            output = self.tmux.capture_session_output(session_name, lines=200)
-                        except Exception as exc:
-                            last_error = exc
-                            time.sleep(0.5)
-                            continue
-                        if "ACE_TASK.md" in output:
-                            last_error = None
-                            break
-                        last_error = RuntimeError(
-                            "Claude prompt not visible in tmux output after send."
-                        )
+            base_prompt = self._load_task_prompt()
+            if not base_prompt:
+                base_prompt = (
+                    "Please read ACE_TASK.md in the current directory and execute all instructions end-to-end. "
+                    "If you need action from the developer and cannot complete all instructions, use the "
+                    "`blocked-task-handling` skill to complete the next steps. "
+                    "If you are able to finish all instructions, use the `code-complete-issue-pr-handling` skill "
+                    "to complete the next steps. "
+                    "Always finish up by creating ACE_TASK_DONE.json with task_id, summary, files_changed, commands_run."
+                )
+            if self.backend == "codex" and system_prompt:
+                prompt_to_send = self._condense_prompt(f"{system_prompt}\n\n{base_prompt}")
+            else:
+                prompt_to_send = base_prompt
+            self.tmux.send_prompt(session_name, prompt_to_send, delay_seconds=1.5)
+            if self.backend == "claude":
+                # Ensure the instruction is submitted even if the CLI is waiting on a blank line.
+                self.tmux.send_enter(session_name, repeat=1, delay_seconds=0.2)
+                attempts = 2
+                last_error = None
+                for _ in range(attempts):
+                    try:
+                        output = self.tmux.capture_session_output(session_name, lines=200)
+                    except Exception as exc:
+                        last_error = exc
                         time.sleep(0.5)
-                    if last_error:
-                        raise RuntimeError(
-                            "❌ ERROR: Claude prompt not visible in tmux output after send. "
-                            "Session may be idle or prompt delivery failed."
-                        ) from last_error
+                        continue
+                    if "ACE_TASK.md" in output:
+                        last_error = None
+                        break
+                    last_error = RuntimeError(
+                        "Claude prompt not visible in tmux output after send."
+                    )
+                    time.sleep(0.5)
+                if last_error:
+                    raise RuntimeError(
+                        "❌ ERROR: Claude prompt not visible in tmux output after send. "
+                        "Session may be idle or prompt delivery failed."
+                    ) from last_error
 
             if created:
                 output = (
@@ -238,9 +217,8 @@ class CliAgent(BaseAgent):
         prompt: str,
         *,
         system_prompt: str = "",
-    ) -> tuple[list[str], str, bool]:
+    ) -> tuple[list[str], str]:
         template = self._command_template()
-        template_has_prompt = "{prompt}" in template
 
         model_value = self.model or ""
         display = template.replace("{model}", model_value).replace("{prompt}", "<prompt>")
@@ -252,11 +230,11 @@ class CliAgent(BaseAgent):
             command += ["--append-system-prompt", system_prompt]
             display += " --append-system-prompt <system_prompt>"
 
-        if not template_has_prompt and model_value and "--model" not in command:
+        if model_value and "--model" not in command:
             command += ["--model", model_value]
             display += f" --model {model_value}"
 
-        return command, display, template_has_prompt
+        return command, display
 
     def _load_system_prompt(self) -> str:
         path_value = self.settings.cli_system_prompt_path
@@ -276,16 +254,16 @@ class CliAgent(BaseAgent):
             logger.warning("system_prompt_read_failed", path=str(path), error=str(exc))
             return ""
 
-    def _load_pr_comment_prompt(self) -> str:
+    def _load_task_prompt(self) -> str:
         repo_root = Path(__file__).resolve().parents[3]
-        path = repo_root / "prompts" / "cli_pr_comment_prompt.md"
+        path = repo_root / "prompts" / "cli_task_prompt.md"
         try:
             if not path.exists():
                 return ""
             text = path.read_text(encoding="utf-8").strip()
             return " ".join(text.split())
         except Exception as exc:
-            logger.warning("pr_comment_prompt_read_failed", path=str(path), error=str(exc))
+            logger.warning("task_prompt_read_failed", path=str(path), error=str(exc))
             return ""
 
     def _session_name(self, context: dict[str, Any]) -> str:

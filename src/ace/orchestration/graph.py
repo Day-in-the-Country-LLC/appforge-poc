@@ -1,32 +1,29 @@
-"""LangGraph orchestration graph definition (issue-level, no task planning)."""
+"""LangGraph orchestration graph definition (issue-level, no task subdivision)."""
 
 from __future__ import annotations
 
-import base64
 import json
 import re
-from pathlib import Path
-from datetime import datetime
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import structlog
 from langgraph.graph import StateGraph
 
-from ace.agents.base import AgentResult, AgentStatus
 from ace.agents.llm_client import call_openai
-from ace.config.secrets import resolve_openai_api_key
 from ace.agents.model_selector import ModelSelector
-from ace.config.secrets import resolve_github_token
+from ace.agents.types import AgentResult, AgentStatus
+from ace.config.secrets import resolve_github_token, resolve_openai_api_key
 from ace.config.settings import get_settings
 from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client
 from ace.github.status_manager import StatusManager
-from ace.metrics import metrics
-from ace.orchestration.state import WorkerState
 from ace.logging_utils import log_key_event
+from ace.orchestration.state import WorkerState
 from ace.workspaces.git_ops import GitOps
 from ace.workspaces.tmux_ops import TmuxOps
 
@@ -36,11 +33,10 @@ logger = structlog.get_logger(__name__)
 class InstructionBuilder:
     """Creates detailed instructions for the entire issue."""
 
-    def __init__(self, backend: str, model: str | None = None) -> None:
-        self.backend = backend.lower()
+    def __init__(self) -> None:
         self.settings = get_settings()
         self._openai_key = resolve_openai_api_key(self.settings)
-        self.instruction_backend = "openai"
+        self.instruction_backend = self.settings.instruction_backend.lower()
         self.instruction_model = self.settings.instruction_model or self.settings.codex_model
 
     async def build(
@@ -48,14 +44,10 @@ class InstructionBuilder:
         issue,
         *,
         agents_md: str | None = None,
-        work_type: str = "ready",
-        pr_context: str | None = None,
     ) -> str:
         prompt = self._build_prompt(
             issue,
             agents_md=agents_md,
-            work_type=work_type,
-            pr_context=pr_context,
         )
         instructions = await self._call_model(
             prompt,
@@ -66,11 +58,7 @@ class InstructionBuilder:
             },
         )
         cleaned = (instructions or "").strip()
-        if (
-            not cleaned
-            or "type': 'reasoning" in cleaned
-            or cleaned.startswith("{'id':")
-        ):
+        if not cleaned or "type': 'reasoning" in cleaned or cleaned.startswith("{'id':"):
             preview = cleaned[:400]
             logger.error(
                 "instruction_generation_failed",
@@ -82,12 +70,13 @@ class InstructionBuilder:
                 preview=preview,
             )
             raise ValueError(
-                "❌ ERROR: Instruction agent returned no usable instructions. "
-                f"Preview: {preview}"
+                f"❌ ERROR: Instruction agent returned no usable instructions. Preview: {preview}"
             )
 
         normalized = cleaned.lower()
-        normalized = normalized.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+        normalized = (
+            normalized.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+        )
         normalized = " ".join(normalized.split())
 
         refusal_markers = [
@@ -115,8 +104,7 @@ class InstructionBuilder:
                 preview=preview,
             )
             raise ValueError(
-                "❌ ERROR: Instruction agent refused to provide steps. "
-                f"Preview: {preview}"
+                f"❌ ERROR: Instruction agent refused to provide steps. Preview: {preview}"
             )
         return instructions
 
@@ -125,19 +113,10 @@ class InstructionBuilder:
         issue,
         *,
         agents_md: str | None = None,
-        work_type: str = "ready",
-        pr_context: str | None = None,
     ) -> str:
         agents_section = ""
         if agents_md:
             agents_section = f"\n\nAGENTS.md (follow these repo practices):\n{agents_md}\n"
-        pr_section = ""
-        if work_type == "pr_comment" and pr_context:
-            pr_section = (
-                "\n\nPR COMMENT CONTEXT (use this to draft fixes):\n"
-                f"{pr_context}\n"
-                "\nFollow the `claude-cli-pr-comment-update` skill.\n"
-            )
         body = f"""
 You are an instruction agent. Write detailed, step-by-step *programmatic* coding instructions
 for the issue below. Output Markdown only. Do not include UI/manual steps.
@@ -148,7 +127,7 @@ If schema changes are needed, generate a timestamped Supabase migration (e.g., s
 Issue Title: {issue.title}
 Issue Body:
 {issue.body}
-{agents_section}{pr_section}
+{agents_section}
 
 Include:
 - Key files/areas to inspect
@@ -170,6 +149,10 @@ When finished:
         trace_name: str,
         metadata: dict[str, Any] | None,
     ) -> str:
+        if self.instruction_backend != "openai":
+            raise ValueError(
+                f"❌ ERROR: Unsupported instruction backend: {self.instruction_backend}"
+            )
         return await call_openai(
             prompt,
             self.instruction_model,
@@ -178,6 +161,7 @@ When finished:
             trace_name=trace_name,
             metadata=metadata,
         )
+
 
 def _slugify_title(title: str, max_length: int = 40) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
@@ -197,62 +181,6 @@ def _get_api_client(settings) -> GitHubAPIClient:
     token = resolve_github_token(settings)
     return GitHubAPIClient(token)
 
-
-async def _collect_pr_comment_context(
-    settings,
-    repo_owner: str,
-    repo_name: str,
-    pr_number: int,
-    *,
-    comment_body: str,
-    comment_path: str,
-    comment_line: int | None,
-    context_lines: int = 100,
-) -> str:
-    api_client = _get_api_client(settings)
-    head_sha = None
-    try:
-        pr = await api_client.rest_get(f"/repos/{repo_owner}/{repo_name}/pulls/{pr_number}")
-        head_sha = (pr.get("head") or {}).get("sha")
-    except Exception as exc:
-        logger.warning("pr_head_fetch_failed", issue=pr_number, error=str(exc))
-
-    file_snippet = ""
-    if comment_path and head_sha and comment_line:
-        try:
-            content = await api_client.rest_get(
-                f"/repos/{repo_owner}/{repo_name}/contents/{comment_path}",
-                params={"ref": head_sha},
-            )
-            encoded = content.get("content", "")
-            decoded = base64.b64decode(encoded).decode("utf-8", errors="replace")
-            lines = decoded.splitlines()
-            start = max(comment_line - context_lines - 1, 0)
-            end = min(comment_line + context_lines, len(lines))
-            snippet_lines = lines[start:end]
-            numbered = []
-            for idx, line in enumerate(snippet_lines, start=start + 1):
-                numbered.append(f"{idx:6d}: {line}")
-            file_snippet = "\n".join(numbered)
-        except Exception as exc:
-            logger.warning(
-                "pr_comment_file_context_failed",
-                issue=pr_number,
-                path=comment_path,
-                error=str(exc),
-            )
-
-    payload = {
-        "pr_number": pr_number,
-        "repo": f"{repo_owner}/{repo_name}",
-        "comment": {
-            "body": comment_body,
-            "path": comment_path,
-            "line": comment_line,
-        },
-        "file_context": file_snippet or "File context unavailable.",
-    }
-    return json.dumps(payload, indent=2)
 
 # Workflow steps
 async def fetch_candidates(state: WorkerState) -> WorkerState:
@@ -327,7 +255,7 @@ async def select_backend(state: WorkerState) -> WorkerState:
 
 
 async def run_agent(state: WorkerState) -> WorkerState:
-    """Execute the agent once for the full issue (no task planning)."""
+    """Execute the agent once for the full issue (no task subdivision)."""
     logger.info("step_run_agent", issue=state.issue_number, backend=state.backend)
     state.current_step = "run_agent"
 
@@ -338,13 +266,11 @@ async def run_agent(state: WorkerState) -> WorkerState:
 
     settings = get_settings()
     github_token = resolve_github_token(settings)
-    work_type = state.metadata.get("work_type", "ready")
     context = {
         "repo_name": state.metadata.get("repo_name", "unknown"),
         "repo_owner": state.metadata.get("repo_owner", "unknown"),
         "issue_number": state.issue_number,
         "labels": state.issue.labels,
-        "work_type": work_type,
     }
 
     repo_owner = state.metadata.get("repo_owner") or state.issue.repo_owner
@@ -378,24 +304,10 @@ async def run_agent(state: WorkerState) -> WorkerState:
         except Exception:
             agents_md = ""
 
-    pr_context = None
-    if work_type == "pr_comment" and repo_owner and repo_name and state.issue_number:
-        pr_context = await _collect_pr_comment_context(
-            settings,
-            repo_owner,
-            repo_name,
-            state.issue_number,
-            comment_body=state.metadata.get("pr_comment_body", ""),
-            comment_path=state.metadata.get("pr_comment_path", ""),
-            comment_line=state.metadata.get("pr_comment_line"),
-        )
-
-    instruction_builder = InstructionBuilder(backend=state.backend)
+    instruction_builder = InstructionBuilder()
     instructions = await instruction_builder.build(
         state.issue,
         agents_md=agents_md or None,
-        work_type=work_type,
-        pr_context=pr_context,
     )
     instructions_path = Path(worktree_path) / "ACE_TASK.md"
     instructions_path.write_text(instructions, encoding="utf-8")
@@ -419,15 +331,7 @@ async def run_agent(state: WorkerState) -> WorkerState:
         model = state.metadata.get("model")
         agent = CliAgent(backend=state.backend, model=model)
     else:
-        if state.backend == "claude":
-            from ace.agents.claude_agent import ClaudeAgent
-
-            model = state.metadata.get("model")
-            agent = ClaudeAgent(model=model)
-        else:
-            from ace.agents.codex_agent import CodexAgent
-
-            agent = CodexAgent()
+        raise ValueError("❌ ERROR: Non-tmux execution modes are not supported. Use tmux/cli.")
 
     logger.info(
         "executing_agent",
@@ -446,7 +350,9 @@ async def run_agent(state: WorkerState) -> WorkerState:
     # If running in tmux/cli, wait for ACE_TASK_DONE.json to appear before success.
     if settings.agent_execution_mode.lower() in {"tmux", "cli"} and session_name:
         tmux = TmuxOps()
-        timeout = settings.task_wait_timeout_seconds if settings.task_wait_timeout_seconds > 0 else None
+        timeout = (
+            settings.task_wait_timeout_seconds if settings.task_wait_timeout_seconds > 0 else None
+        )
         done_path = Path(workspace_path) / "ACE_TASK_DONE.json"
         start = time.monotonic()
         while True:
@@ -457,8 +363,16 @@ async def run_agent(state: WorkerState) -> WorkerState:
                 except Exception:
                     marker = {}
                 summary = marker.get("summary", "")
-                files_changed = marker.get("files_changed") if isinstance(marker.get("files_changed"), list) else []
-                commands_run = marker.get("commands_run") if isinstance(marker.get("commands_run"), list) else []
+                files_changed = (
+                    marker.get("files_changed")
+                    if isinstance(marker.get("files_changed"), list)
+                    else []
+                )
+                commands_run = (
+                    marker.get("commands_run")
+                    if isinstance(marker.get("commands_run"), list)
+                    else []
+                )
                 normalized_summary = " ".join(str(summary).lower().split())
                 refusal_markers = [
                     "no actionable instructions",

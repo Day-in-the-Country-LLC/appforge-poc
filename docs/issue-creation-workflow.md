@@ -1,6 +1,6 @@
 # Issue Creation Workflow
 
-This document explains how agents and developers create issues for the DITC TODO project using the GitHub MCP server.
+This document explains how agents and developers create issues for the your-project project using the GitHub MCP server.
 
 ## Overview
 
@@ -22,12 +22,12 @@ Instead of using a custom Python SDK, we leverage the **GitHub MCP (Model Contex
                          ▼
         ┌────────────────────────────┐
         │  GitHub API                │
-        │  (Day-in-the-Country-LLC)  │
+        │  (your-org)  │
         └────────────────┬───────────┘
                          │
                          ▼
         ┌────────────────────────────┐
-        │  DITC TODO Project         │
+        │  your-project Project         │
         │  (Issues & Status)         │
         └────────────────────────────┘
 ```
@@ -42,7 +42,7 @@ Instead of using a custom Python SDK, we leverage the **GitHub MCP (Model Contex
 1. Use GitHub MCP server tools in your IDE
 2. Provide issue details (title, description, target repo, labels)
 3. MCP server creates issue in GitHub
-4. Issue appears in DITC TODO project
+4. Issue appears in your-project project
 
 **Tools:**
 - Windsurf/VSCode: MCP tools panel
@@ -55,12 +55,13 @@ Instead of using a custom Python SDK, we leverage the **GitHub MCP (Model Contex
 
 **Steps:**
 1. Review issue for clarity and completeness
-2. Add `agent` label (indicates agent-ready)
+2. Add a target label: `agent:remote` or `agent:local`
 3. Add `difficulty:*` label (easy, medium, hard)
 4. Set project status to "Ready"
 
 **Labels:**
-- `agent` - Ready for agent automation
+- `agent:remote` - Ready for cloud/VM automation
+- `agent:local` - Requires local-machine access
 - `difficulty:easy` - Simple, well-defined
 - `difficulty:medium` - Moderate complexity
 - `difficulty:hard` - Complex, significant work
@@ -70,7 +71,7 @@ Instead of using a custom Python SDK, we leverage the **GitHub MCP (Model Contex
 **Actor:** Autonomous coding agent
 
 **Steps:**
-1. Agent claims issue (removes `agent` label, adds to "In Progress")
+1. Agent claims issue (sets status to "In Progress")
 2. Agent clones repo and creates feature branch
 3. Agent implements changes
 4. Agent creates pull request
@@ -81,7 +82,7 @@ Instead of using a custom Python SDK, we leverage the **GitHub MCP (Model Contex
 ```
 Created
    ↓
-Ready (agent label + difficulty label)
+Ready (target label + difficulty label)
    ↓
 In Progress (agent claimed)
    ↓
@@ -135,8 +136,11 @@ All issues should follow this structure:
 - **Blocked** - Agent needs human input
 - **Done** - Issue completed, PR merged
 
+### Target Labels
+- `agent:remote` - Ready for cloud/VM automation
+- `agent:local` - Requires local-machine access
+
 ### Category Labels
-- `agent` - Ready for agent automation
 - `difficulty:easy` - Simple changes
 - `difficulty:medium` - Moderate complexity
 - `difficulty:hard` - Complex changes
@@ -158,7 +162,7 @@ All issues should follow this structure:
 
 ### For Agents
 
-1. **Claim clearly** - Remove `agent` label when starting work
+1. **Claim clearly** - Set status to "In Progress" when starting work
 2. **Communicate** - Add comments if blocked or need clarification
 3. **Test thoroughly** - Ensure all acceptance criteria are met
 4. **Document changes** - Summarize what was done in PR description
@@ -184,16 +188,16 @@ All issues should follow this structure:
 1. Verify target repository exists
 2. Ensure PAT has `repo` scope
 3. Check repository is in the organization
-4. Verify DITC TODO project exists
+4. Verify your-project project exists
 
 ### Agent Can't Find Issue
 
 **Problem:** Agent doesn't see issue in project
 
 **Solution:**
-1. Verify issue has `agent` label
+1. Verify issue has `agent:remote` or `agent:local` label
 2. Check project status is set to "Ready"
-3. Ensure issue is in DITC TODO project
+3. Ensure issue is in your-project project
 4. Verify agent has access to repository
 
 ## References

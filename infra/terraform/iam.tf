@@ -1,6 +1,6 @@
 resource "google_service_account" "ace_sa" {
-  account_id   = "agentic-coding-engine"
-  display_name = "Agentic Coding Engine Service Account"
+  account_id   = "appforge-coding-engine"
+  display_name = "Appforge Coding Engine Service Account"
 }
 
 resource "google_project_iam_member" "ace_secret_accessor" {

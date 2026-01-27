@@ -15,7 +15,7 @@ Initialize a new project across multiple repos and standardize documentation and
 2. Create the shared docs path `~/.project-docs/<project>/project_architecture.md`.
 3. Explicitly load and follow the `project-architecture-doc` skill to draft the architecture doc.
 4. Symlink the shared `project_architecture.md` into each project repo.
-5. Ensure the shared infra repo `/Users/kristinday/ditc_terraform` is referenced in the doc but does not contain per-project docs.
+5. Ensure the shared infra repo `/path/to/your/terraform-repo` is referenced in the doc but does not contain per-project docs.
 6. Apply global guardrails:
    - Use `uv` only for Python package management; do not use `pip` or `uv pip`.
    - Store secrets in GCP Secret Manager; manage via Terraform when possible.

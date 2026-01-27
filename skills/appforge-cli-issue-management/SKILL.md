@@ -1,6 +1,6 @@
 ---
 name: appforge-cli-issue-management
-description: Manage Appforge issues from the CLI coding agent. Use when changing issue status to Blocked or In review, unclaiming issues, assigning to klday, commenting with developer requests, or creating PRs and linking them back to issues.
+description: Manage Appforge issues from the CLI coding agent. Use when changing issue status to Blocked or In review, unclaiming issues, assigning to repo-owner, commenting with developer requests, or creating PRs and linking them back to issues.
 ---
 
 # Appforge CLI Coding Agent Issue Management
@@ -14,7 +14,7 @@ Update issue status and communication for work that needs developer input or rev
 ### A) Developer input needed
 
 1. Change issue status to `Blocked` (use appforge-mcp for project board status).
-2. Assign the issue to `klday`.
+2. Assign the issue to `repo-owner`.
 3. Comment with clear, actionable details about what the developer needs to do.
 4. Unclaim the issue so another agent can pick it up after the developer updates status back to `In Progress`.
 
@@ -25,8 +25,8 @@ Update issue status and communication for work that needs developer input or rev
    - Summary of work completed.
    - Suggested test steps.
 3. Comment on the issue with a link to the PR.
-4. Assign the issue to `klday`.
-5. Send a Twilio text to `812-606-3251` with the PR link and a brief summary (skip for now; TODO until the campaign is approved).
+4. Assign the issue to `repo-owner`.
+5. Send a Twilio text to the configured review number with the PR link and a brief summary (skip for now; TODO until the campaign is approved).
 
 ## Notes
 

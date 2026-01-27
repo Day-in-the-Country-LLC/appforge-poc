@@ -20,7 +20,7 @@ Stop cleanly when developer input is required, leave a clear blocking note, and 
 
 3) Update project status and assignment
 - Set project status to `Blocked` via Appforge MCP.
-- Assign the issue to `klday` via GitHub MCP.
+- Assign the issue to `repo-owner` via GitHub MCP.
 
 4) Write `ACE_TASK_DONE.json`
 - Create the file in the repo root (same directory as `ACE_TASK.md`).

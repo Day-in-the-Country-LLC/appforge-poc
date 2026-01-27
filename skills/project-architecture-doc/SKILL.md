@@ -21,7 +21,7 @@ Create a single canonical `project_architecture.md` per project and symlink it i
    - Use `uv` only for Python package management; do not use `pip` or `uv pip`.
    - Store secrets in GCP Secret Manager; manage via Terraform when possible.
    - Keep a single system of record per resource (avoid Terraform + app repos managing the same thing).
-5. Reference shared infra repo `/Users/kristinday/ditc_terraform` in the doc, but do not place project docs inside it.
+5. Reference shared infra repo `/path/to/your/terraform-repo` in the doc, but do not place project docs inside it.
 6. Symlink the shared doc into each project repo as `project_architecture.md`.
 7. If the request includes broader new-project setup tasks, explicitly load the `new-project-setup` skill and follow its workflow.
 
@@ -36,7 +36,7 @@ This document describes the <Project> multi-repo layout, what each repository ow
 
 ## Repos and Responsibilities
 
-### /Users/kristinday/<repo-name>
+### /Users/your-handle/<repo-name>
 <Brief description>
 
 Use this repo for:
@@ -45,7 +45,7 @@ Use this repo for:
 Avoid here:
 - <Boundaries>
 
-### Infrastructure: /Users/kristinday/ditc_terraform
+### Infrastructure: /path/to/your/terraform-repo
 Shared Terraform repo for project-level infrastructure across all projects.
 
 Use this repo for:
