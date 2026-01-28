@@ -1,4 +1,4 @@
-# GCE VM for Agentic Coding Engine
+# GCE VM for Appforge Coding Engine
 # e2-medium with 30GB persistent disk
 
 variable "vm_zone" {
@@ -11,6 +11,12 @@ variable "vm_name" {
   description = "VM instance name"
   type        = string
   default     = "ace-vm"
+}
+
+variable "repo_url" {
+  description = "Git repo URL to clone"
+  type        = string
+  default     = "https://github.com/your-org/appforge-poc.git"
 }
 
 resource "google_compute_instance" "ace_vm" {
@@ -50,7 +56,7 @@ resource "google_compute_instance" "ace_vm" {
 
     # Install dependencies
     apt-get update
-    apt-get install -y python3 python3-pip python3-venv git docker.io
+    apt-get install -y curl ca-certificates git docker.io
 
     # Enable Docker
     systemctl enable docker
@@ -64,22 +70,26 @@ resource "google_compute_instance" "ace_vm" {
     if [ -d "/opt/ace/appforge-poc" ]; then
       cd /opt/ace/appforge-poc && git pull
     else
-      git clone https://github.com/Day-in-the-Country-LLC/appforge-poc.git
+      git clone ${var.repo_url}
       cd /opt/ace/appforge-poc
     fi
 
-    # Create virtual environment
-    python3 -m venv /opt/ace/venv
+    # Install uv
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.cargo/bin:$PATH"
+
+    # Install Python and create virtual environment
+    uv python install 3.12
+    uv venv /opt/ace/venv --python 3.12
     source /opt/ace/venv/bin/activate
 
     # Install dependencies
-    pip install --upgrade pip
-    pip install -e .
+    uv sync --frozen --no-dev --active
 
     # Create systemd service
     cat > /etc/systemd/system/ace.service << 'SERVICEEOF'
     [Unit]
-    Description=Agentic Coding Engine
+    Description=Appforge Coding Engine
     After=network.target
 
     [Service]
@@ -106,7 +116,7 @@ resource "google_compute_instance" "ace_vm" {
   EOF
 
   labels = {
-    app = "agentic-coding-engine"
+    app = "appforge-coding-engine"
     env = "production"
   }
 

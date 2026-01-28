@@ -54,7 +54,7 @@ Add to `.windsurf/mcp_config.json`:
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_your_token_here"
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "github_token_example"
       }
     }
   }
@@ -87,7 +87,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_your_token_here"
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "github_token_example"
       }
     }
   }
@@ -103,7 +103,7 @@ MCP install guides, and ensure the token env var matches `GITHUB_MCP_TOKEN_ENV`
 
 By default, ACE writes a project-scoped `.mcp.json` in the worktree for Claude CLI
 using the remote HTTP MCP server (`https://api.githubcopilot.com/mcp`) and a PAT
-from Secret Manager or `GITHUB_CONTROL_API_KEY`. This file is added to
+from Secret Manager or `GITHUB_TOKEN`. This file is added to
 `.git/info/exclude` to avoid accidental commits.
 
 For Codex CLI, ACE writes `~/.codex/config.toml` with:
@@ -113,7 +113,7 @@ For Codex CLI, ACE writes `~/.codex/config.toml` with:
 
 Key env vars used by ACE:
 - `GITHUB_MCP_TOKEN_ENV` (default `GITHUB_TOKEN`)
-- `GITHUB_CONTROL_API_KEY` (fallback for REST operations)
+- `GITHUB_TOKEN` (fallback for REST operations)
 - `GITHUB_TOKEN_SECRET_NAME` / `GITHUB_TOKEN_SECRET_VERSION` when using Secret Manager
 
 ACE automatically sets these inside the tmux session.
@@ -183,20 +183,22 @@ Acceptance Criteria:
 - [ ] Tests pass with caching enabled
 - [ ] Performance metrics show improvement
 
-Labels: agent, difficulty:medium, performance, backend
+Labels: agent:remote, difficulty:medium, performance, backend
 ```
 
 ## Issue Labels
 
 Use these labels for agent-driven issues:
 
-### Agent Labels
+### Target Labels
 
-- **`agent`** - Issue is ready for agent automation
 - **`agent:local`** - Issue requires local machine access (e.g., local databases, file migrations)
 - **`agent:remote`** - Issue can be processed by cloud VM agents
 
-**Note:** If neither `agent:local` nor `agent:remote` is specified, the issue will be processed by any available agent (backwards compatible behavior).
+Optional:
+- **`agent`** - Optional helper label used by some blocked/resume workflows
+
+**Note:** If neither `agent:local` nor `agent:remote` is specified, the issue will not be processed. Ensure one of these labels is present.
 
 ### Difficulty Labels
 
@@ -214,7 +216,7 @@ Use these labels for agent-driven issues:
 
 ## Project Status
 
-Issues in the **DITC TODO** org project use status fields:
+Issues in the **your-project** org project use status fields:
 
 - **Ready** - Issue is ready for agent to claim
 - **In Progress** - Agent is working on it
@@ -223,8 +225,8 @@ Issues in the **DITC TODO** org project use status fields:
 
 ## Workflow
 
-1. **Create issue** using MCP server with `agent` label
-2. **Set status** to "Ready" in DITC TODO project
+1. **Create issue** using MCP server with `agent:remote` or `agent:local` label
+2. **Set status** to "Ready" in your-project project
 3. **Agent claims** the issue and starts work
 4. **Agent creates PR** when work is complete
 5. **Status updates** to "Done" when PR is merged
@@ -237,11 +239,14 @@ Issues in the **DITC TODO** org project use status fields:
 
 ### Custom GitHub Projects MCP server
 
-The GitHub Projects MCP server now lives in the `appforge-mcp` repo and is deployed on Cloud Run.
-ACE is currently hardcoded to use the production endpoint (`https://appforge-mcp-gchmaqkvia-uc.a.run.app`)
-with server name `appforge-mcp-server`; no env vars are required. If the Cloud Run URL changes, update
-`appforge_mcp_url` in `ditc_terraform/live/prod/appforge-483920` and then change the hardcoded value in
-`src/ace/config/settings.py`.
+The GitHub Projects MCP server lives in the `appforge-mcp` repo and can be deployed on Cloud Run.
+ACE can be configured via env vars:
+
+- `APPFORGE_MCP_ENABLED=true`
+- `APPFORGE_MCP_URL=https://your-appforge-mcp-url`
+- `APPFORGE_MCP_SERVER_NAME=appforge-mcp-server`
+
+If the Cloud Run URL changes, update `APPFORGE_MCP_URL` in your runtime configuration.
 
 ### "Permission denied" error
 
@@ -254,7 +259,7 @@ with server name `appforge-mcp-server`; no env vars are required. If the Cloud R
 - Target repository is in the organization
 - PAT has access to the repository
 
-### "Cannot find DITC TODO project" error
+### "Cannot find your-project project" error
 
 **Solution:** Verify the project exists in the organization and the PAT has `read:org` scope.
 

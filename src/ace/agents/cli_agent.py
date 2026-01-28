@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,14 +12,15 @@ import structlog
 from ace.config.settings import get_settings
 from ace.config.secrets import resolve_github_token, resolve_openai_api_key, resolve_claude_api_key
 from ace.workspaces.tmux_ops import TmuxOps, session_name_for_issue
+from ace.logging_utils import log_key_event
 
-from .base import AgentResult, AgentStatus, BaseAgent
+from .types import AgentResult, AgentStatus
 from .mcp_config import ensure_mcp_config
 
 logger = structlog.get_logger(__name__)
 
 
-class CliAgent(BaseAgent):
+class CliAgent:
     """Spawn a tmux session running a local CLI agent."""
 
     def __init__(self, backend: str, model: str | None = None):
@@ -26,9 +28,6 @@ class CliAgent(BaseAgent):
         self.backend = backend.lower()
         self.model = model or self._default_model()
         self.tmux = TmuxOps()
-
-    async def plan(self, task: str, context: dict[str, Any]) -> str:
-        return "CLI agent runs in tmux; plan is included in the prompt file."
 
     async def run(
         self,
@@ -57,18 +56,14 @@ class CliAgent(BaseAgent):
             if system_prompt and self.backend == "codex":
                 prompt_for_cli = f"{system_prompt}\n\n{prompt}"
 
-            command, command_display, template_has_prompt = self._build_command(
+            command, command_display = self._build_command(
                 prompt_for_cli,
                 system_prompt=system_prompt,
             )
-            # Always send the prompt after starting codex; ignore template prompt embedding.
-            template_has_prompt = False
             session_name = self._session_name(context)
             token = resolve_github_token(self.settings)
             env_exports: dict[str, str] = {}
             if token:
-                env_exports[self.settings.github_mcp_token_env] = token
-                env_exports["GITHUB_CONTROL_API_KEY"] = token
                 env_exports["GITHUB_TOKEN"] = token
 
             if self.backend == "codex":
@@ -77,18 +72,14 @@ class CliAgent(BaseAgent):
 
             try:
                 claude_key = resolve_claude_api_key(self.settings)
-                env_exports["CLAUDE_CODE_ADMIN_API_KEY"] = claude_key
                 env_exports["ANTHROPIC_API_KEY"] = claude_key
-                env_exports["CLAUDE_API_KEY"] = claude_key
             except Exception:
                 # If backend is codex, we can skip Claude; otherwise propagate when invoked.
                 if self.backend == "claude":
                     raise
 
-            gcp_credentials = context.get("gcp_credentials_path") or self.settings.gcp_credentials_path
-            if gcp_credentials:
-                env_exports["GOOGLE_APPLICATION_CREDENTIALS"] = gcp_credentials
-                env_exports["GCP_CREDENTIALS_FILE"] = gcp_credentials
+            env_exports["DISABLE_LOGIN_COMMAND"] = "1"
+            env_exports["FORCE_CODE_TERMINAL"] = "1"
 
             if token:
                 ensure_mcp_config(workdir, self.backend, token, self.settings)
@@ -97,7 +88,11 @@ class CliAgent(BaseAgent):
 
             # Start bare session, then send exports + exec codex in bash -lc with desired flags
             created = self.tmux.start_session(session_name, workdir, [], env=env_exports)
-
+            if not self.tmux.session_exists(session_name):
+                raise RuntimeError(
+                    "tmux session failed to start; session not found after creation "
+                    f"(session='{session_name}', workdir='{workdir}')"
+                )
             export_parts = [f"export {k}={shlex.quote(v)}" for k, v in env_exports.items()]
             exec_cmd = shlex.join(command)
             launch_cmd = "bash -lc " + shlex.quote("; ".join(export_parts + [f"exec {exec_cmd}"]))
@@ -107,19 +102,45 @@ class CliAgent(BaseAgent):
                 # First-run onboarding: accept default style if prompted.
                 self._maybe_send_claude_onboarding_inputs(session_name)
 
-            if not template_has_prompt:
-                if self.backend == "claude":
-                    prompt_to_send = (
-                        "Please read ACE_TASK.md in the current directory and execute all instructions end-to-end. "
-                        "When finished, write ACE_TASK_DONE.json with task_id, summary, files_changed, commands_run, "
-                        "then summarize the changes and status."
+            base_prompt = self._load_task_prompt()
+            if not base_prompt:
+                base_prompt = (
+                    "Please read ACE_TASK.md in the current directory and execute all instructions end-to-end. "
+                    "If you need action from the developer and cannot complete all instructions, use the "
+                    "`blocked-task-handling` skill to complete the next steps. "
+                    "If you are able to finish all instructions, use the `code-complete-issue-pr-handling` skill "
+                    "to complete the next steps. "
+                    "Always finish up by creating ACE_TASK_DONE.json with task_id, summary, files_changed, commands_run."
+                )
+            if self.backend == "codex" and system_prompt:
+                prompt_to_send = self._condense_prompt(f"{system_prompt}\n\n{base_prompt}")
+            else:
+                prompt_to_send = base_prompt
+            self.tmux.send_prompt(session_name, prompt_to_send, delay_seconds=1.5)
+            if self.backend == "claude":
+                # Ensure the instruction is submitted even if the CLI is waiting on a blank line.
+                self.tmux.send_enter(session_name, repeat=1, delay_seconds=0.2)
+                attempts = 2
+                last_error = None
+                for _ in range(attempts):
+                    try:
+                        output = self.tmux.capture_session_output(session_name, lines=200)
+                    except Exception as exc:
+                        last_error = exc
+                        time.sleep(0.5)
+                        continue
+                    if "ACE_TASK.md" in output:
+                        last_error = None
+                        break
+                    last_error = RuntimeError(
+                        "Claude prompt not visible in tmux output after send."
                     )
-                else:
-                    prompt_to_send = self._condense_prompt(prompt_for_cli)
-                self.tmux.send_prompt(session_name, prompt_to_send, delay_seconds=0.8)
-                if self.backend == "claude":
-                    # Ensure the instruction is submitted even if the CLI is waiting on a blank line.
-                    self.tmux.send_enter(session_name, repeat=1, delay_seconds=0.2)
+                    time.sleep(0.5)
+                if last_error:
+                    raise RuntimeError(
+                        "❌ ERROR: Claude prompt not visible in tmux output after send. "
+                        "Session may be idle or prompt delivery failed."
+                    ) from last_error
 
             if created:
                 output = (
@@ -143,7 +164,12 @@ class CliAgent(BaseAgent):
                 },
             )
         except Exception as e:
-            logger.error("cli_agent_spawn_failed", error=str(e))
+            logger.error(
+                "cli_agent_spawn_failed",
+                error=str(e),
+                session=session_name if "session_name" in locals() else None,
+                workdir=str(workdir) if "workdir" in locals() else None,
+            )
             return AgentResult(
                 status=AgentStatus.FAILED,
                 output="",
@@ -191,9 +217,8 @@ class CliAgent(BaseAgent):
         prompt: str,
         *,
         system_prompt: str = "",
-    ) -> tuple[list[str], str, bool]:
+    ) -> tuple[list[str], str]:
         template = self._command_template()
-        template_has_prompt = "{prompt}" in template
 
         model_value = self.model or ""
         display = template.replace("{model}", model_value).replace("{prompt}", "<prompt>")
@@ -205,11 +230,11 @@ class CliAgent(BaseAgent):
             command += ["--append-system-prompt", system_prompt]
             display += " --append-system-prompt <system_prompt>"
 
-        if not template_has_prompt and model_value and "--model" not in command:
+        if model_value and "--model" not in command:
             command += ["--model", model_value]
             display += f" --model {model_value}"
 
-        return command, display, template_has_prompt
+        return command, display
 
     def _load_system_prompt(self) -> str:
         path_value = self.settings.cli_system_prompt_path
@@ -229,6 +254,18 @@ class CliAgent(BaseAgent):
             logger.warning("system_prompt_read_failed", path=str(path), error=str(exc))
             return ""
 
+    def _load_task_prompt(self) -> str:
+        repo_root = Path(__file__).resolve().parents[3]
+        path = repo_root / "prompts" / "cli_task_prompt.md"
+        try:
+            if not path.exists():
+                return ""
+            text = path.read_text(encoding="utf-8").strip()
+            return " ".join(text.split())
+        except Exception as exc:
+            logger.warning("task_prompt_read_failed", path=str(path), error=str(exc))
+            return ""
+
     def _session_name(self, context: dict[str, Any]) -> str:
         repo = context.get("repo_name", "repo")
         issue = context.get("issue_number", "issue")
@@ -244,31 +281,28 @@ class CliAgent(BaseAgent):
             return
 
         try:
-            output = ""
-            try:
-                output = self.tmux.capture_session_output(session_name, lines=800)
-            except Exception as exc:
-                logger.warning("claude_onboarding_capture_failed", session=session_name, error=str(exc))
-
-            lowered = output.lower()
-            sent = False
-
-            if "preferred text style" in lowered or "select your text style" in lowered:
-                self.tmux.send_enter(session_name, repeat=1, delay_seconds=0.4)
-                sent = True
-
-            if "detected a custom api key" in lowered and "anthropic_api_key" in lowered:
-                # Choose "Yes" to use the provided API key.
-                self.tmux.send_prompt(session_name, "1", delay_seconds=0.6 if sent else 0.4)
-                sent = True
-
-            if not sent:
-                logger.info("claude_onboarding_no_known_prompt", session=session_name)
-
-            sentinel.parent.mkdir(parents=True, exist_ok=True)
-            sentinel.write_text("claude onboarding inputs sent\n", encoding="utf-8")
+            output = self.tmux.capture_session_output(session_name, lines=800)
         except Exception as exc:
-            logger.warning("claude_onboarding_inputs_failed", session=session_name, error=str(exc))
+            raise RuntimeError(
+                f"❌ ERROR: Claude onboarding capture failed: {exc}"
+            ) from exc
+
+        lowered = output.lower()
+        if "preferred text style" in lowered or "select your text style" in lowered:
+            raise RuntimeError(
+                "❌ ERROR: Claude CLI onboarding prompt detected for text style selection. "
+                "Complete onboarding manually, then rerun."
+            )
+
+        if "detected a custom api key" in lowered and "anthropic_api_key" in lowered:
+            raise RuntimeError(
+                "❌ ERROR: Claude CLI onboarding prompt detected for API key confirmation. "
+                "Complete onboarding manually, then rerun."
+            )
+
+        logger.info("claude_onboarding_no_known_prompt", session=session_name)
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text("claude onboarding inputs sent\n", encoding="utf-8")
 
     def _ensure_claude_guide(self, workdir: Path) -> None:
         """Copy a shared CLAUDE.md into the workspace if one isn't present."""

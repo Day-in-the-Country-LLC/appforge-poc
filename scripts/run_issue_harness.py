@@ -11,7 +11,7 @@ import structlog
 
 from ace.config.logging import configure_logging
 from ace.config.secrets import resolve_github_token
-from ace.config.settings import get_settings
+from ace.config.settings import get_settings, set_settings_overrides
 from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client
@@ -25,12 +25,13 @@ logger = structlog.get_logger(__name__)
 
 def _matches_target(labels: list[str], settings, target: str) -> bool:
     target = target.lower()
-    if target == "any":
-        return True
     if target == "remote":
         return settings.github_remote_agent_label in labels
     if target == "local":
-        return settings.github_local_agent_label in labels
+        return (
+            settings.github_local_agent_label in labels
+            or settings.github_remote_agent_label in labels
+        )
     return False
 
 
@@ -175,15 +176,22 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target",
-        choices=["remote", "local", "any"],
+        choices=["remote", "local"],
         default="remote",
         help="Filter auto-selected issues by target label",
+    )
+    parser.add_argument(
+        "--secrets-backend",
+        choices=["secret-manager", "env"],
+        default="secret-manager",
+        help="Where to load secrets from (default: secret-manager).",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    set_settings_overrides(secrets_backend=args.secrets_backend)
     settings = get_settings()
 
     owner = args.owner

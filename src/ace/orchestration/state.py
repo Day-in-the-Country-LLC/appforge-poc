@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from ace.agents.base import AgentResult
+from ace.agents.types import AgentResult
 from ace.github.issue_queue import Issue
 
 
@@ -28,7 +28,6 @@ class WorkerState:
     current_step: str = ""
 
     # Agent results
-    plan: str = ""
     agent_result: AgentResult | None = None
     blocked_questions: list[str] = field(default_factory=list)
 

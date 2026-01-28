@@ -2,10 +2,10 @@
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.12+
+- uv (https://astral.sh/uv)
 - Git
 - GitHub account with PAT (Personal Access Token)
-- (Optional) ngrok for webhook testing
 
 ## Setup
 
@@ -13,10 +13,8 @@
 
 ```bash
 git clone <repo-url>
-cd agentic-coding-engine
-python -m venv venv
-source venv/bin/activate
-pip install -e ".[dev]"
+cd appforge-poc
+uv sync --dev
 ```
 
 ### 2. Environment Configuration
@@ -24,16 +22,13 @@ pip install -e ".[dev]"
 Create a `.env` file in the repo root:
 
 ```env
-ENVIRONMENT=development
-DEBUG=true
+DEBUG=false
 
-GITHUB_CONTROL_API_KEY=ghp_your_token_here
+GITHUB_TOKEN=github_token_example
 GITHUB_ORG=your-org
-GITHUB_PROJECT_NAME=DITC TODO
-GITHUB_WEBHOOK_SECRET=your_webhook_secret
+GITHUB_PROJECT_NAME=your-project
 GITHUB_READY_STATUS=Ready
 GITHUB_AGENT_LABEL=agent
-GITHUB_BASE_BRANCH=main
 GITHUB_TOKEN_SECRET_NAME=github-control-api-key
 GITHUB_TOKEN_SECRET_VERSION=latest
 GITHUB_MCP_TOKEN_ENV=GITHUB_TOKEN
@@ -41,40 +36,28 @@ GITHUB_API_MAX_RETRIES=5
 GITHUB_API_RETRY_BASE_SECONDS=1.0
 GITHUB_API_RETRY_MAX_SECONDS=30.0
 LANGSMITH_ENABLED=false
-LANGSMITH_API_KEY=lsv2_...
+LANGSMITH_API_KEY=langsmith_example
 LANGSMITH_SECRET_NAME=LANGSMITH_ADS_OPTIMIZATION_KEY
 LANGSMITH_SECRET_VERSION=latest
-LANGSMITH_PROJECT=appforge-poc
+LANGSMITH_PROJECT=appforge-coding-engine
 LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 LANGSMITH_LOG_PROMPTS=true
 LANGSMITH_LOG_RESPONSES=true
 
-APPFORGE_OPENAI_API_KEY=sk-...
-CLAUDE_CODE_ADMIN_API_KEY=sk-...
+APPFORGE_OPENAI_API_KEY=openai_example
+CLAUDE_CODE_ADMIN_API_KEY=anthropic_example
 
-GCP_PROJECT_ID=appforge-483920
-GCP_CREDENTIALS_FILE=appforge-creds.json
+GCP_PROJECT_ID=your-gcp-project-id
+GCP_CREDENTIALS_FILE=gcp-credentials.json
 
 AGENT_WORKSPACE_ROOT=/tmp/agent-hq
 AGENT_ID=ace-dev
 AGENT_EXECUTION_MODE=tmux
-CODEX_CLI_COMMAND=codex --model {model}
-CLAUDE_CLI_COMMAND=claude --model {model}
+CODEX_CLI_COMMAND=codex --ask-for-approval never --full-auto --sandbox danger-full-access --model {model}
+CLAUDE_CLI_COMMAND=claude --permission-mode dontAsk --dangerously-skip-permissions --model {model}
 BLOCKED_ASSIGNEE=your-github-username
 
-SERVICE_PORT=8080
-SERVICE_HOST=0.0.0.0
-
-POLLING_INTERVAL_SECONDS=60
-TASK_AUTO_ADVANCE=true
-TASK_POLL_INTERVAL_SECONDS=30
 TASK_WAIT_TIMEOUT_SECONDS=0
-TASK_NUDGE_ENABLED=true
-TASK_NUDGE_AFTER_SECONDS=900
-TASK_NUDGE_INTERVAL_SECONDS=300
-TASK_NUDGE_MAX_ATTEMPTS=3
-TASK_NUDGE_MAX_RESTARTS=1
-TASK_NUDGE_MESSAGE=HEALTH_CHECK: please continue work on {task_id} ({task_title}). If blocked, post a BLOCKED comment and exit.
 RESUME_IN_PROGRESS_ISSUES=true
 
 CLEANUP_ENABLED=true
@@ -90,33 +73,13 @@ CLEANUP_TMUX_ENABLED=true
 Drain ready issues once (example: remote target, limit 1 issue):
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/run_agent_pool.py --target remote --max-issues 1
+UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/run_agent_pool.py --target remote --max-issues 1 --secrets-backend env
 ```
-
-Then configure the webhook in GitHub:
-- Payload URL: `https://your-ngrok-url/webhook/github`
-- Content type: `application/json`
-- Events: `Issues`, `Issue comments`
-- Secret: (use the value from `.env`)
-
-### Manual Polling Trigger
-
-```bash
-curl -X POST http://localhost:8080/trigger/poll
-```
-
-### Process a Single Ticket
-
-```bash
-python -m ace.runners.worker 123
-```
-
-Where `123` is the GitHub issue number.
 
 ### Run the Issue Harness (End-to-End)
 
 ```bash
-python scripts/run_issue_harness.py --owner <org> --repo <repo> --issue <number>
+uv run python scripts/run_issue_harness.py --owner <org> --repo <repo> --issue <number> --secrets-backend env
 ```
 
 This will hit GitHub APIs, create comments, and open a PR when tasks complete.
@@ -124,7 +87,7 @@ This will hit GitHub APIs, create comments, and open a PR when tasks complete.
 Auto-select the first unblocked issue from the configured project:
 
 ```bash
-python scripts/run_issue_harness.py --auto --target remote
+uv run python scripts/run_issue_harness.py --auto --target remote --secrets-backend env
 ```
 
 ## Development Workflow
@@ -196,17 +159,12 @@ ls -la /tmp/agent-hq/worktrees/
 ## Troubleshooting
 
 ### "GitHub token invalid"
-- Verify `GITHUB_CONTROL_API_KEY` in `.env` or Secret Manager
+- Verify `GITHUB_TOKEN` in `.env` or Secret Manager
 - Check token has `repo` and `issues` scopes
 
 ### "MCP server unreachable"
 - Ensure MCP server is running (if using local MCP)
 - Verify MCP configuration for Codex/Claude CLI and `GITHUB_MCP_TOKEN_ENV` is set
-
-### "Webhook not received"
-- Verify ngrok is running
-- Check GitHub webhook delivery logs
-- Ensure webhook secret matches
 
 ### "Agent execution timeout"
 - Check workspace logs in `/tmp/agent-hq/`

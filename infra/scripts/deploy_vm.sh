@@ -1,16 +1,67 @@
 #!/bin/bash
 # Deploy ACE to GCP Compute Engine VM
-# Usage: ./deploy_vm.sh [ZONE]
+# Usage: ./deploy_vm.sh --project-id <id> --service-account <email> --repo-url <url> [--zone <zone>]
 
 set -e
 
-# Use existing appforge project and service account
-PROJECT_ID="appforge-483920"
-SA_EMAIL="appforge@appforge-483920.iam.gserviceaccount.com"
-ZONE="${1:-us-central1-a}"
+# Required args (fail fast)
+PROJECT_ID=""
+SA_EMAIL=""
+REPO_URL=""
+ZONE="us-central1-a"
 VM_NAME="ace-vm"
 MACHINE_TYPE="e2-medium"
 DISK_SIZE="30"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --project-id)
+            PROJECT_ID="$2"
+            shift 2
+            ;;
+        --service-account)
+            SA_EMAIL="$2"
+            shift 2
+            ;;
+        --repo-url)
+            REPO_URL="$2"
+            shift 2
+            ;;
+        --zone)
+            ZONE="$2"
+            shift 2
+            ;;
+        --vm-name)
+            VM_NAME="$2"
+            shift 2
+            ;;
+        --machine-type)
+            MACHINE_TYPE="$2"
+            shift 2
+            ;;
+        --disk-size)
+            DISK_SIZE="$2"
+            shift 2
+            ;;
+        *)
+            echo "❌ ERROR: Unknown argument: $1"
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$PROJECT_ID" ]; then
+    echo "❌ ERROR: Missing --project-id"
+    exit 1
+fi
+if [ -z "$SA_EMAIL" ]; then
+    echo "❌ ERROR: Missing --service-account"
+    exit 1
+fi
+if [ -z "$REPO_URL" ]; then
+    echo "❌ ERROR: Missing --repo-url"
+    exit 1
+fi
 
 echo "=== ACE VM Deployment ==="
 echo "Project: $PROJECT_ID"
@@ -30,14 +81,20 @@ gcloud services enable cloudscheduler.googleapis.com
 # Verify secrets exist in Secret Manager
 echo ""
 echo "Verifying secrets in Secret Manager..."
-for SECRET in GITHUB_CONTROL_API_KEY APPFORGE_OPENAI_API_KEY CLAUDE_CODE_ADMIN_API_KEY; do
+missing_secrets=0
+for SECRET in github-control-api-key APPFORGE_OPENAI_API_KEY CLAUDE_CODE_ADMIN_API_KEY; do
     if gcloud secrets describe "$SECRET" &>/dev/null 2>&1; then
         echo "✓ Secret exists: $SECRET"
     else
-        echo "✗ Missing secret: $SECRET"
+        echo "❌ ERROR: Missing secret: $SECRET"
         echo "  Add with: gcloud secrets create $SECRET --data-file=<file>"
+        missing_secrets=1
     fi
 done
+if [ "$missing_secrets" -ne 0 ]; then
+    echo "❌ ERROR: Required secrets are missing. Aborting."
+    exit 1
+fi
 
 # Create VPC network if it doesn't exist
 if ! gcloud compute networks describe ace-network &>/dev/null 2>&1; then
@@ -60,9 +117,12 @@ STARTUP_SCRIPT=$(cat << 'EOF'
 #!/bin/bash
 set -e
 
+# Repo URL (injected by deploy_vm.sh)
+REPO_URL="__REPO_URL__"
+
 # Install dependencies
 apt-get update
-apt-get install -y python3 python3-pip python3-venv git
+apt-get install -y curl ca-certificates git
 
 # Create app directory
 mkdir -p /opt/ace
@@ -70,22 +130,28 @@ cd /opt/ace
 
 # Clone or update repo
 if [ -d "/opt/ace/appforge-poc" ]; then
-    cd /opt/ace/appforge-poc && git pull origin main
+    cd /opt/ace/appforge-poc
+    git remote set-url origin "${REPO_URL}"
+    git pull origin main
 else
-    git clone https://github.com/Day-in-the-Country-LLC/appforge-poc.git
+    git clone "${REPO_URL}" appforge-poc
     cd /opt/ace/appforge-poc
 fi
 
-# Create virtual environment
-python3 -m venv /opt/ace/venv
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# Install Python and create virtual environment
+uv python install 3.12
+uv venv /opt/ace/venv --python 3.12
 source /opt/ace/venv/bin/activate
 
 # Install dependencies
-pip install --upgrade pip
-pip install -e .
+uv sync --frozen --no-dev --active
 
 # Get secrets from Secret Manager (using correct secret names)
-export GITHUB_CONTROL_API_KEY=$(gcloud secrets versions access latest --secret=GITHUB_CONTROL_API_KEY 2>/dev/null || echo "")
+export GITHUB_TOKEN=$(gcloud secrets versions access latest --secret=github-control-api-key 2>/dev/null || echo "")
 export APPFORGE_OPENAI_API_KEY=$(gcloud secrets versions access latest --secret=APPFORGE_OPENAI_API_KEY 2>/dev/null || echo "")
 export CLAUDE_CODE_ADMIN_API_KEY=$(gcloud secrets versions access latest --secret=CLAUDE_CODE_ADMIN_API_KEY 2>/dev/null || echo "")
 
@@ -93,6 +159,7 @@ export CLAUDE_CODE_ADMIN_API_KEY=$(gcloud secrets versions access latest --secre
 # UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/run_agent_pool.py --target remote --max-issues 0
 EOF
 )
+STARTUP_SCRIPT=${STARTUP_SCRIPT/__REPO_URL__/${REPO_URL}}
 
 # Check if VM exists
 if gcloud compute instances describe "$VM_NAME" --zone="$ZONE" &>/dev/null 2>&1; then

@@ -366,6 +366,86 @@ class ProjectsV2Client:
         )
         return None
 
+    async def get_issue_project_status(
+        self,
+        project_id: str,
+        issue_number: int,
+        repo_owner: str,
+        repo_name: str,
+    ) -> str | None:
+        """Get the project status for a specific issue.
+
+        Args:
+            project_id: Project node ID
+            issue_number: Issue number
+            repo_owner: Repository owner
+            repo_name: Repository name
+
+        Returns:
+            Status name or None if not found/unclear
+        """
+        query = """
+        query($projectId: ID!, $cursor: String) {
+            node(id: $projectId) {
+                ... on ProjectV2 {
+                    items(first: 100, after: $cursor) {
+                        nodes {
+                            fieldValueByName(name: "Status") {
+                                ... on ProjectV2ItemFieldSingleSelectValue {
+                                    name
+                                }
+                            }
+                            content {
+                                ... on Issue {
+                                    number
+                                    repository {
+                                        owner {
+                                            login
+                                        }
+                                        name
+                                    }
+                                }
+                            }
+                        }
+                        pageInfo {
+                            hasNextPage
+                            endCursor
+                        }
+                    }
+                }
+            }
+        }
+        """
+        cursor = None
+        while True:
+            result = await self.api_client.graphql(
+                query, {"projectId": project_id, "cursor": cursor}
+            )
+            items = result["node"]["items"]
+
+            for item in items["nodes"]:
+                content = item.get("content")
+                if not content or content.get("number") != issue_number:
+                    continue
+                repo = content.get("repository", {})
+                if (
+                    repo.get("owner", {}).get("login") == repo_owner
+                    and repo.get("name") == repo_name
+                ):
+                    status_field = item.get("fieldValueByName") or {}
+                    return status_field.get("name")
+
+            if not items["pageInfo"]["hasNextPage"]:
+                break
+            cursor = items["pageInfo"]["endCursor"]
+
+        logger.warning(
+            "issue_status_not_found_in_project",
+            issue_number=issue_number,
+            repo=f"{repo_owner}/{repo_name}",
+        )
+        return None
+
     async def get_issue_blockers(
         self,
         repo_owner: str,

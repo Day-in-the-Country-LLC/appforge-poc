@@ -52,50 +52,80 @@ def _should_use_secret_manager(settings: Settings, secret_name: str) -> bool:
     return bool(settings.gcp_project_id)
 
 
-def resolve_github_token(settings: Settings) -> str:
-    """Resolve the GitHub token, preferring Secret Manager when available."""
-    token = ""
-    if _should_use_secret_manager(settings, settings.github_token_secret_name):
-        try:
-            token = load_secret(
-                settings.gcp_project_id,
-                settings.github_token_secret_name,
-                settings.github_token_secret_version,
-                settings.gcp_credentials_path,
-            )
-        except Exception as e:
-            logger.warning("github_token_secret_failed", error=str(e))
-
-    if not token:
-        token = settings.github_token
-
-    if not token:
+def _validate_backend(settings: Settings) -> None:
+    if settings.secrets_backend not in ("secret-manager", "env"):
         raise ValueError(
-            "GitHub token missing. Set GITHUB_CONTROL_API_KEY or configure Secret Manager."
+            f"❌ ERROR: Unsupported secrets backend: {settings.secrets_backend}"
         )
+
+
+def resolve_github_token(settings: Settings) -> str:
+    """Resolve the GitHub token."""
+    _validate_backend(settings)
+    if settings.secrets_backend == "env":
+        token = settings.github_token
+        if not token:
+            raise ValueError("❌ ERROR: GitHub token missing from environment")
+        return token
+
+    if not _should_use_secret_manager(settings, settings.github_token_secret_name):
+        raise ValueError("❌ ERROR: GitHub token secret not configured")
+
+    try:
+        token = load_secret(
+            settings.gcp_project_id,
+            settings.github_token_secret_name,
+            settings.github_token_secret_version,
+            settings.gcp_credentials_path,
+        )
+    except Exception as e:
+        raise ValueError(f"❌ ERROR: GitHub secret fetch failed: {e}") from e
+
+    if not token:
+        raise ValueError("❌ ERROR: GitHub token missing from Secret Manager")
+
     return token
 
 
 def resolve_langsmith_api_key(settings: Settings) -> str:
-    """Resolve the LangSmith API key, preferring Secret Manager when available."""
-    api_key = ""
-    if _should_use_secret_manager(settings, settings.langsmith_secret_name):
-        try:
-            api_key = load_secret(
-                settings.gcp_project_id,
-                settings.langsmith_secret_name,
-                settings.langsmith_secret_version,
-                settings.gcp_credentials_path,
-            )
-        except Exception as e:
-            logger.warning("langsmith_secret_failed", error=str(e))
-    return api_key or settings.langsmith_api_key
+    """Resolve the LangSmith API key."""
+    _validate_backend(settings)
+    if not settings.langsmith_enabled:
+        return ""
+    if settings.secrets_backend == "env":
+        api_key = settings.langsmith_api_key
+        if not api_key:
+            raise ValueError("❌ ERROR: LangSmith API key missing from environment")
+        return api_key
+    if not _should_use_secret_manager(settings, settings.langsmith_secret_name):
+        raise ValueError("❌ ERROR: LangSmith API key secret not configured")
+
+    try:
+        api_key = load_secret(
+            settings.gcp_project_id,
+            settings.langsmith_secret_name,
+            settings.langsmith_secret_version,
+            settings.gcp_credentials_path,
+        )
+    except Exception as e:
+        raise ValueError(f"❌ ERROR: LangSmith secret fetch failed: {e}") from e
+
+    if not api_key:
+        raise ValueError("❌ ERROR: LangSmith API key missing from Secret Manager")
+
+    return api_key
 
 
 def resolve_openai_api_key(settings: Settings) -> str:
-    """Resolve the OpenAI API key. Must come from Secret Manager; no env fallback."""
+    """Resolve the OpenAI API key."""
+    _validate_backend(settings)
+    if settings.secrets_backend == "env":
+        api_key = settings.openai_api_key
+        if not api_key:
+            raise ValueError("❌ ERROR: OpenAI API key missing from environment")
+        return api_key
     if not _should_use_secret_manager(settings, settings.openai_secret_name):
-        raise ValueError("OpenAI API key secret not configured")
+        raise ValueError("❌ ERROR: OpenAI API key secret not configured")
 
     try:
         api_key = load_secret(
@@ -105,18 +135,24 @@ def resolve_openai_api_key(settings: Settings) -> str:
             settings.gcp_credentials_path,
         )
     except Exception as e:
-        raise ValueError(f"OpenAI secret fetch failed: {e}") from e
+        raise ValueError(f"❌ ERROR: OpenAI secret fetch failed: {e}") from e
 
     if not api_key:
-        raise ValueError("OpenAI API key missing from Secret Manager")
+        raise ValueError("❌ ERROR: OpenAI API key missing from Secret Manager")
 
     return api_key
 
 
 def resolve_claude_api_key(settings: Settings) -> str:
-    """Resolve the Claude API key. Must come from Secret Manager; no env fallback."""
+    """Resolve the Claude API key."""
+    _validate_backend(settings)
+    if settings.secrets_backend == "env":
+        api_key = settings.claude_api_key
+        if not api_key:
+            raise ValueError("❌ ERROR: Claude API key missing from environment")
+        return api_key
     if not _should_use_secret_manager(settings, settings.claude_secret_name):
-        raise ValueError("Claude API key secret not configured")
+        raise ValueError("❌ ERROR: Claude API key secret not configured")
 
     try:
         api_key = load_secret(
@@ -126,9 +162,9 @@ def resolve_claude_api_key(settings: Settings) -> str:
             settings.gcp_credentials_path,
         )
     except Exception as e:
-        raise ValueError(f"Claude secret fetch failed: {e}") from e
+        raise ValueError(f"❌ ERROR: Claude secret fetch failed: {e}") from e
 
     if not api_key:
-        raise ValueError("Claude API key missing from Secret Manager")
+        raise ValueError("❌ ERROR: Claude API key missing from Secret Manager")
 
     return api_key

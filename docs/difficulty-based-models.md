@@ -1,6 +1,6 @@
 # Difficulty-Based Model Selection
 
-The Agentic Coding Engine automatically selects the appropriate coding model based on issue difficulty labels. This allows you to optimize cost and performance by using faster/cheaper models for simple tasks and more capable models for complex work.
+The Appforge Coding Engine automatically selects the appropriate coding model based on issue difficulty labels. This allows you to optimize cost and performance by using faster/cheaper models for simple tasks and more capable models for complex work.
 
 ## How It Works
 
@@ -60,18 +60,18 @@ When creating or updating issues in your project, add **exactly one** difficulty
 
 ```
 Issue: "Fix typo in README"
-Labels: [agent:ready, difficulty:easy]
+Labels: [agent:remote, difficulty:easy]
 
 Issue: "Add OAuth integration"
-Labels: [agent:ready, difficulty:medium]
+Labels: [agent:remote, difficulty:medium]
 
 Issue: "Refactor authentication system"
-Labels: [agent:ready, difficulty:hard]
+Labels: [agent:remote, difficulty:hard]
 ```
 
 ## Error Handling
 
-If an issue is labeled `agent:ready` but **missing a difficulty label**, the engine will:
+If an issue has a target label (`agent:remote` or `agent:local`) but **missing a difficulty label**, the engine will:
 
 1. Log a warning
 2. Fall back to the default model (easy/Codex)
@@ -105,8 +105,8 @@ Check logs to see which models are being selected:
 # Local development
 tail -f /tmp/agent-hq/logs/issue-*.jsonl | grep backend_selected
 
-# GCP Cloud Run
-gcloud run services logs read agentic-coding-engine --region us-central1 | grep backend_selected
+# Runtime logs
+grep backend_selected /tmp/agent-hq/logs/*.jsonl
 ```
 
 Output example:

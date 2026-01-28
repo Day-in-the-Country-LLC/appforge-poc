@@ -1,4 +1,4 @@
-"""LLM client helpers for planning/instructions."""
+"""LLM client helpers for instructions."""
 
 from __future__ import annotations
 
