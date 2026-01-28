@@ -216,3 +216,6 @@ __marimo__/
 # ACE agent artifacts
 ACE_TASK.md
 ACE_TASK_DONE.json
+
+# Pre-commit and secrets detection
+.secrets.baseline
