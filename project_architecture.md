@@ -22,8 +22,6 @@ Shared Terraform repo for project-level infrastructure across all projects.
 
 - **Autonomous coding framework**: `appforge-poc`.
 - **Agent tools (MCP)**: `appforge-mcp`.
-- **Prompt optimization**: `appforge-ads-optimization`.
-- **Marketing backend**: `irlsc-marketing`.
 - **Project-level infra**: Terraform repo (if used).
 
 ## Guardrails
