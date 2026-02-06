@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -27,13 +28,14 @@ def ensure_mcp_config(
     backend = backend.lower()
 
     include_appforge_server = settings.appforge_mcp_enabled and settings.appforge_mcp_url
+    appforge_allowlist = _load_appforge_allowlist(workdir) if include_appforge_server else []
 
     if backend == "claude":
         payload = _claude_http_config(settings, token)
         _write_mcp_config(config_path, payload, settings.mcp_server_name)
         logger.info("mcp_config_written_github", path=str(config_path))
         if include_appforge_server:
-            appforge_payload = _appforge_http_config(settings)
+            appforge_payload = _appforge_http_config(settings, appforge_allowlist)
             _write_mcp_config(
                 config_path, appforge_payload, settings.appforge_mcp_server_name
             )
@@ -56,6 +58,7 @@ def ensure_mcp_config(
                 codex_config,
                 settings.appforge_mcp_server_name,
                 _normalize_mcp_url(settings.appforge_mcp_url),
+                allowed_tools=appforge_allowlist,
             )
             logger.info("codex_mcp_config_written_appforge", path=str(codex_config))
         return
@@ -102,20 +105,30 @@ def _ensure_git_exclude(workdir: Path, filename: str) -> None:
     exclude_path.write_text(content + entry, encoding="utf-8")
 
 
-def _appforge_http_config(settings: Settings) -> dict:
-    return {
+def _appforge_http_config(settings: Settings, allowed_tools: list[str]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "type": "http",
         "url": _normalize_mcp_url(settings.appforge_mcp_url),
     }
+    if allowed_tools:
+        payload["tools"] = {"allow": allowed_tools}
+    return payload
 
 
 def _write_codex_server(
-    config_path: Path, server_name: str, url: str, token_env_var: str | None = None
+    config_path: Path,
+    server_name: str,
+    url: str,
+    token_env_var: str | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     block = f"[mcp_servers.{server_name}]\n" f"url = \"{url}\"\n"
     if token_env_var:
         block += f"bearer_token_env_var = \"{token_env_var}\"\n"
+    if allowed_tools:
+        tools_literal = json.dumps(allowed_tools)
+        block += f"allowed_tools = {tools_literal}\n"
 
     content = ""
     if config_path.exists():
@@ -139,3 +152,20 @@ def _normalize_mcp_url(url: str) -> str:
     if normalized.endswith("/mcp"):
         return url if url.endswith("/") else normalized + "/"
     return normalized + "/mcp"
+
+
+def _load_appforge_allowlist(workdir: Path) -> list[str]:
+    allowlist_path = workdir / "docs" / "appforge-mcp-allowlist.json"
+    if not allowlist_path.exists():
+        return []
+    try:
+        payload = json.loads(allowlist_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        logger.warning("appforge_allowlist_parse_failed", path=str(allowlist_path))
+        return []
+    if not isinstance(payload, dict):
+        return []
+    tools = payload.get("allowed_tools")
+    if not isinstance(tools, list):
+        return []
+    return [str(item) for item in tools if isinstance(item, str) and item.strip()]

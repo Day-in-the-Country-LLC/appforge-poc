@@ -1,0 +1,14 @@
+// appforge-mcp has more tools than what are needed for the appforge coding engine.  This reduces the available tools for the 
+// coding engine.
+{
+  "server": "appforge-mcp-server",
+  "allowed_tools": [
+    "tool_ping",
+    "list_project_items_by_status",
+    "list_project_status_options",
+    "set_issue_project_status",
+    "list_issue_blockers",
+    "add_issue_to_project",
+    "list_ready_remote_items"
+  ]
+}

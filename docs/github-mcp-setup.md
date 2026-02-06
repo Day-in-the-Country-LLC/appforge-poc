@@ -138,6 +138,17 @@ Test the MCP server connection:
 
 ### Using the MCP Server
 
+## Appforge MCP tool allowlist (coding agents)
+
+To avoid exposing new tools by accident, keep an explicit allowlist for the
+Appforge MCP server in `docs/appforge-mcp-allowlist.json`. This list should
+include only the project-board tools and exclude any future additions (for
+example, web search/fetch).
+
+ACE will load this allowlist when generating MCP configs for Claude and Codex
+and attach it to the Appforge MCP server entry so only those tools are exposed
+to coding agents.
+
 Once configured, you can create issues directly through your IDE:
 
 1. **In Windsurf/VSCode:** Use the MCP tools panel or mention `@github` in chat
