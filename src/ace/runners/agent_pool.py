@@ -283,6 +283,11 @@ class AgentPool:
             active_issues=active_issues,
         )
 
+    def _clear_fatal_error_if_idle(self) -> None:
+        if self._fatal_error and self.get_status().active_agents == 0:
+            logger.warning("fatal_error_cleared", error=self._fatal_error)
+            self._fatal_error = None
+
     def _get_idle_slot(self) -> AgentSlot | None:
         """Get an idle slot if available."""
         for slot in self.slots:
@@ -352,6 +357,8 @@ class AgentPool:
     async def _has_blockers_not_done(self, issue: Issue) -> bool:
         if not issue.repo_owner or not issue.repo_name:
             return False
+        if not self.settings.appforge_mcp_url:
+            raise ValueError("❌ ERROR: APPFORGE_MCP_URL is required for blocker checks")
         blockers = await self._fetch_blockers_via_appforge_mcp(issue)
         if not blockers:
             return False
@@ -472,23 +479,18 @@ class AgentPool:
         Returns:
             List of issues with "Ready" status and no open blockers
         """
-        # Prefer appforge MCP server when enabled and target is remote (server filters remote label + blockers)
-        if self.settings.appforge_mcp_enabled and self.target == AgentTarget.REMOTE:
-            mcp_issues = await self._fetch_ready_issues_via_mcp()
-            if mcp_issues:
-                issues = mcp_issues
-            else:
-                issues = []
+        issues: list[Issue] = []
+        if self.target == AgentTarget.REMOTE:
+            if not self.settings.appforge_mcp_url:
+                raise ValueError("❌ ERROR: APPFORGE_MCP_URL is required for remote processing")
+            issues = await self._fetch_ready_issues_via_mcp()
         else:
-            issues = []
+            issues = await self.issue_queue.list_issues_by_project_status(
+                self.settings.github_project_name,
+                IssueStatus.READY.value,
+            )
 
         try:
-            if not issues:
-                issues = await self.issue_queue.list_issues_by_project_status(
-                    self.settings.github_project_name,
-                    IssueStatus.READY.value,
-                )
-
             # Filter out already processed issues
             new_issues = [
                 issue for issue in issues if self._issue_key(issue) not in self._processed_issues
@@ -572,8 +574,9 @@ class AgentPool:
                 )
                 return issues
         except Exception as exc:
-            logger.warning("fetch_ready_issues_via_mcp_failed", error=str(exc))
-            return []
+            error_message = f"❌ ERROR: fetch_ready_issues_via_mcp_failed: {exc}"
+            logger.error("fetch_ready_issues_via_mcp_failed", error=error_message)
+            raise ValueError(error_message) from exc
 
     async def fetch_in_progress_issues(self) -> list[Issue]:
         """Fetch issues already in progress for resume sweep."""
@@ -776,6 +779,8 @@ class AgentPool:
             self._set_fatal_error(str(e))
 
         finally:
+            if slot.work_key:
+                self._processed_issues.discard(slot.work_key)
             # Mark slot as idle for next issue
             slot.state = AgentState.IDLE
             slot.issue = None
@@ -810,6 +815,80 @@ class AgentPool:
         slot.task = asyncio.create_task(self._run_agent_for_issue(slot, issue))
         return True
 
+    async def process_issue(
+        self,
+        issue: Issue,
+        *,
+        check_blockers: bool = False,
+    ) -> dict[str, Any]:
+        """Spawn an agent for a specific issue if it is actionable.
+
+        Args:
+            issue: Issue to process
+            check_blockers: Whether to skip issues with unresolved blockers
+
+        Returns:
+            Summary of processing results
+        """
+        repo = f"{issue.repo_owner}/{issue.repo_name}" if issue.repo_owner and issue.repo_name else None
+        logger.info(
+            "process_single_issue_starting",
+            issue=issue.number,
+            repo=repo,
+            check_blockers=check_blockers,
+        )
+        self._clear_fatal_error_if_idle()
+        if self._fatal_error:
+            raise RuntimeError(self._fatal_error)
+
+        work_key = self._issue_key(issue)
+        if work_key in self._processed_issues:
+            logger.info("issue_already_processing", issue=issue.number, work_key=work_key)
+            return {
+                "status": "already_processing",
+                "spawned": 0,
+                "pool_status": self.get_status().__dict__,
+            }
+
+        if not self._matches_target(issue):
+            logger.info("issue_target_mismatch", issue=issue.number, target=self.target.value)
+            return {
+                "status": "ignored",
+                "reason": "target_mismatch",
+                "spawned": 0,
+                "pool_status": self.get_status().__dict__,
+            }
+
+        if check_blockers and await self._has_blockers_not_done(issue):
+            logger.info("issue_blocked_by_dependencies", issue=issue.number)
+            return {
+                "status": "blocked",
+                "spawned": 0,
+                "pool_status": self.get_status().__dict__,
+            }
+
+        if self.get_status().idle_slots == 0:
+            logger.info("all_slots_busy", issue=issue.number)
+            return {
+                "status": "no_capacity",
+                "spawned": 0,
+                "pool_status": self.get_status().__dict__,
+            }
+
+        hydrated = await self._hydrate_issue(issue)
+        spawned = await self.spawn_agent(hydrated, self._issue_key(hydrated))
+        logger.info(
+            "process_single_issue_complete",
+            issue=issue.number,
+            spawned=spawned,
+            pool_status=self.get_status().__dict__,
+        )
+        return {
+            "status": "processing" if spawned else "no_capacity",
+            "spawned": 1 if spawned else 0,
+            "pool_status": self.get_status().__dict__,
+        }
+
     async def process_work_queue(self) -> dict[str, Any]:
         """Fetch actionable issues and spawn agents for them.
 
@@ -817,6 +896,7 @@ class AgentPool:
             Summary of processing results
         """
         logger.info("process_work_queue_starting")
+        self._clear_fatal_error_if_idle()
         if self._fatal_error:
             raise RuntimeError(self._fatal_error)
 
@@ -879,6 +959,7 @@ class AgentPool:
     async def process_in_progress_issues(self) -> dict[str, Any]:
         """Fetch in-progress issues and spawn agents for them."""
         logger.info("process_in_progress_issues_starting")
+        self._clear_fatal_error_if_idle()
         if self._fatal_error:
             raise RuntimeError(self._fatal_error)
 
@@ -940,6 +1021,7 @@ class AgentPool:
             Summary of processing results
         """
         logger.info("process_ready_issues_starting")
+        self._clear_fatal_error_if_idle()
         if self._fatal_error:
             raise RuntimeError(self._fatal_error)
 

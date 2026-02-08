@@ -31,8 +31,7 @@ class Settings(BaseSettings):
     claude_mcp_url: str = os.getenv("CLAUDE_MCP_URL", "https://api.githubcopilot.com/mcp")
     codex_mcp_url: str = os.getenv("CODEX_MCP_URL", "https://api.githubcopilot.com/mcp/")
     codex_config_path: str = os.getenv("CODEX_CONFIG_PATH", "~/.codex/config.toml")
-    # Appforge MCP (optional)
-    appforge_mcp_enabled: bool = os.getenv("APPFORGE_MCP_ENABLED", "false").lower() == "true"
+    # Appforge MCP (enabled when URL is provided)
     appforge_mcp_url: str = os.getenv("APPFORGE_MCP_URL", "")
     appforge_mcp_server_name: str = os.getenv("APPFORGE_MCP_SERVER_NAME", "appforge-mcp-server")
 
@@ -137,6 +136,11 @@ class Settings(BaseSettings):
     twilio_auth_token: str = os.getenv("TWILIO_AUTH_TOKEN", "")
     twilio_messaging_service_sid: str = os.getenv("TWILIO_MESSAGING_SERVICE_SID", "")
     twilio_to_number: str = os.getenv("TWILIO_TO_NUMBER", "")
+
+    # Slack notifications (bot)
+    slack_bot_token: str = os.getenv("SLACK_BOT_TOKEN", os.getenv("SLACKBOT_TOKEN", ""))
+    slack_channel_id: str = os.getenv("SLACK_CHANNEL_ID", "")
+
 
     class Config:
         env_file = ".env"

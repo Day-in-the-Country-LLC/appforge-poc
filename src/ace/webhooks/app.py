@@ -12,20 +12,30 @@ import structlog
 
 from ace.config.logging import configure_logging
 from ace.config.settings import get_settings
+from ace.notifications.slack_client import (
+    SlackNotifier,
+    format_error_message,
+    format_webhook_message,
+)
 from ace.webhooks.handlers import WebhookHandler
 
 logger = structlog.get_logger(__name__)
 
 app = FastAPI()
 _handler: WebhookHandler | None = None
+_notifier: SlackNotifier | None = None
 
 
 @app.on_event("startup")
 async def _startup() -> None:
     settings = get_settings()
     configure_logging(debug=settings.debug)
+    if not settings.appforge_mcp_url:
+        raise RuntimeError("❌ ERROR: APPFORGE_MCP_URL is required")
     global _handler
     _handler = WebhookHandler()
+    global _notifier
+    _notifier = SlackNotifier.from_settings(settings)
     logger.info("webhook_listener_started")
 
 
@@ -58,5 +68,17 @@ async def github_webhooks(request: Request) -> dict[str, Any]:
     if _handler is None:
         raise HTTPException(status_code=500, detail="❌ ERROR: Webhook handler not initialized")
 
-    result = await _handler.handle(event, payload, delivery)
+    try:
+        result = await _handler.handle(event, payload, delivery)
+    except Exception as exc:
+        if _notifier is not None:
+            await _notifier.safe_post(format_error_message(event, delivery, exc))
+        raise
+
+    # Notify Slack on successful webhook handling (non-ignored outcomes).
+    if _notifier is not None:
+        message = format_webhook_message(event, delivery, result)
+        if message is not None:
+            await _notifier.safe_post(message)
+
     return {"status": "ok", "result": result}

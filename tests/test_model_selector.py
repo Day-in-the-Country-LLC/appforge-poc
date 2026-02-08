@@ -12,8 +12,8 @@ def test_select_easy_model():
 
     config = selector.select_model(labels)
 
-    assert config.backend == "codex"
-    assert config.model == "gpt-5.1-codex"
+    assert config.backend == "claude"
+    assert config.model == "claude-haiku-4-5"
 
 
 def test_select_medium_model():
@@ -24,7 +24,7 @@ def test_select_medium_model():
     config = selector.select_model(labels)
 
     assert config.backend == "claude"
-    assert config.model == "claude-haiku-4-5"
+    assert config.model == "claude-sonnet-4-5"
 
 
 def test_select_hard_model():
@@ -35,7 +35,7 @@ def test_select_hard_model():
     config = selector.select_model(labels)
 
     assert config.backend == "claude"
-    assert config.model == "claude-opus-4-1"
+    assert config.model == "claude-opus-4-5"
 
 
 def test_no_difficulty_label_raises_error():
@@ -53,8 +53,8 @@ def test_get_default_model():
 
     config = selector.get_default_model()
 
-    assert config.backend == "codex"
-    assert config.model == "gpt-5.1-codex"
+    assert config.backend == "claude"
+    assert config.model == "claude-haiku-4-5"
 
 
 def test_difficulty_enum_values():

@@ -253,7 +253,6 @@ Issues in the **your-project** org project use status fields:
 The GitHub Projects MCP server lives in the `appforge-mcp` repo and can be deployed on Cloud Run.
 ACE can be configured via env vars:
 
-- `APPFORGE_MCP_ENABLED=true`
 - `APPFORGE_MCP_URL=https://your-appforge-mcp-url`
 - `APPFORGE_MCP_SERVER_NAME=appforge-mcp-server`
 

@@ -91,6 +91,12 @@ Use the same value in:
 - `GITHUB_WEBHOOK_SECRET`
 - `GITHUB_ORG`
 - `GITHUB_PROJECT_NAME`
+- `APPFORGE_MCP_URL` (required; webhook processing fails if missing)
+
+Optional (notifications):
+
+- `SLACK_BOT_TOKEN` (or `SLACKBOT_TOKEN`)
+- `SLACK_CHANNEL_ID`
 
 ## Project Name
 
@@ -141,6 +147,8 @@ If the board is org‑level, org installation is recommended.
 - Trigger when status transitions:
   - `Backlog` → `Ready`
   - `Blocked` → `In Progress`
+- Ignore all other status transitions and any project item that does not belong
+  to the configured `GITHUB_PROJECT_NAME`.
 
 ### 2) PR comment added
 
@@ -148,6 +156,7 @@ If the board is org‑level, org installation is recommended.
 - Trigger when:
   - `action == created`
   - `issue.pull_request` exists
+- Ignore all other issue comment events.
 
 ## Expected Handler Behavior
 
@@ -156,11 +165,11 @@ If the board is org‑level, org installation is recommended.
 - **Minimal processing**: enqueue work quickly, avoid long-running logic in request thread.
 - **Logging**: log event type, delivery id, and extracted issue/PR identifiers.
 
-## Implementation Notes (TBD)
+## Implementation Notes
 
-This repo currently does **not** implement the listener. When implemented, update this doc with:
+Listener implementation:
 
-- Listener framework (FastAPI or other)
-- Actual endpoint URL
-- Deployment target (Cloud Run, VM, etc.)
-- How orchestration is triggered (queue, background job, direct call)
+- Framework: FastAPI (`src/ace/webhooks/app.py`)
+- Endpoint: `/github/webhooks`
+- Deployment target: Cloud Run
+- Orchestration: direct call into the agent pool (remote)

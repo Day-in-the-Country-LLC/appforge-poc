@@ -11,6 +11,7 @@ import structlog
 
 from ace.config.settings import get_settings
 from ace.config.secrets import resolve_github_token, resolve_openai_api_key, resolve_claude_api_key
+from ace.notifications.slack_client import SlackMessage, SlackNotifier
 from ace.workspaces.tmux_ops import TmuxOps, session_name_for_issue
 from ace.logging_utils import log_key_event
 
@@ -170,12 +171,44 @@ class CliAgent:
                 session=session_name if "session_name" in locals() else None,
                 workdir=str(workdir) if "workdir" in locals() else None,
             )
+            # Notify Slack immediately for CLI spawn failures (these can otherwise be easy to miss).
+            slack_notified = False
+            try:
+                try:
+                    notifier = SlackNotifier.from_settings(self.settings)
+                except ValueError as exc:
+                    logger.error("slack_notifier_config_failed", error=f"❌ ERROR: {exc}")
+                    notifier = None
+                if notifier is not None:
+                    session = session_name if "session_name" in locals() else "unknown"
+                    await notifier.safe_post(
+                        SlackMessage(
+                            text=(
+                                "❌ ACE CLI agent spawn failed | "
+                                f"backend={self.backend} | "
+                                f"model={self.model} | "
+                                f"session={session} | "
+                                f"workdir={workdir} | "
+                                f"error={e}"
+                            )
+                        )
+                    )
+                    slack_notified = True
+            except Exception as notify_exc:
+                logger.error(
+                    "slack_notification_failed",
+                    error=f"❌ ERROR: {notify_exc}",
+                )
             return AgentResult(
                 status=AgentStatus.FAILED,
                 output="",
                 files_changed=[],
                 commands_run=[],
                 error=str(e),
+                metadata={
+                    "slack_notified": slack_notified,
+                    "slack_notification_type": "cli_spawn_failed",
+                },
             )
 
     async def respond_to_answer(

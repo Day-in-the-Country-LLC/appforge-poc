@@ -1,5 +1,6 @@
 """Git operations for workspace management."""
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -8,6 +9,10 @@ from urllib.parse import urlsplit, urlunsplit
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+CLONE_TIMEOUT_SECONDS = 900
+CLONE_DEPTH = 1
+CLONE_FILTER = "blob:none"
 
 
 class GitOps:
@@ -61,6 +66,39 @@ class GitOps:
         netloc = f"{redacted}{hostname}"
         return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
+    def _resolve_default_branch(self, worktree_path: Path) -> str:
+        """Resolve the remote default branch from origin/HEAD."""
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "symbolic-ref",
+                "--short",
+                "refs/remotes/origin/HEAD",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            logger.error(
+                "❌ ERROR: default_branch_resolve_failed",
+                returncode=result.returncode,
+                stderr=result.stderr.decode() if result.stderr else "",
+            )
+            raise RuntimeError("❌ ERROR: Unable to resolve default branch from origin/HEAD")
+
+        ref = result.stdout.decode().strip()
+        if not ref:
+            logger.error("❌ ERROR: default_branch_resolve_empty")
+            raise RuntimeError("❌ ERROR: Unable to resolve default branch from origin/HEAD")
+
+        if ref.startswith("origin/"):
+            return ref.split("/", 1)[1]
+
+        return ref
+
     async def clone_repo(
         self,
         repo_url: str,
@@ -83,20 +121,40 @@ class GitOps:
         safe_repo_url = self._sanitize_repo_url(repo_url)
         logger.info("cloning_repo", repo_url=safe_repo_url, worktree_path=str(worktree_path))
 
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        clone_cmd = [
+            "git",
+            "clone",
+            "--filter",
+            CLONE_FILTER,
+            "--depth",
+            str(CLONE_DEPTH),
+            repo_url,
+            str(worktree_path),
+        ]
+
         try:
             subprocess.run(
-                ["git", "clone", repo_url, str(worktree_path)],
+                clone_cmd,
                 check=True,
                 capture_output=True,
-                timeout=300,
+                timeout=CLONE_TIMEOUT_SECONDS,
+                env=env,
             )
             logger.info("repo_cloned", worktree_path=str(worktree_path))
             return worktree_path
+        except subprocess.TimeoutExpired as e:
+            logger.error(
+                "❌ ERROR: clone_timed_out",
+                timeout_seconds=CLONE_TIMEOUT_SECONDS,
+                stderr=e.stderr.decode() if e.stderr else "",
+            )
+            raise
         except subprocess.CalledProcessError as e:
             logger.error(
-                "clone_failed",
+                "❌ ERROR: clone_failed",
                 returncode=e.returncode,
-                stderr=e.stderr.decode(),
+                stderr=e.stderr.decode() if e.stderr else "",
             )
             raise
 
@@ -104,7 +162,7 @@ class GitOps:
         self,
         worktree_path: Path,
         branch_name: str,
-        base_branch: str = "main",
+        base_branch: str | None = None,
     ) -> None:
         """Ensure the branch exists and is checked out in the worktree.
 
@@ -113,19 +171,20 @@ class GitOps:
             branch_name: Name of the branch to create or checkout
             base_branch: Base branch to branch from (default: main)
         """
-        logger.info(
-            "ensuring_branch",
-            branch=branch_name,
-            base_branch=base_branch,
-            worktree=str(worktree_path),
-        )
-
         try:
             subprocess.run(
                 ["git", "-C", str(worktree_path), "fetch", "origin", "--prune"],
                 check=True,
                 capture_output=True,
                 timeout=120,
+            )
+
+            resolved_base_branch = base_branch or self._resolve_default_branch(worktree_path)
+            logger.info(
+                "ensuring_branch",
+                branch=branch_name,
+                base_branch=resolved_base_branch,
+                worktree=str(worktree_path),
             )
 
             branch_check = subprocess.run(
@@ -153,7 +212,7 @@ class GitOps:
                     "checkout",
                     "-b",
                     branch_name,
-                    f"origin/{base_branch}",
+                    f"origin/{resolved_base_branch}",
                 ],
                 check=True,
                 capture_output=True,
@@ -161,14 +220,18 @@ class GitOps:
             )
             logger.info("branch_created", branch=branch_name)
         except subprocess.CalledProcessError as e:
-            logger.error("branch_ensure_failed", error=str(e), stderr=e.stderr.decode())
+            logger.error(
+                "❌ ERROR: branch_ensure_failed",
+                error=str(e),
+                stderr=e.stderr.decode() if e.stderr else "",
+            )
             raise
 
     async def create_branch(
         self,
         worktree_path: Path,
         branch_name: str,
-        base_branch: str = "main",
+        base_branch: str | None = None,
     ) -> None:
         """Create a new branch in the worktree.
 
@@ -180,6 +243,7 @@ class GitOps:
         logger.info("creating_branch", branch=branch_name, worktree=str(worktree_path))
 
         try:
+            resolved_base_branch = base_branch or self._resolve_default_branch(worktree_path)
             subprocess.run(
                 [
                     "git",
@@ -188,7 +252,7 @@ class GitOps:
                     "checkout",
                     "-b",
                     branch_name,
-                    f"origin/{base_branch}",
+                    f"origin/{resolved_base_branch}",
                 ],
                 check=True,
                 capture_output=True,
@@ -196,7 +260,11 @@ class GitOps:
             )
             logger.info("branch_created", branch=branch_name)
         except subprocess.CalledProcessError as e:
-            logger.error("branch_creation_failed", error=str(e), stderr=e.stderr.decode())
+            logger.error(
+                "❌ ERROR: branch_creation_failed",
+                error=str(e),
+                stderr=e.stderr.decode() if e.stderr else "",
+            )
             raise
 
     async def commit_changes(

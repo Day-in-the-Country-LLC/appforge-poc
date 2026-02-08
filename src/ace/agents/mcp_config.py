@@ -27,7 +27,7 @@ def ensure_mcp_config(
     config_path = workdir / settings.mcp_config_filename
     backend = backend.lower()
 
-    include_appforge_server = settings.appforge_mcp_enabled and settings.appforge_mcp_url
+    include_appforge_server = bool(settings.appforge_mcp_url)
     appforge_allowlist = _load_appforge_allowlist(workdir) if include_appforge_server else []
 
     if backend == "claude":

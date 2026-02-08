@@ -16,6 +16,8 @@ from langgraph.graph import StateGraph
 from ace.agents.llm_client import call_openai
 from ace.agents.model_selector import ModelSelector
 from ace.agents.types import AgentResult, AgentStatus
+from ace.config.settings import get_settings
+from ace.notifications.slack_client import SlackNotifier, format_completion_message
 from ace.config.secrets import resolve_github_token, resolve_openai_api_key
 from ace.config.settings import get_settings
 from ace.github.api_client import GitHubAPIClient
@@ -483,15 +485,20 @@ async def manager_cleanup(state: WorkerState) -> WorkerState:
     task_path = workdir / "ACE_TASK.md" if workdir else None
 
     status = "unknown"
+    summary = None
+    blocked_questions: list[str] | None = None
     if done_path and done_path.exists():
         marker: dict[str, Any] = {}
         try:
             marker = json.loads(done_path.read_text(encoding="utf-8"))
         except Exception:
             marker = {}
+        summary = marker.get("summary")
         raw_status = str(marker.get("status") or marker.get("state") or "").lower()
         blocked_value = marker.get("blocked")
-        blocked_questions = marker.get("blocked_questions")
+        marker_questions = marker.get("blocked_questions")
+        if isinstance(marker_questions, list):
+            blocked_questions = [str(item) for item in marker_questions if str(item).strip()]
         if raw_status == "blocked" or blocked_value is True:
             status = "blocked"
         elif blocked_questions:
@@ -503,6 +510,13 @@ async def manager_cleanup(state: WorkerState) -> WorkerState:
 
     if state.agent_result and state.agent_result.status == AgentStatus.FAILED:
         status = "failed"
+
+    await _notify_slack_completion(
+        state=state,
+        status=status,
+        summary=summary,
+        blocked_questions=blocked_questions,
+    )
 
     log_key_event(
         logger,
@@ -547,6 +561,62 @@ async def manager_cleanup(state: WorkerState) -> WorkerState:
 
     state.last_update = datetime.now()
     return state
+
+
+async def _notify_slack_completion(
+    *,
+    state: WorkerState,
+    status: str,
+    summary: str | None,
+    blocked_questions: list[str] | None,
+) -> None:
+    settings = get_settings()
+    try:
+        notifier = SlackNotifier.from_settings(settings)
+    except ValueError as exc:
+        logger.error("slack_notifier_config_failed", error=f"❌ ERROR: {exc}")
+        return
+    if notifier is None:
+        return
+
+    repo = None
+    if state.issue and state.issue.repo_owner and state.issue.repo_name:
+        repo = f"{state.issue.repo_owner}/{state.issue.repo_name}"
+    else:
+        owner = state.metadata.get("repo_owner") if isinstance(state.metadata, dict) else None
+        name = state.metadata.get("repo_name") if isinstance(state.metadata, dict) else None
+        if owner and name:
+            repo = f"{owner}/{name}"
+
+    error = state.error
+    output = None
+    if state.agent_result:
+        output = state.agent_result.output
+        if not error:
+            error = state.agent_result.error or None
+
+    message = format_completion_message(
+        status=status,
+        issue_number=state.issue_number,
+        repo=repo,
+        summary=summary or output,
+        blocked_questions=blocked_questions,
+        error=error,
+        output=output,
+        pr_url=state.pr_url,
+    )
+    if message is None:
+        return
+    # Avoid duplicate Slack noise when the CLI agent already posted a spawn-failure alert.
+    if (
+        status == "failed"
+        and state.agent_result
+        and isinstance(state.agent_result.metadata, dict)
+        and state.agent_result.metadata.get("slack_notification_type") == "cli_spawn_failed"
+        and state.agent_result.metadata.get("slack_notified") is True
+    ):
+        return
+    await notifier.safe_post(message)
 
 
 def create_workflow_graph() -> StateGraph:

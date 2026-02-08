@@ -29,7 +29,7 @@ Key values to confirm:
 - `GITHUB_READY_STATUS=Ready`
 - `GITHUB_LOCAL_AGENT_LABEL=agent:local`
 - `GITHUB_REMOTE_AGENT_LABEL=agent:remote`
-- `APPFORGE_MCP_ENABLED` / `APPFORGE_MCP_URL` (optional)
+- `APPFORGE_MCP_URL` (optional)
 - `GCP_PROJECT_ID` + `GCP_CREDENTIALS_FILE` (required for Secret Manager mode)
 
 ## 3) MCP servers (required for CLI coding agents)
@@ -69,7 +69,6 @@ Steps:
 1. Clone the `appforge-mcp` repo.
 2. Deploy it (Cloud Run, VM, or your preferred runtime).
 3. Set:
-   - `APPFORGE_MCP_ENABLED=true`
    - `APPFORGE_MCP_URL=<your-deployment-url>`
    - `APPFORGE_MCP_SERVER_NAME=appforge-mcp-server`
 
