@@ -1,10 +1,14 @@
 """Manage issue status and agent label transitions."""
 
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import structlog
 
 from ace.config.settings import get_settings
+
+if TYPE_CHECKING:
+    from .issue_queue import IssueQueue
 
 logger = structlog.get_logger(__name__)
 
@@ -21,7 +25,7 @@ class IssueStatus(str, Enum):
 class StatusManager:
     """Manages issue status and agent label transitions."""
 
-    def __init__(self, issue_queue):
+    def __init__(self, issue_queue: IssueQueue) -> None:
         """Initialize status manager.
 
         Args:
@@ -106,9 +110,7 @@ class StatusManager:
         blocked_comment = "**BLOCKED - Agent Needs Input**\n\n"
         for i, question in enumerate(questions, 1):
             blocked_comment += f"{i}. {question}\n"
-        blocked_comment += (
-            "\nPlease reply with your answers and re-add the `agent` label when ready to resume."
-        )
+        blocked_comment += "\nPlease reply with your answers and re-add the `agent` label when ready to resume."
 
         await self.issue_queue.remove_labels(
             issue_number,

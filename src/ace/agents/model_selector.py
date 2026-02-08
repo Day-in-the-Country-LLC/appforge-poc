@@ -29,7 +29,7 @@ class ModelConfig:
 class ModelSelector:
     """Selects appropriate backend and model based on issue difficulty."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize model selector with settings."""
         self.settings = get_settings()
         self.difficulty_map = {

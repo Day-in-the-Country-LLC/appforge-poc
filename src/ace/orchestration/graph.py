@@ -16,10 +16,9 @@ from langgraph.graph import StateGraph
 from ace.agents.llm_client import call_openai
 from ace.agents.model_selector import ModelSelector
 from ace.agents.types import AgentResult, AgentStatus
-from ace.config.settings import get_settings
-from ace.notifications.slack_client import SlackNotifier, format_completion_message
 from ace.config.secrets import resolve_github_token, resolve_openai_api_key
 from ace.config.settings import get_settings
+from ace.notifications.slack_client import SlackNotifier, format_completion_message
 from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client

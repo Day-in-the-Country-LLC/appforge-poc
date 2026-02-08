@@ -34,7 +34,7 @@ class GitHubAppAuth:
         self._token_cache: dict[int, InstallationToken] = {}
 
     @classmethod
-    def from_env(cls) -> "GitHubAppAuth":
+    def from_env(cls) -> GitHubAppAuth:
         app_id = os.getenv("GITHUB_APP_ID", "").strip()
         private_key = os.getenv("GITHUB_APP_PRIVATE_KEY", "").strip()
         if "\\n" in private_key:
@@ -67,7 +67,11 @@ class GitHubAppAuth:
             response = await client.post(url, headers=headers)
 
         if response.status_code >= 400:
-            logger.error("github_app_token_failed", status=response.status_code, body=response.text)
+            logger.error(
+                "github_app_token_failed",
+                status=response.status_code,
+                body=response.text,
+            )
             raise ValueError(
                 f"❌ ERROR: GitHub App token request failed ({response.status_code})"
             )

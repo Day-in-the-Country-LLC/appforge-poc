@@ -11,7 +11,7 @@ logger = structlog.get_logger(__name__)
 class TwilioNotifier:
     """Sends SMS notifications via Twilio."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize Twilio client with settings."""
         self.settings = get_settings()
         self.enabled = self.settings.twilio_enabled

@@ -26,7 +26,7 @@ class SlackNotifier:
         self._channel_id = channel_id
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> "SlackNotifier | None":
+    def from_settings(cls, settings: Settings) -> SlackNotifier | None:
         token = settings.slack_bot_token
         channel_id = settings.slack_channel_id
         if not token and not channel_id:
@@ -74,7 +74,9 @@ class SlackNotifier:
             logger.error("slack_notification_failed", error=f"❌ ERROR: {exc}")
 
 
-def format_webhook_message(event: str | None, delivery: str | None, result: dict[str, Any]) -> SlackMessage | None:
+def format_webhook_message(
+    event: str | None, delivery: str | None, result: dict[str, Any]
+) -> SlackMessage | None:
     status = result.get("status")
     if status in ("ignored", "no_matching_transition"):
         return None
@@ -101,7 +103,9 @@ def format_webhook_message(event: str | None, delivery: str | None, result: dict
     return SlackMessage(text=" | ".join(lines))
 
 
-def format_error_message(event: str | None, delivery: str | None, exc: Exception) -> SlackMessage:
+def format_error_message(
+    event: str | None, delivery: str | None, exc: Exception
+) -> SlackMessage:
     return SlackMessage(
         text=(
             "Webhook error | "

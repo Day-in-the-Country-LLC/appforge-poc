@@ -7,8 +7,8 @@ import hmac
 import os
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
 import structlog
+from fastapi import FastAPI, HTTPException, Request
 
 from ace.config.logging import configure_logging
 from ace.config.settings import get_settings
@@ -41,14 +41,20 @@ async def _startup() -> None:
 
 def _verify_signature(secret: str, body: bytes, signature: str | None) -> None:
     if not secret:
-        raise HTTPException(status_code=500, detail="❌ ERROR: GITHUB_WEBHOOK_SECRET not set")
+        raise HTTPException(
+            status_code=500, detail="❌ ERROR: GITHUB_WEBHOOK_SECRET not set"
+        )
     if not signature:
-        raise HTTPException(status_code=401, detail="❌ ERROR: Missing webhook signature")
+        raise HTTPException(
+            status_code=401, detail="❌ ERROR: Missing webhook signature"
+        )
 
     mac = hmac.new(secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256)
     expected = f"sha256={mac.hexdigest()}"
     if not hmac.compare_digest(expected, signature):
-        raise HTTPException(status_code=401, detail="❌ ERROR: Invalid webhook signature")
+        raise HTTPException(
+            status_code=401, detail="❌ ERROR: Invalid webhook signature"
+        )
 
 
 @app.post("/github/webhooks")
@@ -62,11 +68,15 @@ async def github_webhooks(request: Request) -> dict[str, Any]:
     _verify_signature(secret, body, signature)
 
     if not event:
-        raise HTTPException(status_code=400, detail="❌ ERROR: Missing X-GitHub-Event header")
+        raise HTTPException(
+            status_code=400, detail="❌ ERROR: Missing X-GitHub-Event header"
+        )
 
     payload = await request.json()
     if _handler is None:
-        raise HTTPException(status_code=500, detail="❌ ERROR: Webhook handler not initialized")
+        raise HTTPException(
+            status_code=500, detail="❌ ERROR: Webhook handler not initialized"
+        )
 
     try:
         result = await _handler.handle(event, payload, delivery)

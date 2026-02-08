@@ -13,7 +13,7 @@ logger = structlog.get_logger(__name__)
 class ArtifactLog:
     """Manages per-issue logs and artifacts."""
 
-    def __init__(self, workspace_root: str):
+    def __init__(self, workspace_root: str) -> None:
         """Initialize artifact logger.
 
         Args:
