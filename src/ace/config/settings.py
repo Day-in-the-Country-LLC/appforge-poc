@@ -69,7 +69,9 @@ class Settings(BaseSettings):
     )
     claude_cli_command: str = os.getenv(
         "CLAUDE_CLI_COMMAND",
-        "claude --permission-mode dontAsk --dangerously-skip-permissions --model {model}",
+        # IMPORTANT: include `{prompt}` so the agent always receives an initial user prompt.
+        # We still run in interactive mode (no `-p`), but avoid relying on tmux send-keys timing.
+        "claude --permission-mode dontAsk --dangerously-skip-permissions --model {model} {prompt}",
     )
     cli_system_prompt_path: str = os.getenv(
         "CLI_SYSTEM_PROMPT_PATH", "prompts/cli_system_prompt.md"

@@ -53,7 +53,11 @@ class CliAgent:
 
         try:
             system_prompt = self._load_system_prompt()
-            prompt_for_cli = prompt
+            # For Claude, we want to pass an explicit initial user prompt at invocation time,
+            # rather than relying on tmux send-keys ordering/echo behavior.
+            base_prompt = self._load_task_prompt()
+
+            prompt_for_cli = base_prompt if self.backend == "claude" else prompt
             if system_prompt and self.backend == "codex":
                 prompt_for_cli = f"{system_prompt}\n\n{prompt}"
 
@@ -103,21 +107,13 @@ class CliAgent:
                 # First-run onboarding: accept default style if prompted.
                 self._maybe_send_claude_onboarding_inputs(session_name)
 
-            base_prompt = self._load_task_prompt()
-            if not base_prompt:
-                base_prompt = (
-                    "Please read ACE_TASK.md in the current directory and execute all instructions end-to-end. "
-                    "If you need action from the developer and cannot complete all instructions, use the "
-                    "`blocked-task-handling` skill to complete the next steps. "
-                    "If you are able to finish all instructions, use the `code-complete-issue-pr-handling` skill "
-                    "to complete the next steps. "
-                    "Always finish up by creating ACE_TASK_DONE.json with task_id, summary, files_changed, commands_run."
-                )
             if self.backend == "codex" and system_prompt:
                 prompt_to_send = self._condense_prompt(f"{system_prompt}\n\n{base_prompt}")
             else:
                 prompt_to_send = base_prompt
-            self.tmux.send_prompt(session_name, prompt_to_send, delay_seconds=1.5)
+            # Claude already received the initial prompt via CLI args; avoid double-sending.
+            if self.backend != "claude":
+                self.tmux.send_prompt(session_name, prompt_to_send, delay_seconds=1.5)
             if self.backend == "claude":
                 # Ensure the instruction is submitted even if the CLI is waiting on a blank line.
                 self.tmux.send_enter(session_name, repeat=1, delay_seconds=0.2)
@@ -256,7 +252,10 @@ class CliAgent:
         model_value = self.model or ""
         display = template.replace("{model}", model_value).replace("{prompt}", "<prompt>")
 
-        formatted = template.replace("{model}", model_value).replace("{prompt}", prompt)
+        # Quote the prompt so it is passed as a single positional argument even if it contains spaces.
+        formatted = template.replace("{model}", model_value)
+        if "{prompt}" in formatted:
+            formatted = formatted.replace("{prompt}", shlex.quote(prompt))
         command = shlex.split(formatted)
 
         if self.backend == "claude" and system_prompt and "--append-system-prompt" not in command:
@@ -292,12 +291,21 @@ class CliAgent:
         path = repo_root / "prompts" / "cli_task_prompt.md"
         try:
             if not path.exists():
-                return ""
+                raise RuntimeError(
+                    f"❌ ERROR: Required prompt file missing: {path}. "
+                    "This repo requires an explicit default prompt (no fallbacks)."
+                )
             text = path.read_text(encoding="utf-8").strip()
-            return " ".join(text.split())
+            normalized = " ".join(text.split())
+            if not normalized:
+                raise RuntimeError(
+                    f"❌ ERROR: Required prompt file is empty: {path}. "
+                    "This repo requires an explicit default prompt (no fallbacks)."
+                )
+            return normalized
         except Exception as exc:
-            logger.warning("task_prompt_read_failed", path=str(path), error=str(exc))
-            return ""
+            # Fail loudly; no fallbacks in this repo.
+            raise RuntimeError(f"❌ ERROR: task_prompt_read_failed ({path}): {exc}") from exc
 
     def _session_name(self, context: dict[str, Any]) -> str:
         repo = context.get("repo_name", "repo")
