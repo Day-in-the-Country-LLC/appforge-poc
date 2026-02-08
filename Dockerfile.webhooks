@@ -16,12 +16,11 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev
 
 COPY src/ src/
-COPY docs/ docs/
-COPY scripts/ scripts/
 
 ENV ENVIRONMENT=production
 ENV DEBUG=false
+ENV PORT=8080
 ENV PYTHONPATH=/app/src
 
 ENV PATH="/opt/venv/bin:${PATH}"
-CMD ["python", "scripts/run_agent_pool.py", "--target", "remote"]
+CMD ["uvicorn", "ace.webhooks.app:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers"]

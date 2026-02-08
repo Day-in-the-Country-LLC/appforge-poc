@@ -149,6 +149,7 @@ venv.bak/
 appforge-creds.json
 gcp-credentials.json
 gcp-creds.json
+*.pem
 
 # Spyder project settings
 .spyderproject

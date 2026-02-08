@@ -251,6 +251,85 @@ class ProjectsV2Client:
         logger.info("project_items_listed", status=status, count=len(items))
         return items
 
+    async def get_project_item_by_id(self, item_id: str) -> ProjectItem | None:
+        """Fetch a single project item by node ID.
+
+        Args:
+            item_id: Project item node ID
+
+        Returns:
+            ProjectItem or None if not found
+        """
+        query = """
+        query($itemId: ID!) {
+            node(id: $itemId) {
+                ... on ProjectV2Item {
+                    id
+                    fieldValueByName(name: "Status") {
+                        ... on ProjectV2ItemFieldSingleSelectValue {
+                            name
+                        }
+                    }
+                    content {
+                        __typename
+                        ... on Issue {
+                            id
+                            title
+                            number
+                            url
+                            labels(first: 20) {
+                                nodes { name }
+                            }
+                            repository {
+                                owner { login }
+                                name
+                            }
+                        }
+                        ... on PullRequest {
+                            id
+                            title
+                            number
+                            url
+                            labels(first: 20) {
+                                nodes { name }
+                            }
+                            repository {
+                                owner { login }
+                                name
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        """
+        result = await self.api_client.graphql(query, {"itemId": item_id})
+        node = result.get("node")
+        if not node:
+            logger.warning("project_item_not_found", item_id=item_id)
+            return None
+
+        content = node.get("content")
+        if not content or content.get("number") is None:
+            logger.warning("project_item_missing_content", item_id=item_id)
+            return None
+
+        status_node = node.get("fieldValueByName", {}) or {}
+        status_value = status_node.get("name")
+        labels = [label["name"] for label in content.get("labels", {}).get("nodes", [])]
+        return ProjectItem(
+            item_id=node["id"],
+            content_id=content["id"],
+            content_type=content.get("__typename", "Issue"),
+            title=content.get("title", ""),
+            number=content.get("number"),
+            repo_owner=content["repository"]["owner"]["login"],
+            repo_name=content["repository"]["name"],
+            status=status_value,
+            labels=labels,
+            html_url=content.get("url", ""),
+        )
+
     async def update_item_status(
         self,
         project_id: str,
