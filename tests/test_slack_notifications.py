@@ -77,7 +77,7 @@ def test_webhook_listener_enqueues_pubsub(monkeypatch):
 
     secret = "test-secret"
     os.environ["GITHUB_WEBHOOK_SECRET"] = secret
-    body = b"{\"hello\":\"world\"}"
+    body = b'{"hello":"world"}'
     mac = hmac.new(secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256)
     sig = f"sha256={mac.hexdigest()}"
 

@@ -1,7 +1,5 @@
 """Tests for git operations."""
 
-import pytest
-
 from ace.workspaces.git_ops import GitOps
 
 

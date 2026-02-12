@@ -64,9 +64,7 @@ class GitOps:
         user = parts.username or ""
         redacted = f"{user}:***@" if user else "***@"
         netloc = f"{redacted}{hostname}"
-        return urlunsplit(
-            (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
-        )
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
     def _resolve_default_branch(self, worktree_path: Path) -> str:
         """Resolve the remote default branch from origin/HEAD."""
@@ -89,16 +87,12 @@ class GitOps:
                 returncode=result.returncode,
                 stderr=result.stderr.decode() if result.stderr else "",
             )
-            raise RuntimeError(
-                "❌ ERROR: Unable to resolve default branch from origin/HEAD"
-            )
+            raise RuntimeError("❌ ERROR: Unable to resolve default branch from origin/HEAD")
 
         ref = result.stdout.decode().strip()
         if not ref:
             logger.error("❌ ERROR: default_branch_resolve_empty")
-            raise RuntimeError(
-                "❌ ERROR: Unable to resolve default branch from origin/HEAD"
-            )
+            raise RuntimeError("❌ ERROR: Unable to resolve default branch from origin/HEAD")
 
         if ref.startswith("origin/"):
             return ref.split("/", 1)[1]
@@ -125,9 +119,7 @@ class GitOps:
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
         safe_repo_url = self._sanitize_repo_url(repo_url)
-        logger.info(
-            "cloning_repo", repo_url=safe_repo_url, worktree_path=str(worktree_path)
-        )
+        logger.info("cloning_repo", repo_url=safe_repo_url, worktree_path=str(worktree_path))
 
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         clone_cmd = [
@@ -187,9 +179,7 @@ class GitOps:
                 timeout=120,
             )
 
-            resolved_base_branch = base_branch or self._resolve_default_branch(
-                worktree_path
-            )
+            resolved_base_branch = base_branch or self._resolve_default_branch(worktree_path)
             logger.info(
                 "ensuring_branch",
                 branch=branch_name,
@@ -253,9 +243,7 @@ class GitOps:
         logger.info("creating_branch", branch=branch_name, worktree=str(worktree_path))
 
         try:
-            resolved_base_branch = base_branch or self._resolve_default_branch(
-                worktree_path
-            )
+            resolved_base_branch = base_branch or self._resolve_default_branch(worktree_path)
             subprocess.run(
                 [
                     "git",

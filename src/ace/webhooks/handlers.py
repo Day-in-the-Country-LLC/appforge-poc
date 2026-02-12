@@ -31,7 +31,9 @@ class WebhookHandler:
         self.settings = get_settings()
         self.app_auth = GitHubAppAuth.from_env()
 
-    async def handle(self, event: str, payload: dict[str, Any], delivery: str | None) -> dict[str, Any]:
+    async def handle(
+        self, event: str, payload: dict[str, Any], delivery: str | None
+    ) -> dict[str, Any]:
         if event == "projects_v2_item":
             return await self._handle_projects_v2_item(payload, delivery)
         if event == "issue_comment":
@@ -234,7 +236,9 @@ class WebhookHandler:
             return {
                 "status": "triggered",
                 "action": "blocker_closed",
-                "closed_issue": f"{closed_issue.repo_owner}/{closed_issue.repo_name}#{closed_issue.number}",
+                "closed_issue": (
+                    f"{closed_issue.repo_owner}/{closed_issue.repo_name}#{closed_issue.number}"
+                ),
                 "triggered_count": len(triggered),
                 "results": triggered,
             }
@@ -381,17 +385,15 @@ def _normalize_status(value: Any) -> str | None:
 
 
 def _is_ready_transition(transition: StatusTransition) -> bool:
-    return (
-        (transition.from_status or "").lower() == "backlog"
-        and (transition.to_status or "").lower() == "ready"
-    )
+    return (transition.from_status or "").lower() == "backlog" and (
+        transition.to_status or ""
+    ).lower() == "ready"
 
 
 def _is_in_progress_transition(transition: StatusTransition) -> bool:
-    return (
-        (transition.from_status or "").lower() == "blocked"
-        and (transition.to_status or "").lower() == "in progress"
-    )
+    return (transition.from_status or "").lower() == "blocked" and (
+        transition.to_status or ""
+    ).lower() == "in progress"
 
 
 def _extract_issue_from_payload(payload: dict[str, Any]) -> IssueInfo | None:

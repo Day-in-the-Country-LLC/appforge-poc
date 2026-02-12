@@ -59,13 +59,9 @@ class SlackNotifier:
             data = {}
 
         if response.status_code >= 400:
-            raise ValueError(
-                f"❌ ERROR: Slack API error {response.status_code}: {response.text}"
-            )
+            raise ValueError(f"❌ ERROR: Slack API error {response.status_code}: {response.text}")
         if not data.get("ok"):
-            raise ValueError(
-                f"❌ ERROR: Slack API error: {data.get('error', 'unknown')}"
-            )
+            raise ValueError(f"❌ ERROR: Slack API error: {data.get('error', 'unknown')}")
 
     async def safe_post(self, message: SlackMessage) -> None:
         try:
@@ -103,9 +99,7 @@ def format_webhook_message(
     return SlackMessage(text=" | ".join(lines))
 
 
-def format_error_message(
-    event: str | None, delivery: str | None, exc: Exception
-) -> SlackMessage:
+def format_error_message(event: str | None, delivery: str | None, exc: Exception) -> SlackMessage:
     return SlackMessage(
         text=(
             "Webhook error | "

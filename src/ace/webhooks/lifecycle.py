@@ -8,7 +8,6 @@ from uuid import uuid4
 
 import structlog
 
-
 STAGE_WEBHOOK_RECEIVED = "webhook_received"
 STAGE_WEBHOOK_ENQUEUED = "webhook_enqueued"
 STAGE_WORKER_DEQUEUED = "worker_dequeued"
@@ -43,8 +42,13 @@ def build_lifecycle_context(
     default_project: str | None = None,
 ) -> WebhookLifecycleContext:
     """Build a normalized lifecycle context for listener and worker logs."""
-    normalized_delivery = delivery.strip() if isinstance(delivery, str) and delivery.strip() else None
-    resolved_workflow_id = _resolve_workflow_id(workflow_id=workflow_id, delivery=normalized_delivery)
+    normalized_delivery = (
+        delivery.strip() if isinstance(delivery, str) and delivery.strip() else None
+    )
+    resolved_workflow_id = _resolve_workflow_id(
+        workflow_id=workflow_id,
+        delivery=normalized_delivery,
+    )
     action = payload.get("action")
     if not isinstance(action, str) or not action.strip():
         action = None
@@ -160,7 +164,9 @@ def _extract_issue_key(payload: dict[str, Any]) -> str | None:
             if isinstance(content, dict):
                 number = content.get("number")
                 if not repo_owner or not repo_name:
-                    repo_owner, repo_name = _extract_repository({"repository": content.get("repository")})
+                    repo_owner, repo_name = _extract_repository(
+                        {"repository": content.get("repository")}
+                    )
 
     if number is None:
         return None

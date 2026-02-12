@@ -98,10 +98,7 @@ class IssueQueue:
 
     async def list_open_prs_with_comments(self, org: str, label: str | None = None) -> list[Issue]:
         """List open PRs with comments (org-wide search)."""
-        query = (
-            f"org:{org} is:pr is:open comments:>0 "
-            '-label:"agent:comments-addressed"'
-        )
+        query = f'org:{org} is:pr is:open comments:>0 -label:"agent:comments-addressed"'
         if label:
             query += f' label:"{label}"'
         logger.info("listing_prs_with_comments", org=org, label=label)

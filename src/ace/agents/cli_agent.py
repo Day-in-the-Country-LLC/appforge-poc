@@ -13,12 +13,12 @@ from typing import Any
 
 import structlog
 
+from ace.config.secrets import resolve_claude_api_key, resolve_github_token, resolve_openai_api_key
 from ace.config.settings import get_settings
-from ace.config.secrets import resolve_github_token, resolve_openai_api_key, resolve_claude_api_key
 from ace.notifications.slack_client import SlackMessage, SlackNotifier
 
-from .types import AgentResult, AgentStatus
 from .mcp_config import ensure_mcp_config
+from .types import AgentResult, AgentStatus
 
 logger = structlog.get_logger(__name__)
 
@@ -108,14 +108,10 @@ class CliAgent:
 
             summary = str(marker.get("summary") or "").strip()
             files_changed = (
-                marker.get("files_changed")
-                if isinstance(marker.get("files_changed"), list)
-                else []
+                marker.get("files_changed") if isinstance(marker.get("files_changed"), list) else []
             )
             commands_run = (
-                marker.get("commands_run")
-                if isinstance(marker.get("commands_run"), list)
-                else []
+                marker.get("commands_run") if isinstance(marker.get("commands_run"), list) else []
             )
             if not commands_run:
                 commands_run = [command_display]
@@ -143,9 +139,7 @@ class CliAgent:
                 stderr = stderr_text.strip()
                 stdout = stdout_text.strip()
                 details = stderr or stdout or f"exit code {return_code}"
-                raise RuntimeError(
-                    f"❌ ERROR: cli_process_failed: {details}"
-                )
+                raise RuntimeError(f"❌ ERROR: cli_process_failed: {details}")
 
             return AgentResult(
                 status=AgentStatus.SUCCESS,
@@ -259,7 +253,7 @@ class CliAgent:
         model_value = self.model or ""
         display = template.replace("{model}", model_value).replace("{prompt}", "<prompt>")
 
-        # Quote the prompt so it is passed as a single positional argument even if it contains spaces.
+        # Quote prompt so shell parsing keeps it as one positional argument.
         formatted = template.replace("{model}", model_value)
         if "{prompt}" in formatted:
             formatted = formatted.replace("{prompt}", shlex.quote(prompt))
@@ -326,9 +320,10 @@ class CliAgent:
         started_at = time.monotonic()
         terminated_on_done = False
 
-        with tempfile.TemporaryFile(mode="w+b") as stdout_capture, tempfile.TemporaryFile(
-            mode="w+b"
-        ) as stderr_capture:
+        with (
+            tempfile.TemporaryFile(mode="w+b") as stdout_capture,
+            tempfile.TemporaryFile(mode="w+b") as stderr_capture,
+        ):
             proc: subprocess.Popen[bytes] = subprocess.Popen(
                 command,
                 cwd=str(workdir),
@@ -352,7 +347,10 @@ class CliAgent:
                     if proc.poll() is not None:
                         break
 
-                    if timeout_seconds is not None and (time.monotonic() - started_at) >= timeout_seconds:
+                    if (
+                        timeout_seconds is not None
+                        and (time.monotonic() - started_at) >= timeout_seconds
+                    ):
                         self._terminate_process(proc)
                         raise subprocess.TimeoutExpired(command, timeout_seconds)
 

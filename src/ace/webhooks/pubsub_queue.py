@@ -33,9 +33,7 @@ class PubSubWebhookQueue:
     def from_settings(cls, settings: Settings) -> PubSubWebhookQueue:
         topic_path = (settings.webhook_pubsub_topic or "").strip()
         if not topic_path:
-            raise ValueError(
-                "❌ ERROR: WEBHOOK_PUBSUB_TOPIC is required for listener mode."
-            )
+            raise ValueError("❌ ERROR: WEBHOOK_PUBSUB_TOPIC is required for listener mode.")
         if not topic_path.startswith("projects/"):
             raise ValueError(
                 "❌ ERROR: WEBHOOK_PUBSUB_TOPIC must be a full topic path "

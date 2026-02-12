@@ -112,7 +112,9 @@ class StatusManager:
         blocked_comment = "**BLOCKED - Agent Needs Input**\n\n"
         for i, question in enumerate(questions, 1):
             blocked_comment += f"{i}. {question}\n"
-        blocked_comment += "\nPlease reply with your answers and re-add the `agent` label when ready to resume."
+        blocked_comment += (
+            "\nPlease reply with your answers and re-add the `agent` label when ready to resume."
+        )
 
         await self.issue_queue.remove_labels(
             issue_number,

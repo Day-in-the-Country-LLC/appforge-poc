@@ -36,9 +36,7 @@ def ensure_mcp_config(
         logger.info("mcp_config_written_github", path=str(config_path))
         if include_appforge_server:
             appforge_payload = _appforge_http_config(settings, appforge_allowlist)
-            _write_mcp_config(
-                config_path, appforge_payload, settings.appforge_mcp_server_name
-            )
+            _write_mcp_config(config_path, appforge_payload, settings.appforge_mcp_server_name)
             logger.info("mcp_config_written_appforge", path=str(config_path))
         _ensure_git_exclude(workdir, settings.mcp_config_filename)
         return
@@ -123,9 +121,9 @@ def _write_codex_server(
     allowed_tools: list[str] | None = None,
 ) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    block = f"[mcp_servers.{server_name}]\n" f"url = \"{url}\"\n"
+    block = f'[mcp_servers.{server_name}]\nurl = "{url}"\n'
     if token_env_var:
-        block += f"bearer_token_env_var = \"{token_env_var}\"\n"
+        block += f'bearer_token_env_var = "{token_env_var}"\n'
     if allowed_tools:
         tools_literal = json.dumps(allowed_tools)
         block += f"allowed_tools = {tools_literal}\n"
