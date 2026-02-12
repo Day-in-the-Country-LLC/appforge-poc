@@ -40,6 +40,9 @@ def build_lifecycle_context(
     delivery: str | None,
     workflow_id: str | None = None,
     default_project: str | None = None,
+    project: str | None = None,
+    issue_key: str | None = None,
+    action: str | None = None,
 ) -> WebhookLifecycleContext:
     """Build a normalized lifecycle context for listener and worker logs."""
     normalized_delivery = (
@@ -49,15 +52,29 @@ def build_lifecycle_context(
         workflow_id=workflow_id,
         delivery=normalized_delivery,
     )
-    action = payload.get("action")
-    if not isinstance(action, str) or not action.strip():
-        action = None
+    resolved_action = action
+    if not isinstance(resolved_action, str) or not resolved_action.strip():
+        resolved_action = payload.get("action")
+    if not isinstance(resolved_action, str) or not resolved_action.strip():
+        resolved_action = None
+
+    resolved_project = project
+    if not isinstance(resolved_project, str) or not resolved_project.strip():
+        resolved_project = _extract_project(payload, default_project=default_project)
+    else:
+        resolved_project = resolved_project.strip()
+
+    resolved_issue_key = issue_key
+    if not isinstance(resolved_issue_key, str) or not resolved_issue_key.strip():
+        resolved_issue_key = _extract_issue_key(payload)
+    else:
+        resolved_issue_key = resolved_issue_key.strip()
 
     return WebhookLifecycleContext(
         event=event,
-        action=action,
-        project=_extract_project(payload, default_project=default_project),
-        issue_key=_extract_issue_key(payload),
+        action=resolved_action,
+        project=resolved_project,
+        issue_key=resolved_issue_key,
         delivery_id=normalized_delivery,
         workflow_id=resolved_workflow_id,
     )

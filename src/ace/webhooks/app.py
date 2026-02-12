@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -111,6 +112,26 @@ def _validate_logging_configuration() -> None:
         )
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _queue_delay_ms(*, queued_at: str | None, dequeued_at: str) -> float | None:
+    if not queued_at:
+        return None
+    try:
+        queued_dt = datetime.fromisoformat(queued_at.replace("Z", "+00:00"))
+        dequeued_dt = datetime.fromisoformat(dequeued_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if queued_dt.tzinfo is None:
+        queued_dt = queued_dt.replace(tzinfo=UTC)
+    if dequeued_dt.tzinfo is None:
+        dequeued_dt = dequeued_dt.replace(tzinfo=UTC)
+    delay_ms = (dequeued_dt - queued_dt).total_seconds() * 1000
+    return round(delay_ms, 3)
+
+
 @app.post("/github/webhooks", status_code=202)
 async def github_webhooks(request: Request) -> dict[str, Any]:
     if not _listener_enabled():
@@ -135,6 +156,7 @@ async def github_webhooks(request: Request) -> dict[str, Any]:
         delivery=delivery,
         default_project=getattr(settings, "github_project_name", None),
     )
+    queued_at = _utc_now_iso()
     log_lifecycle_event(logger, STAGE_WEBHOOK_RECEIVED, context)
 
     try:
@@ -143,12 +165,18 @@ async def github_webhooks(request: Request) -> dict[str, Any]:
             payload=payload,
             delivery=delivery,
             workflow_id=context.workflow_id,
+            issue_key=context.issue_key,
+            project=context.project,
+            action=context.action,
+            queued_at=queued_at,
         )
         log_lifecycle_event(
             logger,
             STAGE_WEBHOOK_ENQUEUED,
             context,
             message_id=message_id,
+            pubsub_message_id=message_id,
+            queued_at=queued_at,
             pubsub_topic=getattr(settings, "webhook_pubsub_topic", None),
         )
     except Exception as exc:
@@ -171,7 +199,9 @@ async def github_webhooks(request: Request) -> dict[str, Any]:
         "event": event,
         "delivery": delivery,
         "workflow_id": context.workflow_id,
+        "queued_at": queued_at,
         "message_id": message_id,
+        "pubsub_message_id": message_id,
     }
 
 
@@ -193,12 +223,21 @@ async def pubsub_worker(request: Request) -> dict[str, Any]:
         delivery=queued.delivery,
         workflow_id=queued.workflow_id,
         default_project=getattr(settings, "github_project_name", None),
+        project=queued.project,
+        issue_key=queued.issue_key,
+        action=queued.action,
     )
+    dequeued_at = _utc_now_iso()
+    queue_delay_ms = _queue_delay_ms(queued_at=queued.queued_at, dequeued_at=dequeued_at)
     log_lifecycle_event(
         logger,
         STAGE_WORKER_DEQUEUED,
         context,
         message_id=queued.message_id,
+        pubsub_message_id=queued.message_id,
+        queued_at=queued.queued_at,
+        dequeued_at=dequeued_at,
+        queue_delay_ms=queue_delay_ms,
     )
 
     log_lifecycle_event(
@@ -206,6 +245,9 @@ async def pubsub_worker(request: Request) -> dict[str, Any]:
         STAGE_WORKER_STARTED,
         context,
         message_id=queued.message_id,
+        pubsub_message_id=queued.message_id,
+        queued_at=queued.queued_at,
+        queue_delay_ms=queue_delay_ms,
     )
 
     handler = _get_handler()
@@ -251,7 +293,10 @@ async def pubsub_worker(request: Request) -> dict[str, Any]:
         "event": queued.event,
         "delivery": queued.delivery,
         "workflow_id": context.workflow_id,
+        "queued_at": queued.queued_at,
+        "queue_delay_ms": queue_delay_ms,
         "message_id": queued.message_id,
+        "pubsub_message_id": queued.message_id,
         "resolution": resolution,
         "result": result,
     }

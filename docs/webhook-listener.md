@@ -191,6 +191,39 @@ Worker service:
 - Deployment target: Cloud Run
 - Behavior: decodes Pub/Sub push payload, runs `WebhookHandler.handle(...)`, sends Slack status/error notifications
 
+Pub/Sub payload/envelope schema (v2):
+
+- `event`
+- `payload`
+- `delivery`
+- `workflow_id`
+- `queued_at`
+- `correlation.delivery_id`
+- `correlation.workflow_id`
+- `correlation.issue_key`
+- `correlation.project`
+- `correlation.action`
+
+Pub/Sub message attributes carry the same correlation values when available:
+
+- `delivery_id`
+- `workflow_id`
+- `issue_key`
+- `project`
+- `action`
+- `queued_at`
+
+Worker lifecycle logs include:
+
+- `pubsub_message_id`
+- `workflow_id`
+- `delivery_id`
+- `issue_key`
+- `project`
+- `queued_at`
+- `dequeued_at`
+- `queue_delay_ms`
+
 Recommended Cloud Run concurrency:
 
 - Listener: high concurrency (e.g. `40` or default) because work is short-lived enqueue.

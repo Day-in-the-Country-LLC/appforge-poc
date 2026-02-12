@@ -19,6 +19,10 @@ class QueuedWebhookEvent:
     payload: dict[str, Any]
     delivery: str | None
     workflow_id: str | None = None
+    issue_key: str | None = None
+    project: str | None = None
+    action: str | None = None
+    queued_at: str | None = None
     message_id: str | None = None
 
 
@@ -49,17 +53,42 @@ class PubSubWebhookQueue:
         payload: dict[str, Any],
         delivery: str | None,
         workflow_id: str | None = None,
+        issue_key: str | None = None,
+        project: str | None = None,
+        action: str | None = None,
+        queued_at: str | None = None,
     ) -> str:
+        correlation = {
+            "delivery_id": delivery,
+            "workflow_id": workflow_id,
+            "issue_key": issue_key,
+            "project": project,
+            "action": action,
+        }
         envelope = {
+            "schema_version": "2",
             "event": event,
             "payload": payload,
             "delivery": delivery,
             "workflow_id": workflow_id,
+            "queued_at": queued_at,
+            "correlation": correlation,
         }
         body = json.dumps(envelope, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
         attrs = {"event": event}
         if delivery:
             attrs["delivery"] = delivery
+            attrs["delivery_id"] = delivery
+        if workflow_id:
+            attrs["workflow_id"] = workflow_id
+        if issue_key:
+            attrs["issue_key"] = issue_key
+        if project:
+            attrs["project"] = project
+        if action:
+            attrs["action"] = action
+        if queued_at:
+            attrs["queued_at"] = queued_at
         publish_future = self._publisher.publish(self._topic_path, body, **attrs)
         return await asyncio.to_thread(lambda: str(publish_future.result(timeout=30)))
 
@@ -86,18 +115,57 @@ def decode_pubsub_push(body: dict[str, Any]) -> QueuedWebhookEvent:
 
     event = envelope.get("event")
     payload = envelope.get("payload")
-    delivery = envelope.get("delivery")
-    workflow_id = envelope.get("workflow_id")
+    attrs = message.get("attributes")
+    if attrs is None:
+        attrs = {}
+    if not isinstance(attrs, dict):
+        raise ValueError("❌ ERROR: invalid_pubsub_push: message.attributes must be an object")
+    for key, value in attrs.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError(
+                "❌ ERROR: invalid_pubsub_push: message.attributes must be string keys and values"
+            )
+
+    correlation = envelope.get("correlation")
+    if correlation is None:
+        correlation = {}
+    if not isinstance(correlation, dict):
+        raise ValueError("❌ ERROR: invalid_pubsub_push: correlation must be an object")
+
+    delivery = _first_string(
+        envelope.get("delivery"),
+        correlation.get("delivery_id"),
+        attrs.get("delivery_id"),
+        attrs.get("delivery"),
+    )
+    workflow_id = _first_string(
+        envelope.get("workflow_id"),
+        correlation.get("workflow_id"),
+        attrs.get("workflow_id"),
+    )
+    issue_key = _first_string(
+        correlation.get("issue_key"),
+        attrs.get("issue_key"),
+    )
+    project = _first_string(
+        correlation.get("project"),
+        attrs.get("project"),
+    )
+    action = _first_string(
+        correlation.get("action"),
+        payload.get("action") if isinstance(payload, dict) else None,
+        attrs.get("action"),
+    )
+    queued_at = _first_string(
+        envelope.get("queued_at"),
+        attrs.get("queued_at"),
+    )
     message_id = message.get("messageId")
 
     if not isinstance(event, str) or not event:
         raise ValueError("❌ ERROR: invalid_pubsub_push: missing event")
     if not isinstance(payload, dict):
         raise ValueError("❌ ERROR: invalid_pubsub_push: payload must be an object")
-    if delivery is not None and not isinstance(delivery, str):
-        raise ValueError("❌ ERROR: invalid_pubsub_push: delivery must be string or null")
-    if workflow_id is not None and not isinstance(workflow_id, str):
-        raise ValueError("❌ ERROR: invalid_pubsub_push: workflow_id must be string or null")
     if message_id is not None and not isinstance(message_id, str):
         raise ValueError("❌ ERROR: invalid_pubsub_push: messageId must be string")
 
@@ -106,5 +174,21 @@ def decode_pubsub_push(body: dict[str, Any]) -> QueuedWebhookEvent:
         payload=payload,
         delivery=delivery,
         workflow_id=workflow_id,
+        issue_key=issue_key,
+        project=project,
+        action=action,
+        queued_at=queued_at,
         message_id=message_id,
     )
+
+
+def _first_string(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if value is None:
+            continue
+        raise ValueError(
+            "❌ ERROR: invalid_pubsub_push: expected string value in correlation fields"
+        )
+    return None
