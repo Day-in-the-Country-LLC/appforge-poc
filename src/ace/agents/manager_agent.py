@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterable, Any
+from typing import Any, Iterable
 
 import structlog
 
 from ace.agents.llm_client import call_openai
-from ace.config.secrets import resolve_github_token
-from ace.config.secrets import resolve_openai_api_key
+from ace.config.secrets import resolve_github_token, resolve_openai_api_key
 from ace.config.settings import get_settings
 from ace.github.api_client import GitHubAPIClient
-from ace.github.issue_queue import Issue
-from ace.github.issue_queue import IssueQueue
+from ace.github.issue_queue import Issue, IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client
 
 logger = structlog.get_logger(__name__)
@@ -32,8 +30,7 @@ class ManagerAgent:
         self.skill_text = self._load_skill_text()
         self.tool_loop_enabled = self.settings.manager_agent_tool_loop_enabled
         self.tool_loop_max_steps = (
-            self.settings.manager_agent_tool_loop_max_steps
-            or _DEFAULT_TOOL_LOOP_MAX_STEPS
+            self.settings.manager_agent_tool_loop_max_steps or _DEFAULT_TOOL_LOOP_MAX_STEPS
         )
         self._project_id: str | None = None
         github_token = resolve_github_token(self.settings)
@@ -211,8 +208,8 @@ class ManagerAgent:
             "- get_project_status {number, repo_owner, repo_name}\n"
             "\n"
             "Tool response format: JSON object with fields {tool, args, result}.\n"
-            "Tool call format: {\"action\":\"tool\",\"tool\":\"<name>\",\"args\":{...}}.\n"
-            "Done format: {\"action\":\"done\",\"selected\":[1,2],\"rationale\":\"...\"}.\n"
+            'Tool call format: {"action":"tool","tool":"<name>","args":{...}}.\n'
+            'Done format: {"action":"done","selected":[1,2],"rationale":"..."}.\n'
             "Return ONLY a JSON object or JSON array.\n"
         )
         base_prompt = (
@@ -346,7 +343,7 @@ def _safe_parse_int_list(raw: str) -> list[int]:
         return []
     values = []
     for part in inner.split(","):
-        part = part.strip().strip("\"")
+        part = part.strip().strip('"')
         if not part:
             continue
         try:

@@ -18,12 +18,12 @@ from ace.agents.model_selector import ModelSelector
 from ace.agents.types import AgentResult, AgentStatus
 from ace.config.secrets import resolve_github_token, resolve_openai_api_key
 from ace.config.settings import get_settings
-from ace.notifications.slack_client import SlackNotifier, format_completion_message
 from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client
 from ace.github.status_manager import StatusManager
 from ace.logging_utils import log_key_event
+from ace.notifications.slack_client import SlackNotifier, format_completion_message
 from ace.orchestration.state import WorkerState
 from ace.workspaces.git_ops import GitOps
 from ace.workspaces.tmux_ops import TmuxOps
@@ -122,8 +122,11 @@ class InstructionBuilder:
 You are an instruction agent. Write detailed, step-by-step *programmatic* coding instructions
 for the issue below. Output Markdown only. Do not include UI/manual steps.
 Assume the repository is available; do not claim you cannot access files.
-Do not refuse or apologize; if information is missing, make reasonable assumptions and proceed with best-effort coding steps.
-If schema changes are needed, generate a timestamped Supabase migration (e.g., supabase/migrations/<YYYYMMDDHHMMSS>__desc.sql) using the current system time; do not place schema DDL in docs.
+Do not refuse or apologize; if information is missing, make reasonable assumptions
+and proceed with best-effort coding steps.
+If schema changes are needed, generate a timestamped Supabase migration
+(e.g., supabase/migrations/<YYYYMMDDHHMMSS>__desc.sql) using the current system
+time; do not place schema DDL in docs.
 
 Issue Title: {issue.title}
 Issue Body:
@@ -138,7 +141,8 @@ Include:
         completion = """
 
 When finished:
-- Create a file ACE_TASK_DONE.json in the repo root with fields: task_id (use "task-1"), summary, files_changed (array), commands_run (array).
+- Create a file ACE_TASK_DONE.json in the repo root with fields: task_id
+  (use "task-1"), summary, files_changed (array), commands_run (array).
 - Exit the session only after writing this file.
 """
         return body + completion

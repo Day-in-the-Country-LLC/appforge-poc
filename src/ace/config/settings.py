@@ -69,7 +69,10 @@ class Settings(BaseSettings):
     # CLI agent commands
     codex_cli_command: str = os.getenv(
         "CODEX_CLI_COMMAND",
-        "codex --ask-for-approval never --full-auto --sandbox danger-full-access --model {model} {prompt}",
+        (
+            "codex --ask-for-approval never --full-auto "
+            "--sandbox danger-full-access --model {model} {prompt}"
+        ),
     )
     claude_cli_command: str = os.getenv(
         "CLAUDE_CLI_COMMAND",
@@ -146,7 +149,6 @@ class Settings(BaseSettings):
     # Slack notifications (bot)
     slack_bot_token: str = os.getenv("SLACK_BOT_TOKEN", os.getenv("SLACKBOT_TOKEN", ""))
     slack_channel_id: str = os.getenv("SLACK_CHANNEL_ID", "")
-
 
     class Config:
         env_file = ".env"

@@ -72,9 +72,7 @@ class GitHubAppAuth:
                 status=response.status_code,
                 body=response.text,
             )
-            raise ValueError(
-                f"❌ ERROR: GitHub App token request failed ({response.status_code})"
-            )
+            raise ValueError(f"❌ ERROR: GitHub App token request failed ({response.status_code})")
 
         payload = response.json()
         token = payload.get("token")

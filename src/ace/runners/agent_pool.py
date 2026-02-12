@@ -533,7 +533,7 @@ class AgentPool:
             raise ValueError(error_message) from e
 
     async def _fetch_ready_issues_via_mcp(self) -> list[Issue]:
-        """Fetch ready issues via appforge MCP server (already filtered by status/label/blockers)."""
+        """Fetch ready issues from appforge MCP (pre-filtered by status/label/blockers)."""
         url = self.settings.appforge_mcp_url.rstrip("/")
         if not url.endswith("/mcp"):
             url = f"{url}/mcp"
@@ -830,7 +830,11 @@ class AgentPool:
         Returns:
             Summary of processing results
         """
-        repo = f"{issue.repo_owner}/{issue.repo_name}" if issue.repo_owner and issue.repo_name else None
+        repo = (
+            f"{issue.repo_owner}/{issue.repo_name}"
+            if issue.repo_owner and issue.repo_name
+            else None
+        )
         logger.info(
             "process_single_issue_starting",
             issue=issue.number,

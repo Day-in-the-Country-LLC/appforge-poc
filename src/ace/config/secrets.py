@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import structlog
 from pathlib import Path
 
+import structlog
 from google.cloud import secretmanager
 from google.oauth2 import service_account
 
@@ -54,9 +54,7 @@ def _should_use_secret_manager(settings: Settings, secret_name: str) -> bool:
 
 def _validate_backend(settings: Settings) -> None:
     if settings.secrets_backend not in ("secret-manager", "env"):
-        raise ValueError(
-            f"❌ ERROR: Unsupported secrets backend: {settings.secrets_backend}"
-        )
+        raise ValueError(f"❌ ERROR: Unsupported secrets backend: {settings.secrets_backend}")
 
 
 def resolve_github_token(settings: Settings) -> str:

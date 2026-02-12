@@ -92,6 +92,7 @@ Use the same value in:
 - `GITHUB_ORG`
 - `GITHUB_PROJECT_NAME`
 - `WEBHOOK_PUBSUB_TOPIC` (`projects/<project>/topics/<topic>`)
+- `ACE_LOG_FORMAT=json` (required on Cloud Run)
 
 Optional (notifications):
 
@@ -194,3 +195,33 @@ Recommended Cloud Run concurrency:
 
 - Listener: high concurrency (e.g. `40` or default) because work is short-lived enqueue.
 - Worker: `1` to process one issue/event at a time per instance.
+
+## Cloud Run Logging Requirement
+
+Cloud Run listener/worker deployments must set `ACE_LOG_FORMAT=json` so lifecycle logs remain queryable.
+
+Listener update example:
+
+```bash
+gcloud run services update appforge-webhooks-listener \
+  --region us-central1 \
+  --set-env-vars WEBHOOK_SERVICE_ROLE=listener,ACE_LOG_FORMAT=json
+```
+
+Worker update example:
+
+```bash
+gcloud run services update appforge-webhooks-worker \
+  --region us-central1 \
+  --set-env-vars WEBHOOK_SERVICE_ROLE=worker,ACE_LOG_FORMAT=json
+```
+
+Validate env vars:
+
+```bash
+gcloud run services describe appforge-webhooks-listener \
+  --region us-central1 \
+  --format="value(spec.template.spec.containers[0].env)"
+```
+
+The webhook app startup now fails on Cloud Run if `ACE_LOG_FORMAT` is not `json`.

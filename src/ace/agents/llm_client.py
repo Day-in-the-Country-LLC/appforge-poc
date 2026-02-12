@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import structlog
 import httpx
+import structlog
 
 logger = structlog.get_logger(__name__)
 
@@ -19,8 +19,8 @@ class _LangSmithTracer:
         self._api_key = ""
 
         try:
-            from ace.config.settings import get_settings
             from ace.config.secrets import resolve_langsmith_api_key
+            from ace.config.settings import get_settings
 
             settings = get_settings()
             api_key = resolve_langsmith_api_key(settings)

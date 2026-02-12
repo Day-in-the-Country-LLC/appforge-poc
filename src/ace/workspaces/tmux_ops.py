@@ -170,13 +170,9 @@ class TmuxOps:
             if result.returncode == 0:
                 return
             last_error = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(
-            f"failed to send Enter to tmux session '{session_name}': {last_error}"
-        )
+        raise RuntimeError(f"failed to send Enter to tmux session '{session_name}': {last_error}")
 
-    def send_prompt(
-        self, session_name: str, prompt: str, delay_seconds: float = 1.0
-    ) -> None:
+    def send_prompt(self, session_name: str, prompt: str, delay_seconds: float = 1.0) -> None:
         """Send a prompt to an existing session (chunked) and hit Enter twice."""
         if not prompt:
             return
@@ -204,9 +200,7 @@ class TmuxOps:
             )
             time.sleep(0.1)
 
-    def send_enter(
-        self, session_name: str, repeat: int = 1, delay_seconds: float = 0.0
-    ) -> None:
+    def send_enter(self, session_name: str, repeat: int = 1, delay_seconds: float = 0.0) -> None:
         """Send one or more Enter keypresses to a session."""
         if not self.session_exists(session_name):
             raise RuntimeError(f"tmux session '{session_name}' not found")
@@ -239,8 +233,6 @@ class TmuxOps:
         if result.returncode != 0:
             error = result.stderr.strip()
             logger.warning("tmux_capture_failed", session=session_name, error=error)
-            raise RuntimeError(
-                f"failed to capture tmux session '{session_name}': {error}"
-            )
+            raise RuntimeError(f"failed to capture tmux session '{session_name}': {error}")
 
         return result.stdout

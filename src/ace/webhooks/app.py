@@ -18,6 +18,19 @@ from ace.notifications.slack_client import (
     format_webhook_message,
 )
 from ace.webhooks.handlers import WebhookHandler
+from ace.webhooks.lifecycle import (
+    STAGE_AGENT_FINISHED,
+    STAGE_AGENT_STARTED,
+    STAGE_FINAL_RESOLUTION,
+    STAGE_WEBHOOK_ENQUEUED,
+    STAGE_WEBHOOK_RECEIVED,
+    STAGE_WORKER_DEQUEUED,
+    STAGE_WORKER_STARTED,
+    build_lifecycle_context,
+    log_lifecycle_event,
+    normalize_error_resolution,
+    normalize_result_resolution,
+)
 from ace.webhooks.pubsub_queue import PubSubWebhookQueue, decode_pubsub_push
 
 logger = structlog.get_logger(__name__)
@@ -33,6 +46,7 @@ _settings: Settings | None = None
 async def _startup() -> None:
     settings = _get_settings()
     configure_logging(debug=settings.debug)
+    _validate_logging_configuration()
     global _notifier
     _notifier = SlackNotifier.from_settings(settings)
     logger.info("webhook_listener_started", role=settings.webhook_service_role)
@@ -76,19 +90,24 @@ def _get_handler() -> WebhookHandler:
 
 def _verify_signature(secret: str, body: bytes, signature: str | None) -> None:
     if not secret:
-        raise HTTPException(
-            status_code=500, detail="❌ ERROR: GITHUB_WEBHOOK_SECRET not set"
-        )
+        raise HTTPException(status_code=500, detail="❌ ERROR: GITHUB_WEBHOOK_SECRET not set")
     if not signature:
-        raise HTTPException(
-            status_code=401, detail="❌ ERROR: Missing webhook signature"
-        )
+        raise HTTPException(status_code=401, detail="❌ ERROR: Missing webhook signature")
 
     mac = hmac.new(secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256)
     expected = f"sha256={mac.hexdigest()}"
     if not hmac.compare_digest(expected, signature):
-        raise HTTPException(
-            status_code=401, detail="❌ ERROR: Invalid webhook signature"
+        raise HTTPException(status_code=401, detail="❌ ERROR: Invalid webhook signature")
+
+
+def _validate_logging_configuration() -> None:
+    """Require JSON logs on Cloud Run so lifecycle fields are queryable."""
+    if not os.getenv("K_SERVICE"):
+        return
+    log_format = os.getenv("ACE_LOG_FORMAT", "console").strip().lower()
+    if log_format != "json":
+        raise RuntimeError(
+            "❌ ERROR: ACE_LOG_FORMAT must be set to json for Cloud Run webhook services."
         )
 
 
@@ -106,15 +125,40 @@ async def github_webhooks(request: Request) -> dict[str, Any]:
     _verify_signature(secret, body, signature)
 
     if not event:
-        raise HTTPException(
-            status_code=400, detail="❌ ERROR: Missing X-GitHub-Event header"
-        )
+        raise HTTPException(status_code=400, detail="❌ ERROR: Missing X-GitHub-Event header")
 
     payload = await request.json()
+    settings = _get_settings()
+    context = build_lifecycle_context(
+        event=event,
+        payload=payload,
+        delivery=delivery,
+        default_project=getattr(settings, "github_project_name", None),
+    )
+    log_lifecycle_event(logger, STAGE_WEBHOOK_RECEIVED, context)
 
     try:
-        message_id = await _get_queue().publish(event=event, payload=payload, delivery=delivery)
+        message_id = await _get_queue().publish(
+            event=event,
+            payload=payload,
+            delivery=delivery,
+            workflow_id=context.workflow_id,
+        )
+        log_lifecycle_event(
+            logger,
+            STAGE_WEBHOOK_ENQUEUED,
+            context,
+            message_id=message_id,
+            pubsub_topic=getattr(settings, "webhook_pubsub_topic", None),
+        )
     except Exception as exc:
+        log_lifecycle_event(
+            logger,
+            STAGE_FINAL_RESOLUTION,
+            context,
+            resolution=normalize_error_resolution(exc),
+            error=f"❌ ERROR: {exc}",
+        )
         if _notifier is not None:
             await _notifier.safe_post(format_error_message(event, delivery, exc))
         raise HTTPException(
@@ -126,6 +170,7 @@ async def github_webhooks(request: Request) -> dict[str, Any]:
         "status": "queued",
         "event": event,
         "delivery": delivery,
+        "workflow_id": context.workflow_id,
         "message_id": message_id,
     }
 
@@ -141,10 +186,57 @@ async def pubsub_worker(request: Request) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"{exc}") from exc
 
+    settings = _get_settings()
+    context = build_lifecycle_context(
+        event=queued.event,
+        payload=queued.payload,
+        delivery=queued.delivery,
+        workflow_id=queued.workflow_id,
+        default_project=getattr(settings, "github_project_name", None),
+    )
+    log_lifecycle_event(
+        logger,
+        STAGE_WORKER_DEQUEUED,
+        context,
+        message_id=queued.message_id,
+    )
+
+    log_lifecycle_event(
+        logger,
+        STAGE_WORKER_STARTED,
+        context,
+        message_id=queued.message_id,
+    )
+
     handler = _get_handler()
+    log_lifecycle_event(logger, STAGE_AGENT_STARTED, context)
     try:
         result = await handler.handle(queued.event, queued.payload, queued.delivery)
+        log_lifecycle_event(
+            logger,
+            STAGE_AGENT_FINISHED,
+            context,
+            handler_status=result.get("status"),
+            handler_action=result.get("action"),
+        )
+        resolution = normalize_result_resolution(result)
+        log_lifecycle_event(
+            logger,
+            STAGE_FINAL_RESOLUTION,
+            context,
+            resolution=resolution,
+            handler_status=result.get("status"),
+            handler_action=result.get("action"),
+        )
     except Exception as exc:
+        resolution = normalize_error_resolution(exc)
+        log_lifecycle_event(
+            logger,
+            STAGE_FINAL_RESOLUTION,
+            context,
+            resolution=resolution,
+            error=f"❌ ERROR: {exc}",
+        )
         if _notifier is not None:
             await _notifier.safe_post(format_error_message(queued.event, queued.delivery, exc))
         raise
@@ -158,6 +250,8 @@ async def pubsub_worker(request: Request) -> dict[str, Any]:
         "status": "ok",
         "event": queued.event,
         "delivery": queued.delivery,
+        "workflow_id": context.workflow_id,
         "message_id": queued.message_id,
+        "resolution": resolution,
         "result": result,
     }

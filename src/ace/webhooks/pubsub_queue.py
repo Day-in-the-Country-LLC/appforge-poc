@@ -18,6 +18,7 @@ class QueuedWebhookEvent:
     event: str
     payload: dict[str, Any]
     delivery: str | None
+    workflow_id: str | None = None
     message_id: str | None = None
 
 
@@ -32,9 +33,7 @@ class PubSubWebhookQueue:
     def from_settings(cls, settings: Settings) -> PubSubWebhookQueue:
         topic_path = (settings.webhook_pubsub_topic or "").strip()
         if not topic_path:
-            raise ValueError(
-                "❌ ERROR: WEBHOOK_PUBSUB_TOPIC is required for listener mode."
-            )
+            raise ValueError("❌ ERROR: WEBHOOK_PUBSUB_TOPIC is required for listener mode.")
         if not topic_path.startswith("projects/"):
             raise ValueError(
                 "❌ ERROR: WEBHOOK_PUBSUB_TOPIC must be a full topic path "
@@ -43,8 +42,20 @@ class PubSubWebhookQueue:
         publisher = pubsub_v1.PublisherClient()
         return cls(publisher=publisher, topic_path=topic_path)
 
-    async def publish(self, *, event: str, payload: dict[str, Any], delivery: str | None) -> str:
-        envelope = {"event": event, "payload": payload, "delivery": delivery}
+    async def publish(
+        self,
+        *,
+        event: str,
+        payload: dict[str, Any],
+        delivery: str | None,
+        workflow_id: str | None = None,
+    ) -> str:
+        envelope = {
+            "event": event,
+            "payload": payload,
+            "delivery": delivery,
+            "workflow_id": workflow_id,
+        }
         body = json.dumps(envelope, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
         attrs = {"event": event}
         if delivery:
@@ -76,6 +87,7 @@ def decode_pubsub_push(body: dict[str, Any]) -> QueuedWebhookEvent:
     event = envelope.get("event")
     payload = envelope.get("payload")
     delivery = envelope.get("delivery")
+    workflow_id = envelope.get("workflow_id")
     message_id = message.get("messageId")
 
     if not isinstance(event, str) or not event:
@@ -84,6 +96,8 @@ def decode_pubsub_push(body: dict[str, Any]) -> QueuedWebhookEvent:
         raise ValueError("❌ ERROR: invalid_pubsub_push: payload must be an object")
     if delivery is not None and not isinstance(delivery, str):
         raise ValueError("❌ ERROR: invalid_pubsub_push: delivery must be string or null")
+    if workflow_id is not None and not isinstance(workflow_id, str):
+        raise ValueError("❌ ERROR: invalid_pubsub_push: workflow_id must be string or null")
     if message_id is not None and not isinstance(message_id, str):
         raise ValueError("❌ ERROR: invalid_pubsub_push: messageId must be string")
 
@@ -91,5 +105,6 @@ def decode_pubsub_push(body: dict[str, Any]) -> QueuedWebhookEvent:
         event=event,
         payload=payload,
         delivery=delivery,
+        workflow_id=workflow_id,
         message_id=message_id,
     )
