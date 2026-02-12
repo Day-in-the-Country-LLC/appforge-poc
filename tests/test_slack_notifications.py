@@ -49,13 +49,28 @@ def test_webhook_listener_enqueues_pubsub(monkeypatch):
     published = []
 
     class StubQueue:
-        async def publish(self, *, event, payload, delivery, workflow_id=None):
+        async def publish(
+            self,
+            *,
+            event,
+            payload,
+            delivery,
+            workflow_id=None,
+            issue_key=None,
+            project=None,
+            action=None,
+            queued_at=None,
+        ):
             published.append(
                 {
                     "event": event,
                     "payload": payload,
                     "delivery": delivery,
                     "workflow_id": workflow_id,
+                    "issue_key": issue_key,
+                    "project": project,
+                    "action": action,
+                    "queued_at": queued_at,
                 }
             )
             return "msg-123"
@@ -69,6 +84,7 @@ def test_webhook_listener_enqueues_pubsub(monkeypatch):
         (),
         {
             "webhook_service_role": "listener",
+            "github_project_name": "Appforge",
             "debug": False,
             "slack_bot_token": "",
             "slack_channel_id": "",
@@ -77,7 +93,13 @@ def test_webhook_listener_enqueues_pubsub(monkeypatch):
 
     secret = "test-secret"
     os.environ["GITHUB_WEBHOOK_SECRET"] = secret
-    body = b'{"hello":"world"}'
+    body = json.dumps(
+        {
+            "action": "created",
+            "issue": {"number": 9},
+            "repository": {"name": "digido", "owner": {"login": "Day-in-the-Country-LLC"}},
+        }
+    ).encode("utf-8")
     mac = hmac.new(secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256)
     sig = f"sha256={mac.hexdigest()}"
 
@@ -100,7 +122,11 @@ def test_webhook_listener_enqueues_pubsub(monkeypatch):
         assert published[0]["event"] == "issue_comment"
         assert published[0]["delivery"] == "delivery-1"
         assert published[0]["workflow_id"] == "delivery-1"
-        assert published[0]["payload"] == {"hello": "world"}
+        assert published[0]["issue_key"] == "Day-in-the-Country-LLC/digido#9"
+        assert published[0]["project"] == "Appforge"
+        assert published[0]["action"] == "created"
+        assert isinstance(published[0]["queued_at"], str)
+        assert published[0]["payload"]["issue"]["number"] == 9
     finally:
         webhook_app._queue = old_queue
         webhook_app._settings = old_settings
@@ -148,10 +174,25 @@ def test_webhook_worker_success_sends_slack(monkeypatch):
                     {
                         "event": "issue_comment",
                         "delivery": "delivery-1",
+                        "queued_at": "2026-02-12T18:00:00+00:00",
+                        "correlation": {
+                            "delivery_id": "delivery-1",
+                            "workflow_id": "delivery-1",
+                            "issue_key": "Day-in-the-Country-LLC/digido#123",
+                            "project": "Appforge",
+                            "action": "created",
+                        },
                         "payload": {},
                     }
                 ).encode("utf-8")
             ).decode("utf-8"),
+            "attributes": {
+                "delivery_id": "delivery-1",
+                "workflow_id": "delivery-1",
+                "issue_key": "Day-in-the-Country-LLC/digido#123",
+                "project": "Appforge",
+                "action": "created",
+            },
         }
     }
 
@@ -163,6 +204,9 @@ def test_webhook_worker_success_sends_slack(monkeypatch):
         assert "Webhook processed" in posted[0]
         assert "event=issue_comment" in posted[0]
         assert resp.json()["workflow_id"] == "delivery-1"
+        assert resp.json()["pubsub_message_id"] == "1234"
+        assert resp.json()["queued_at"] == "2026-02-12T18:00:00+00:00"
+        assert resp.json()["queue_delay_ms"] is not None
         assert resp.json()["resolution"] == "success"
     finally:
         webhook_app._handler = old_handler
@@ -189,7 +233,18 @@ def test_webhook_listener_lifecycle_logs(monkeypatch):
             events.append({"event_name": event_name, "fields": merged})
 
     class StubQueue:
-        async def publish(self, *, event, payload, delivery, workflow_id=None):
+        async def publish(
+            self,
+            *,
+            event,
+            payload,
+            delivery,
+            workflow_id=None,
+            issue_key=None,
+            project=None,
+            action=None,
+            queued_at=None,
+        ):
             return "msg-xyz"
 
     old_logger = webhook_app.logger
@@ -243,6 +298,8 @@ def test_webhook_listener_lifecycle_logs(monkeypatch):
             assert fields["workflow_id"] == "delivery-42"
             assert fields["issue_key"] == "Day-in-the-Country-LLC/digido#34"
             assert fields["project"] == "Appforge"
+        assert lifecycle[1]["fields"]["pubsub_message_id"] == "msg-xyz"
+        assert isinstance(lifecycle[1]["fields"]["queued_at"], str)
     finally:
         webhook_app.logger = old_logger
         webhook_app._queue = old_queue
@@ -299,6 +356,14 @@ def test_webhook_worker_lifecycle_logs_blocked(monkeypatch):
                         "event": "projects_v2_item",
                         "delivery": "delivery-11",
                         "workflow_id": "wf-11",
+                        "queued_at": "2026-02-12T18:00:00+00:00",
+                        "correlation": {
+                            "delivery_id": "delivery-11",
+                            "workflow_id": "wf-11",
+                            "issue_key": "Day-in-the-Country-LLC/digido#34",
+                            "project": "Appforge",
+                            "action": "edited",
+                        },
                         "payload": {
                             "action": "edited",
                             "issue": {"number": 34},
@@ -318,6 +383,8 @@ def test_webhook_worker_lifecycle_logs_blocked(monkeypatch):
         resp = client.post("/internal/pubsub/worker", json=envelope)
         assert resp.status_code == 200
         assert resp.json()["resolution"] == "blocked"
+        assert resp.json()["pubsub_message_id"] == "1234"
+        assert resp.json()["queue_delay_ms"] is not None
 
         lifecycle = [e for e in events if e["event_name"] == "webhook_lifecycle"]
         assert [e["fields"]["stage"] for e in lifecycle] == [
@@ -332,8 +399,87 @@ def test_webhook_worker_lifecycle_logs_blocked(monkeypatch):
             assert fields["workflow_id"] == "wf-11"
             assert fields["delivery_id"] == "delivery-11"
             assert fields["issue_key"] == "Day-in-the-Country-LLC/digido#34"
+        assert lifecycle[0]["fields"]["pubsub_message_id"] == "1234"
+        assert lifecycle[0]["fields"]["queue_delay_ms"] is not None
 
         assert lifecycle[-1]["fields"]["resolution"] == "blocked"
+    finally:
+        webhook_app.logger = old_logger
+        webhook_app._handler = old_handler
+        webhook_app._notifier = old_notifier
+        webhook_app._settings = old_settings
+
+
+def test_webhook_worker_failure_logs_resolution(monkeypatch):
+    from ace.webhooks import app as webhook_app
+
+    events = []
+
+    class StubLogger:
+        def __init__(self):
+            self._bound = {}
+
+        def bind(self, **kwargs):
+            self._bound.update(kwargs)
+            return self
+
+        def info(self, event_name, **fields):
+            merged = dict(self._bound)
+            merged.update(fields)
+            events.append({"event_name": event_name, "fields": merged})
+
+    class StubHandler:
+        async def handle(self, event, payload, delivery):
+            raise RuntimeError("spawn_failed")
+
+    old_logger = webhook_app.logger
+    old_handler = webhook_app._handler
+    old_notifier = webhook_app._notifier
+    old_settings = webhook_app._settings
+    webhook_app.logger = StubLogger()
+    webhook_app._handler = StubHandler()
+    webhook_app._notifier = None
+    webhook_app._settings = type(
+        "SettingsStub",
+        (),
+        {
+            "webhook_service_role": "worker",
+            "github_project_name": "Appforge",
+            "debug": False,
+            "slack_bot_token": "",
+            "slack_channel_id": "",
+        },
+    )()
+
+    envelope = {
+        "message": {
+            "messageId": "1234",
+            "data": base64.b64encode(
+                json.dumps(
+                    {
+                        "event": "issue_comment",
+                        "delivery": "delivery-1",
+                        "queued_at": "2026-02-12T18:00:00+00:00",
+                        "correlation": {
+                            "delivery_id": "delivery-1",
+                            "workflow_id": "wf-1",
+                            "issue_key": "Day-in-the-Country-LLC/digido#34",
+                            "project": "Appforge",
+                        },
+                        "payload": {"issue": {"number": 34}},
+                    }
+                ).encode("utf-8")
+            ).decode("utf-8"),
+        }
+    }
+
+    try:
+        client = TestClient(webhook_app.app, raise_server_exceptions=False)
+        resp = client.post("/internal/pubsub/worker", json=envelope)
+        assert resp.status_code == 500
+        lifecycle = [e for e in events if e["event_name"] == "webhook_lifecycle"]
+        assert lifecycle[-1]["fields"]["stage"] == "final_resolution"
+        assert lifecycle[-1]["fields"]["resolution"] == "failure"
     finally:
         webhook_app.logger = old_logger
         webhook_app._handler = old_handler

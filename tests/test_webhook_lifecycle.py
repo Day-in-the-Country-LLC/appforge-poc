@@ -40,6 +40,20 @@ def test_build_lifecycle_context_uses_default_project_and_generated_workflow_id(
     assert context.workflow_id.startswith("wf-")
 
 
+def test_build_lifecycle_context_uses_explicit_correlation_overrides():
+    context = build_lifecycle_context(
+        event="projects_v2_item",
+        payload={},
+        delivery="delivery-1",
+        project="Appforge",
+        issue_key="Day-in-the-Country-LLC/digido#34",
+        action="edited",
+    )
+    assert context.project == "Appforge"
+    assert context.issue_key == "Day-in-the-Country-LLC/digido#34"
+    assert context.action == "edited"
+
+
 def test_normalize_result_resolution():
     assert normalize_result_resolution({"status": "blocked"}) == RESOLUTION_BLOCKED
     assert normalize_result_resolution({"status": "failed"}) == RESOLUTION_FAILURE
