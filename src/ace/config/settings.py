@@ -62,10 +62,14 @@ class Settings(BaseSettings):
     agent_id: str = os.getenv("AGENT_ID", "ace-default")
     agent_execution_mode: str = os.getenv("AGENT_EXECUTION_MODE", "tmux")
 
+    # Webhook service split (listener/worker)
+    webhook_service_role: str = os.getenv("WEBHOOK_SERVICE_ROLE", "both").lower()
+    webhook_pubsub_topic: str = os.getenv("WEBHOOK_PUBSUB_TOPIC", "")
+
     # CLI agent commands
     codex_cli_command: str = os.getenv(
         "CODEX_CLI_COMMAND",
-        "codex --ask-for-approval never --full-auto --sandbox danger-full-access --model {model}",
+        "codex --ask-for-approval never --full-auto --sandbox danger-full-access --model {model} {prompt}",
     )
     claude_cli_command: str = os.getenv(
         "CLAUDE_CLI_COMMAND",

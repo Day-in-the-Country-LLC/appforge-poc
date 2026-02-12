@@ -8,8 +8,8 @@ The listener is an HTTP service that:
 
 1. Verifies webhook signatures.
 2. Parses the GitHub event type.
-3. Filters to the exact triggers we care about.
-4. Kicks off orchestration for the relevant issue or PR.
+3. Publishes a queue message to Pub/Sub.
+4. Returns quickly (no long-running orchestration in request thread).
 
 The listener **does not** create webhooks itself unless you explicitly build a provisioning flow. Webhooks are configured in GitHub (UI/CLI/API) and pointed at the listener endpoint.
 
@@ -91,12 +91,21 @@ Use the same value in:
 - `GITHUB_WEBHOOK_SECRET`
 - `GITHUB_ORG`
 - `GITHUB_PROJECT_NAME`
-- `APPFORGE_MCP_URL` (required; webhook processing fails if missing)
+- `WEBHOOK_PUBSUB_TOPIC` (`projects/<project>/topics/<topic>`)
 
 Optional (notifications):
 
 - `SLACK_BOT_TOKEN` (or `SLACKBOT_TOKEN`)
 - `SLACK_CHANNEL_ID`
+
+Worker-only required:
+
+- `APPFORGE_MCP_URL` (required for issue processing)
+- `WEBHOOK_SERVICE_ROLE=worker`
+
+Listener-only required:
+
+- `WEBHOOK_SERVICE_ROLE=listener`
 
 ## Project Name
 
@@ -167,9 +176,21 @@ If the board is org‑level, org installation is recommended.
 
 ## Implementation Notes
 
-Listener implementation:
+Listener service:
 
 - Framework: FastAPI (`src/ace/webhooks/app.py`)
 - Endpoint: `/github/webhooks`
 - Deployment target: Cloud Run
-- Orchestration: direct call into the agent pool (remote)
+- Behavior: validates signature and enqueues `{event,payload,delivery}` to Pub/Sub
+
+Worker service:
+
+- Framework: FastAPI (`src/ace/webhooks/app.py`)
+- Endpoint: `/internal/pubsub/worker` (Pub/Sub push subscription target)
+- Deployment target: Cloud Run
+- Behavior: decodes Pub/Sub push payload, runs `WebhookHandler.handle(...)`, sends Slack status/error notifications
+
+Recommended Cloud Run concurrency:
+
+- Listener: high concurrency (e.g. `40` or default) because work is short-lived enqueue.
+- Worker: `1` to process one issue/event at a time per instance.

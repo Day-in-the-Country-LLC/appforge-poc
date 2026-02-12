@@ -1,118 +1,45 @@
-# Tmux Sessions: How It Works (Plain-English, Drunk Grandma Edition)
+# CLI Execution Model (Current + Legacy Notes)
 
-Below is a simple, no-fancy explanation of how a tmux session is created and
-points at the right repo/worktree. Think of tmux sessions like little TV rooms.
-Each room is labeled with the repo + issue number, and inside that room the agent
-is already standing in the right folder.
+This document used to describe tmux-backed execution. As of the current runtime,
+CLI agents run as non-interactive subprocesses.
 
-## 1) Where the repo is cloned
+## 1) Where work runs
 
-- Workspace root is set by `AGENT_WORKSPACE_ROOT` (default: `/tmp/agent-hq`).
-- Each issue gets its own "worktree" folder under:
-  - `/tmp/agent-hq/worktrees/<repo>/<issue>/`
-- Note: The code *calls it* a worktree, but it actually does a fresh `git clone`
-  into that folder (not a git worktree checkout).
+- Workspace root is `AGENT_WORKSPACE_ROOT` (default: `/tmp/agent-hq`).
+- Each issue runs in `/tmp/agent-hq/worktrees/<repo>/<issue>/`.
+- `ACE_TASK.md` is written before CLI spawn and must be present.
 
-Source: `src/ace/config/settings.py`, `src/ace/workspaces/git_ops.py`.
+## 2) How the CLI is invoked
 
-## 2) How tmux knows which repo/worktree to use
+- `CliAgent.run()` builds a command from `CODEX_CLI_COMMAND` or `CLAUDE_CLI_COMMAND`.
+- The command runs via a monitored `subprocess.Popen(..., cwd=<issue-workdir>)` loop.
+- Both command templates must include `{prompt}`. Missing `{prompt}` is a hard error.
+- Task prompt is loaded from `prompts/cli_task_prompt.md` (required; no fallback).
+- For Codex, ACE prepends system prompt text to task prompt text.
+- For Claude, task prompt is passed via `{prompt}` and system prompt is passed with `--append-system-prompt`.
 
-Two things tie a session to the right repo:
+## 3) Completion contract
 
-1) **Session name** includes repo + issue number:
-   - `ace-<repo>-<issue>`
-   - Example: `ace-irlsc-events-193`
-2) **Working directory** is set when the session is created:
-   - tmux starts in `.../worktrees/<repo>/<issue>/`
+- Success requires `ACE_TASK_DONE.json` in the issue worktree.
+- Missing/invalid done file is a hard failure.
+- CLI non-zero exit code is a hard failure.
+- Timeout produces `task_wait_timeout`.
+- ACE terminates the CLI process as soon as `ACE_TASK_DONE.json` is detected.
 
-Source: `src/ace/workspaces/tmux_ops.py`, `src/ace/agents/cli_agent.py`.
+## 4) Env vars and MCP
 
-## 3) How a tmux session is spawned (current state)
+Each subprocess run receives injected secrets/env (for example):
 
-Right now, it is **fully implemented** and **scripted via Python**, not a shell
-script. The flow is:
+- `GITHUB_TOKEN`
+- `OPENAI_API_KEY` (Codex path)
+- `ANTHROPIC_API_KEY` (Claude path)
 
-1) Orchestrator makes sure the repo is cloned and branch exists.
-2) It writes instructions to `ACE_TASK.md` in that worktree.
-3) The CLI agent starts a tmux session with a command to run Codex or Claude.
+MCP config is generated per run:
 
-The actual spawn happens in `CliAgent.run()` which calls `TmuxOps.start_session()`.
+- Codex: `~/.codex/config.toml`
+- Claude: `<worktree>/.mcp.json` (git-ignored)
 
-Source: `src/ace/orchestration/graph.py`, `src/ace/agents/cli_agent.py`,
-`src/ace/workspaces/tmux_ops.py`.
+## 5) tmux status
 
-## 4) Does it use a script?
-
-No. The CLI command is built directly from settings.
-
-Defaults (from `src/ace/config/settings.py`):
-
-- **Codex**: `codex --ask-for-approval never --full-auto --sandbox danger-full-access --model {model}`
-- **Claude**: `claude --permission-mode dontAsk --dangerously-skip-permissions --model {model}`
-
-Source: `src/ace/config/settings.py`, `src/ace/agents/cli_agent.py`.
-
-## 5) How instructions get into the tmux session
-
-Instructions live in the worktree at:
-
-- `ACE_TASK.md`
-
-When the tmux session starts, there are two ways the prompt gets in:
-
-1) **Inline prompt**: If the command template has `{prompt}`, the full
-   instructions are passed directly to the CLI.
-2) **Paste-after-start**: If not, the agent starts tmux, then pastes the prompt
-   into the session and hits Enter.
-
-In this codebase, the default templates do **not** include `{prompt}`, so the
-paste-after-start path is used.
-
-Source: `src/ace/agents/cli_agent.py`.
-
-## 6) How env vars get injected into the tmux session
-
-When the session is created, the code does:
-
-- `tmux new-session ... -- env KEY=VALUE ... <command>`
-
-So the **command inside tmux** inherits those environment variables.
-
-Injected keys can include:
-
-- `GITHUB_TOKEN`, `GITHUB_MCP_TOKEN_ENV`
-- `OPENAI_API_KEY` (Codex/OpenAI)
-- `ANTHROPIC_API_KEY` (Claude CLI; sourced from `CLAUDE_CODE_ADMIN_API_KEY` / Secret Manager)
-- `GOOGLE_APPLICATION_CREDENTIALS`, `GCP_CREDENTIALS_FILE`
-
-Also:
-
-- Codex MCP config is written to `~/.codex/config.toml`.
-- Claude MCP config is written to `<worktree>/.mcp.json` and git-ignored.
-
-Source: `src/ace/agents/cli_agent.py`, `src/ace/agents/mcp_config.py`,
-`src/ace/config/secrets.py`.
-
-## 7) How "Enter" gets pressed after the prompt is pasted
-
-The code literally sends the keys over tmux:
-
-- `tmux send-keys -l "<prompt text>"`
-- Then `tmux send-keys C-m` (Enter)
-- It does Enter **twice**, with a small delay, to be safe.
-
-There is also a retry loop (3 tries) if Enter fails to send.
-
-Source: `src/ace/workspaces/tmux_ops.py`.
-
-## 8) Quick mental picture
-
-Imagine you have a row of little TV rooms:
-
-- Each room is named like `ace-<repo>-<issue>`.
-- When a room opens, the agent walks into the right folder.
-- A note (`ACE_TASK.md`) is read out loud.
-- The room is given the right keys (env vars) to access GitHub/GCP.
-- If the agent gets quiet, the manager pokes it with a "please continue" note.
-
-That is basically the whole tmux setup.
+- `src/ace/workspaces/tmux_ops.py` remains for legacy tooling.
+- Current CLI execution path in `src/ace/agents/cli_agent.py` does not use tmux sessions.

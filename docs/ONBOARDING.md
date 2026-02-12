@@ -1,6 +1,6 @@
 # Onboarding Guide
 
-This guide walks through getting Appforge Coding Engine (ACE) running locally and explains how to set up the two MCP servers used by the CLI coding agents inside tmux sessions.
+This guide walks through getting Appforge Coding Engine (ACE) running locally and explains how to set up the two MCP servers used by the CLI coding agents.
 
 ## Prerequisites
 
@@ -36,7 +36,7 @@ Key values to confirm:
 
 ACE uses two MCP servers:
 
-1) **GitHub MCP server** — used by Codex/Claude CLI agents inside tmux sessions.
+1) **GitHub MCP server** — used by Codex/Claude CLI agents during non-interactive subprocess runs.
 2) **Appforge MCP server** — optional for manager/queue operations (recommended for remote runs).
 
 ACE can work with a single org-wide GitHub Project board that tracks issues across many repos. In this model, you typically run the coding CLI inside a specific project repo and use the `github_issue_creation` skill to open issues that get placed on the org-wide board.
@@ -48,8 +48,9 @@ The CLI agents (Codex/Claude) use GitHub MCP to create PRs, comment, and update 
 Minimum requirements:
 
 - Your CLI tool must have an MCP config that points to the GitHub MCP server.
-- `GITHUB_TOKEN` must be available to the CLI process (ACE injects it into tmux sessions).
+- `GITHUB_TOKEN` must be available to the CLI process (ACE injects it into subprocess runs).
 - `GITHUB_MCP_TOKEN_ENV` in `.env` should remain `GITHUB_TOKEN`.
+- CLI command templates must include `{prompt}` so every run receives an explicit task prompt.
 
 See `docs/github-mcp-setup.md` for exact MCP config examples.
 
@@ -114,9 +115,11 @@ If you maintain skills elsewhere, ensure the same names and folder structure exi
 
 ## 6) Verify CLI agent behavior
 
-When a tmux session starts, the coding CLI will:
+When an issue run starts, the coding CLI will:
 
 - Read `ACE_TASK.md` in the worktree
+- Receive a required default prompt from `prompts/cli_task_prompt.md`
+- Receive system prompt guidance (`--append-system-prompt` for Claude, prepended for Codex)
 - Execute the instructions
 - Use **blocked-task-handling** when blocked
 - Use **code-complete-issue-pr-handling** when done

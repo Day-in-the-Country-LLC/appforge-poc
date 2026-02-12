@@ -9,9 +9,9 @@ Use this checklist before deploying ACE to production. Treat it as a living docu
 - [ ] Worktree cleanup strategy defined (retain vs. prune after completion).
 
 ## Observability
-- [ ] Structured logs include issue number, repo, task id, and session name.
+- [ ] Structured logs include issue number, repo, task id, execution mode, and workdir.
 - [ ] Aggregate metrics exist for success/failure, duration, and nudge counts.
-- [ ] Alerts cover repeated task failures, repeated nudges, and stuck sessions.
+- [ ] Alerts cover repeated task failures, repeated nudges, and timeout-heavy runs.
 
 ## Security
 - [ ] Tokens are loaded from Secret Manager only (no plaintext env in prod).
@@ -25,5 +25,5 @@ Use this checklist before deploying ACE to production. Treat it as a living docu
 
 ## Runbook
 - [ ] Clear instructions for handling blocked issues and retries.
-- [ ] Manual override steps for killing/restarting tmux sessions.
+- [ ] Manual override steps for re-running failed subprocess jobs and validating `ACE_TASK_DONE.json`.
 - [ ] Backup/restore steps for workspaces if retention is required.

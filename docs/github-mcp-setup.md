@@ -94,9 +94,9 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-#### For ACE CLI/Tmux Agents (Codex or Claude CLI)
+#### For ACE CLI Agents (Codex or Claude CLI)
 
-ACE launches CLI agents inside tmux sessions and injects a GitHub token into the
+ACE launches CLI agents as non-interactive subprocesses and injects a GitHub token into the
 environment. Configure the MCP server in the CLI tool itself using the GitHub
 MCP install guides, and ensure the token env var matches `GITHUB_MCP_TOKEN_ENV`
 (default: `GITHUB_TOKEN`).
@@ -116,7 +116,7 @@ Key env vars used by ACE:
 - `GITHUB_TOKEN` (fallback for REST operations)
 - `GITHUB_TOKEN_SECRET_NAME` / `GITHUB_TOKEN_SECRET_VERSION` when using Secret Manager
 
-ACE automatically sets these inside the tmux session.
+ACE automatically sets these for each CLI subprocess invocation.
 
 ### Step 3: Verify Installation
 

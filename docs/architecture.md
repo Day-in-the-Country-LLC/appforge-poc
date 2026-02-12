@@ -23,11 +23,15 @@ The ACE framework communicates with GitHub via REST/GraphQL APIs for orchestrati
 
 ### 2. Agent Layer (`src/ace/agents/`)
 
-- **`cli_agent.py`** - Spawns tmux sessions for Codex/Claude CLI
+- **`cli_agent.py`** - Runs Codex/Claude CLI via monitored `subprocess.Popen` in the issue worktree
 - **`policy.py`** - Safety constraints and execution rules injected into every task
 - **`types.py`** - Agent result status/types
 
-The CLI path runs inside tmux and reads `ACE_TASK.md` for detailed task instructions.
+The CLI path is non-interactive and reads `ACE_TASK.md` for detailed task instructions.
+It requires `ACE_TASK_DONE.json` to be written before the run is considered successful.
+Prompt injection is explicit and required on every run via `{prompt}` command templates.
+The prompt payload is loaded from `prompts/cli_task_prompt.md` (required file, no fallback).
+Codex receives `system_prompt + task_prompt`; Claude receives task prompt plus `--append-system-prompt`.
 
 ### 3. Orchestration (`src/ace/orchestration/`)
 
@@ -52,7 +56,7 @@ select_backend
     └→ success/failure handling
 ```
 
-In CLI/tmux mode, `run_agent` coordinates a single work item inside a worktree.
+In CLI subprocess mode, `run_agent` coordinates a single work item inside a worktree.
 Instructions are written to `ACE_TASK.md` and the coding CLI completes by dropping
 `ACE_TASK_DONE.json`. PR creation and issue/project updates are handled by the
 CLI via the required completion/blocked skills.
@@ -66,7 +70,7 @@ CLI via the required completion/blocked skills.
 ### 5. Workspace Management (`src/ace/workspaces/`)
 
 - **`git_ops.py`** - Git operations (clone, worktree, branch, push)
-- **`tmux_ops.py`** - tmux session/window management (used in CLI/tmux mode)
+- **`tmux_ops.py`** - Legacy tmux helpers retained for older tooling/scripts
 
 ### 6. Configuration (`src/ace/config/`)
 
@@ -90,7 +94,7 @@ Worktree + branch created
     ↓
 Instructions written (ACE_TASK.md)
     ↓
-CLI agent executes in tmux
+CLI agent executes via monitored `subprocess.Popen`
     ↓
 PR opened, status updated
     ↓
@@ -115,9 +119,17 @@ Status set back to Ready/In Progress
 Worker resumes with answer
 ```
 
-## Deployment Model (non-HTTP)
+## Deployment Model
 
-Run the agent pool as a scheduled/CLI drain (e.g., cron/Cloud Scheduler) to process ready issues, then exit. No FastAPI/HTTP surface is present.
+Production webhook flow is split:
+
+1. **Listener service** (`/github/webhooks`) validates GitHub signature and enqueues Pub/Sub.
+2. **Worker service** (`/internal/pubsub/worker`) receives Pub/Sub push and runs webhook processing.
+
+Recommended Cloud Run settings:
+
+- Listener service: higher concurrency (queue publish is quick).
+- Worker service: concurrency `1` (one issue/event per request).
 
 ## Security Model
 

@@ -1,5 +1,7 @@
+import base64
 import hashlib
 import hmac
+import json
 import os
 
 import pytest
@@ -41,7 +43,62 @@ async def test_cli_agent_spawn_failure_sends_slack(monkeypatch, tmp_path):
     # Error text can vary depending on which preflight step fails first.
 
 
-def test_webhook_success_sends_slack(monkeypatch):
+def test_webhook_listener_enqueues_pubsub(monkeypatch):
+    from ace.webhooks import app as webhook_app
+
+    published = []
+
+    class StubQueue:
+        async def publish(self, *, event, payload, delivery):
+            published.append({"event": event, "payload": payload, "delivery": delivery})
+            return "msg-123"
+
+    # Patch globals used by the FastAPI endpoint.
+    old_queue = webhook_app._queue
+    old_settings = webhook_app._settings
+    webhook_app._queue = StubQueue()
+    webhook_app._settings = type(
+        "SettingsStub",
+        (),
+        {
+            "webhook_service_role": "listener",
+            "debug": False,
+            "slack_bot_token": "",
+            "slack_channel_id": "",
+        },
+    )()
+
+    secret = "test-secret"
+    os.environ["GITHUB_WEBHOOK_SECRET"] = secret
+    body = b"{\"hello\":\"world\"}"
+    mac = hmac.new(secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256)
+    sig = f"sha256={mac.hexdigest()}"
+
+    try:
+        client = TestClient(webhook_app.app)
+        resp = client.post(
+            "/github/webhooks",
+            data=body,
+            headers={
+                "X-Hub-Signature-256": sig,
+                "X-GitHub-Event": "issue_comment",
+                "X-GitHub-Delivery": "delivery-1",
+                "Content-Type": "application/json",
+            },
+        )
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "queued"
+        assert resp.json()["message_id"] == "msg-123"
+        assert published
+        assert published[0]["event"] == "issue_comment"
+        assert published[0]["delivery"] == "delivery-1"
+        assert published[0]["payload"] == {"hello": "world"}
+    finally:
+        webhook_app._queue = old_queue
+        webhook_app._settings = old_settings
+
+
+def test_webhook_worker_success_sends_slack(monkeypatch):
     from ace.webhooks import app as webhook_app
 
     posted = []
@@ -59,30 +116,40 @@ def test_webhook_success_sends_slack(monkeypatch):
                 "repo": "o/r",
             }
 
-    # Patch globals used by the FastAPI endpoint.
     old_handler = webhook_app._handler
     old_notifier = webhook_app._notifier
+    old_settings = webhook_app._settings
     webhook_app._handler = StubHandler()
     webhook_app._notifier = StubNotifier()
+    webhook_app._settings = type(
+        "SettingsStub",
+        (),
+        {
+            "webhook_service_role": "worker",
+            "debug": False,
+            "slack_bot_token": "",
+            "slack_channel_id": "",
+        },
+    )()
 
-    secret = "test-secret"
-    os.environ["GITHUB_WEBHOOK_SECRET"] = secret
-    body = b"{}"
-    mac = hmac.new(secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256)
-    sig = f"sha256={mac.hexdigest()}"
+    envelope = {
+        "message": {
+            "messageId": "1234",
+            "data": base64.b64encode(
+                json.dumps(
+                    {
+                        "event": "issue_comment",
+                        "delivery": "delivery-1",
+                        "payload": {},
+                    }
+                ).encode("utf-8")
+            ).decode("utf-8"),
+        }
+    }
 
     try:
         client = TestClient(webhook_app.app)
-        resp = client.post(
-            "/github/webhooks",
-            data=body,
-            headers={
-                "X-Hub-Signature-256": sig,
-                "X-GitHub-Event": "issue_comment",
-                "X-GitHub-Delivery": "delivery-1",
-                "Content-Type": "application/json",
-            },
-        )
+        resp = client.post("/internal/pubsub/worker", json=envelope)
         assert resp.status_code == 200
         assert posted
         assert "Webhook processed" in posted[0]
@@ -90,3 +157,4 @@ def test_webhook_success_sends_slack(monkeypatch):
     finally:
         webhook_app._handler = old_handler
         webhook_app._notifier = old_notifier
+        webhook_app._settings = old_settings

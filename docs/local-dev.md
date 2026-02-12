@@ -52,9 +52,11 @@ GCP_CREDENTIALS_FILE=gcp-credentials.json
 
 AGENT_WORKSPACE_ROOT=/tmp/agent-hq
 AGENT_ID=ace-dev
-AGENT_EXECUTION_MODE=tmux
-CODEX_CLI_COMMAND=codex --ask-for-approval never --full-auto --sandbox danger-full-access --model {model}
-CLAUDE_CLI_COMMAND=claude --permission-mode dontAsk --dangerously-skip-permissions --model {model}
+AGENT_EXECUTION_MODE=subprocess
+WEBHOOK_SERVICE_ROLE=both
+WEBHOOK_PUBSUB_TOPIC=projects/your-gcp-project-id/topics/appforge-webhooks
+CODEX_CLI_COMMAND=codex --ask-for-approval never --full-auto --sandbox danger-full-access --model {model} {prompt}
+CLAUDE_CLI_COMMAND=claude --permission-mode dontAsk --dangerously-skip-permissions --model {model} {prompt}
 BLOCKED_ASSIGNEE=your-github-username
 
 TASK_WAIT_TIMEOUT_SECONDS=0
@@ -118,15 +120,22 @@ logging.basicConfig(level=logging.DEBUG)
 
 Or set `DEBUG=true` in `.env`.
 
-### Capture tmux output
+### Inspect subprocess task output
 
-Grab the recent output from a tmux-backed CLI agent:
+Inspect issue artifacts directly from the worktree:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/dump_tmux_logs.py --repo appforge-poc --issue 123 --lines 200 --out /tmp/issue-123.log
+ls -la /tmp/agent-hq/worktrees/<repo>/<issue>/
+cat /tmp/agent-hq/worktrees/<repo>/<issue>/ACE_TASK_DONE.json
 ```
 
-If you already know the tmux session name, pass `--session <name>` instead of `--repo/--issue`.
+Use service or local runner logs to inspect CLI stderr/stdout and timeout failures.
+
+Prompt behavior:
+- `{prompt}` is required in both command templates.
+- The prompt payload comes from `prompts/cli_task_prompt.md` (required, no fallback).
+- For Codex, ACE prepends system prompt text to that payload.
+- For Claude, ACE passes system text with `--append-system-prompt`.
 
 ## Common Tasks
 
@@ -168,6 +177,7 @@ ls -la /tmp/agent-hq/worktrees/
 
 ### "Agent execution timeout"
 - Check workspace logs in `/tmp/agent-hq/`
+- Check the issue worktree for `ACE_TASK.md` and `ACE_TASK_DONE.json`
 - Increase timeout in settings if needed
 - Verify agent backend is installed
 
