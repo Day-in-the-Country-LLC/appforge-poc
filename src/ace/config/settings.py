@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     # Webhook service split (listener/worker)
     webhook_service_role: str = os.getenv("WEBHOOK_SERVICE_ROLE", "both").lower()
     webhook_pubsub_topic: str = os.getenv("WEBHOOK_PUBSUB_TOPIC", "")
+    repo_gcp_mapping_path: str = os.getenv("REPO_GCP_MAPPING_PATH", "docs/repo-gcp-mapping.json")
 
     # CLI agent commands
     codex_cli_command: str = os.getenv(

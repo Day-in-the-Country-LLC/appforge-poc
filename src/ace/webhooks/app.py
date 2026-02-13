@@ -33,6 +33,7 @@ from ace.webhooks.lifecycle import (
     normalize_result_resolution,
 )
 from ace.webhooks.pubsub_queue import PubSubWebhookQueue, decode_pubsub_push
+from ace.webhooks.repo_gcp_mapping import load_repo_gcp_mapping
 
 logger = structlog.get_logger(__name__)
 
@@ -41,6 +42,7 @@ _handler: WebhookHandler | None = None
 _notifier: SlackNotifier | None = None
 _queue: PubSubWebhookQueue | None = None
 _settings: Settings | None = None
+_repo_gcp_mapping: dict[str, str] | None = None
 
 
 @app.on_event("startup")
@@ -48,6 +50,7 @@ async def _startup() -> None:
     settings = _get_settings()
     configure_logging(debug=settings.debug)
     _validate_logging_configuration()
+    _get_repo_gcp_mapping()
     global _notifier
     _notifier = SlackNotifier.from_settings(settings)
     logger.info("webhook_listener_started", role=settings.webhook_service_role)
@@ -76,6 +79,16 @@ def _get_queue() -> PubSubWebhookQueue:
         return _queue
     _queue = PubSubWebhookQueue.from_settings(_get_settings())
     return _queue
+
+
+def _get_repo_gcp_mapping() -> dict[str, str]:
+    global _repo_gcp_mapping
+    if _repo_gcp_mapping is not None:
+        return _repo_gcp_mapping
+    settings = _get_settings()
+    path = getattr(settings, "repo_gcp_mapping_path", "docs/repo-gcp-mapping.json")
+    _repo_gcp_mapping = load_repo_gcp_mapping(path)
+    return _repo_gcp_mapping
 
 
 def _get_handler() -> WebhookHandler:
@@ -150,12 +163,16 @@ async def github_webhooks(request: Request) -> dict[str, Any]:
 
     payload = await request.json()
     settings = _get_settings()
-    context = build_lifecycle_context(
-        event=event,
-        payload=payload,
-        delivery=delivery,
-        default_project=getattr(settings, "github_project_name", None),
-    )
+    try:
+        context = build_lifecycle_context(
+            event=event,
+            payload=payload,
+            delivery=delivery,
+            default_project=getattr(settings, "github_project_name", None),
+            repo_gcp_mapping=_get_repo_gcp_mapping(),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"{exc}") from exc
     queued_at = _utc_now_iso()
     log_lifecycle_event(logger, STAGE_WEBHOOK_RECEIVED, context)
 
@@ -167,6 +184,7 @@ async def github_webhooks(request: Request) -> dict[str, Any]:
             workflow_id=context.workflow_id,
             issue_key=context.issue_key,
             project=context.project,
+            target_gcp_project=context.target_gcp_project,
             action=context.action,
             queued_at=queued_at,
         )
@@ -217,16 +235,21 @@ async def pubsub_worker(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"{exc}") from exc
 
     settings = _get_settings()
-    context = build_lifecycle_context(
-        event=queued.event,
-        payload=queued.payload,
-        delivery=queued.delivery,
-        workflow_id=queued.workflow_id,
-        default_project=getattr(settings, "github_project_name", None),
-        project=queued.project,
-        issue_key=queued.issue_key,
-        action=queued.action,
-    )
+    try:
+        context = build_lifecycle_context(
+            event=queued.event,
+            payload=queued.payload,
+            delivery=queued.delivery,
+            workflow_id=queued.workflow_id,
+            default_project=getattr(settings, "github_project_name", None),
+            project=queued.project,
+            issue_key=queued.issue_key,
+            target_gcp_project=queued.target_gcp_project,
+            repo_gcp_mapping=_get_repo_gcp_mapping(),
+            action=queued.action,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"{exc}") from exc
     dequeued_at = _utc_now_iso()
     queue_delay_ms = _queue_delay_ms(queued_at=queued.queued_at, dequeued_at=dequeued_at)
     log_lifecycle_event(

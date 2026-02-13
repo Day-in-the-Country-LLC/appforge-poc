@@ -92,6 +92,7 @@ Use the same value in:
 - `GITHUB_ORG`
 - `GITHUB_PROJECT_NAME`
 - `WEBHOOK_PUBSUB_TOPIC` (`projects/<project>/topics/<topic>`)
+- `REPO_GCP_MAPPING_PATH` (default: `docs/repo-gcp-mapping.json`)
 - `ACE_LOG_FORMAT=json` (required on Cloud Run)
 
 Optional (notifications):
@@ -111,6 +112,24 @@ Listener-only required:
 ## Project Name
 
 `GITHUB_PROJECT_NAME` must match the **exact title** of the GitHub Project V2 board (case sensitive).
+
+## Repo To GCP Mapping
+
+`REPO_GCP_MAPPING_PATH` points to a JSON file that maps GitHub repos to target GCP projects.
+
+Expected format:
+
+```json
+[
+  {
+    "repo": "Day-in-the-Country-LLC/digido",
+    "gcp_project": "digido-assistant"
+  }
+]
+```
+
+The webhook app loads this file on startup and fails fast if the file is missing/invalid.
+For mapped issue events, lifecycle logs include `target_gcp_project`.
 
 ## GitHub App Settings Checklist
 
@@ -202,6 +221,7 @@ Pub/Sub payload/envelope schema (v2):
 - `correlation.workflow_id`
 - `correlation.issue_key`
 - `correlation.project`
+- `correlation.target_gcp_project`
 - `correlation.action`
 
 Pub/Sub message attributes carry the same correlation values when available:
@@ -210,6 +230,7 @@ Pub/Sub message attributes carry the same correlation values when available:
 - `workflow_id`
 - `issue_key`
 - `project`
+- `target_gcp_project`
 - `action`
 - `queued_at`
 
@@ -220,6 +241,7 @@ Worker lifecycle logs include:
 - `delivery_id`
 - `issue_key`
 - `project`
+- `target_gcp_project`
 - `queued_at`
 - `dequeued_at`
 - `queue_delay_ms`

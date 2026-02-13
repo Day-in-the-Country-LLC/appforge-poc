@@ -58,6 +58,7 @@ def test_webhook_listener_enqueues_pubsub(monkeypatch):
             workflow_id=None,
             issue_key=None,
             project=None,
+            target_gcp_project=None,
             action=None,
             queued_at=None,
         ):
@@ -69,6 +70,7 @@ def test_webhook_listener_enqueues_pubsub(monkeypatch):
                     "workflow_id": workflow_id,
                     "issue_key": issue_key,
                     "project": project,
+                    "target_gcp_project": target_gcp_project,
                     "action": action,
                     "queued_at": queued_at,
                 }
@@ -78,13 +80,16 @@ def test_webhook_listener_enqueues_pubsub(monkeypatch):
     # Patch globals used by the FastAPI endpoint.
     old_queue = webhook_app._queue
     old_settings = webhook_app._settings
+    old_repo_gcp_mapping = webhook_app._repo_gcp_mapping
     webhook_app._queue = StubQueue()
+    webhook_app._repo_gcp_mapping = {"day-in-the-country-llc/digido": "digido-assistant"}
     webhook_app._settings = type(
         "SettingsStub",
         (),
         {
             "webhook_service_role": "listener",
             "github_project_name": "Appforge",
+            "repo_gcp_mapping_path": "docs/repo-gcp-mapping.json",
             "debug": False,
             "slack_bot_token": "",
             "slack_channel_id": "",
@@ -124,12 +129,14 @@ def test_webhook_listener_enqueues_pubsub(monkeypatch):
         assert published[0]["workflow_id"] == "delivery-1"
         assert published[0]["issue_key"] == "Day-in-the-Country-LLC/digido#9"
         assert published[0]["project"] == "Appforge"
+        assert published[0]["target_gcp_project"] == "digido-assistant"
         assert published[0]["action"] == "created"
         assert isinstance(published[0]["queued_at"], str)
         assert published[0]["payload"]["issue"]["number"] == 9
     finally:
         webhook_app._queue = old_queue
         webhook_app._settings = old_settings
+        webhook_app._repo_gcp_mapping = old_repo_gcp_mapping
 
 
 def test_webhook_worker_success_sends_slack(monkeypatch):
@@ -153,13 +160,16 @@ def test_webhook_worker_success_sends_slack(monkeypatch):
     old_handler = webhook_app._handler
     old_notifier = webhook_app._notifier
     old_settings = webhook_app._settings
+    old_repo_gcp_mapping = webhook_app._repo_gcp_mapping
     webhook_app._handler = StubHandler()
     webhook_app._notifier = StubNotifier()
+    webhook_app._repo_gcp_mapping = {"day-in-the-country-llc/digido": "digido-assistant"}
     webhook_app._settings = type(
         "SettingsStub",
         (),
         {
             "webhook_service_role": "worker",
+            "repo_gcp_mapping_path": "docs/repo-gcp-mapping.json",
             "debug": False,
             "slack_bot_token": "",
             "slack_channel_id": "",
@@ -180,6 +190,7 @@ def test_webhook_worker_success_sends_slack(monkeypatch):
                             "workflow_id": "delivery-1",
                             "issue_key": "Day-in-the-Country-LLC/digido#123",
                             "project": "Appforge",
+                            "target_gcp_project": "digido-assistant",
                             "action": "created",
                         },
                         "payload": {},
@@ -191,6 +202,7 @@ def test_webhook_worker_success_sends_slack(monkeypatch):
                 "workflow_id": "delivery-1",
                 "issue_key": "Day-in-the-Country-LLC/digido#123",
                 "project": "Appforge",
+                "target_gcp_project": "digido-assistant",
                 "action": "created",
             },
         }
@@ -212,6 +224,7 @@ def test_webhook_worker_success_sends_slack(monkeypatch):
         webhook_app._handler = old_handler
         webhook_app._notifier = old_notifier
         webhook_app._settings = old_settings
+        webhook_app._repo_gcp_mapping = old_repo_gcp_mapping
 
 
 def test_webhook_listener_lifecycle_logs(monkeypatch):
@@ -242,6 +255,7 @@ def test_webhook_listener_lifecycle_logs(monkeypatch):
             workflow_id=None,
             issue_key=None,
             project=None,
+            target_gcp_project=None,
             action=None,
             queued_at=None,
         ):
@@ -250,14 +264,17 @@ def test_webhook_listener_lifecycle_logs(monkeypatch):
     old_logger = webhook_app.logger
     old_queue = webhook_app._queue
     old_settings = webhook_app._settings
+    old_repo_gcp_mapping = webhook_app._repo_gcp_mapping
     webhook_app.logger = StubLogger()
     webhook_app._queue = StubQueue()
+    webhook_app._repo_gcp_mapping = {"day-in-the-country-llc/digido": "digido-assistant"}
     webhook_app._settings = type(
         "SettingsStub",
         (),
         {
             "webhook_service_role": "listener",
             "github_project_name": "Appforge",
+            "repo_gcp_mapping_path": "docs/repo-gcp-mapping.json",
             "webhook_pubsub_topic": "projects/p/topics/t",
             "debug": False,
             "slack_bot_token": "",
@@ -298,12 +315,14 @@ def test_webhook_listener_lifecycle_logs(monkeypatch):
             assert fields["workflow_id"] == "delivery-42"
             assert fields["issue_key"] == "Day-in-the-Country-LLC/digido#34"
             assert fields["project"] == "Appforge"
+            assert fields["target_gcp_project"] == "digido-assistant"
         assert lifecycle[1]["fields"]["pubsub_message_id"] == "msg-xyz"
         assert isinstance(lifecycle[1]["fields"]["queued_at"], str)
     finally:
         webhook_app.logger = old_logger
         webhook_app._queue = old_queue
         webhook_app._settings = old_settings
+        webhook_app._repo_gcp_mapping = old_repo_gcp_mapping
 
 
 def test_webhook_worker_lifecycle_logs_blocked(monkeypatch):
@@ -332,15 +351,18 @@ def test_webhook_worker_lifecycle_logs_blocked(monkeypatch):
     old_handler = webhook_app._handler
     old_notifier = webhook_app._notifier
     old_settings = webhook_app._settings
+    old_repo_gcp_mapping = webhook_app._repo_gcp_mapping
     webhook_app.logger = StubLogger()
     webhook_app._handler = StubHandler()
     webhook_app._notifier = None
+    webhook_app._repo_gcp_mapping = {"day-in-the-country-llc/digido": "digido-assistant"}
     webhook_app._settings = type(
         "SettingsStub",
         (),
         {
             "webhook_service_role": "worker",
             "github_project_name": "Appforge",
+            "repo_gcp_mapping_path": "docs/repo-gcp-mapping.json",
             "debug": False,
             "slack_bot_token": "",
             "slack_channel_id": "",
@@ -362,6 +384,7 @@ def test_webhook_worker_lifecycle_logs_blocked(monkeypatch):
                             "workflow_id": "wf-11",
                             "issue_key": "Day-in-the-Country-LLC/digido#34",
                             "project": "Appforge",
+                            "target_gcp_project": "digido-assistant",
                             "action": "edited",
                         },
                         "payload": {
@@ -399,6 +422,7 @@ def test_webhook_worker_lifecycle_logs_blocked(monkeypatch):
             assert fields["workflow_id"] == "wf-11"
             assert fields["delivery_id"] == "delivery-11"
             assert fields["issue_key"] == "Day-in-the-Country-LLC/digido#34"
+            assert fields["target_gcp_project"] == "digido-assistant"
         assert lifecycle[0]["fields"]["pubsub_message_id"] == "1234"
         assert lifecycle[0]["fields"]["queue_delay_ms"] is not None
 
@@ -408,6 +432,7 @@ def test_webhook_worker_lifecycle_logs_blocked(monkeypatch):
         webhook_app._handler = old_handler
         webhook_app._notifier = old_notifier
         webhook_app._settings = old_settings
+        webhook_app._repo_gcp_mapping = old_repo_gcp_mapping
 
 
 def test_webhook_worker_failure_logs_resolution(monkeypatch):
@@ -436,15 +461,18 @@ def test_webhook_worker_failure_logs_resolution(monkeypatch):
     old_handler = webhook_app._handler
     old_notifier = webhook_app._notifier
     old_settings = webhook_app._settings
+    old_repo_gcp_mapping = webhook_app._repo_gcp_mapping
     webhook_app.logger = StubLogger()
     webhook_app._handler = StubHandler()
     webhook_app._notifier = None
+    webhook_app._repo_gcp_mapping = {"day-in-the-country-llc/digido": "digido-assistant"}
     webhook_app._settings = type(
         "SettingsStub",
         (),
         {
             "webhook_service_role": "worker",
             "github_project_name": "Appforge",
+            "repo_gcp_mapping_path": "docs/repo-gcp-mapping.json",
             "debug": False,
             "slack_bot_token": "",
             "slack_channel_id": "",
@@ -465,6 +493,7 @@ def test_webhook_worker_failure_logs_resolution(monkeypatch):
                             "workflow_id": "wf-1",
                             "issue_key": "Day-in-the-Country-LLC/digido#34",
                             "project": "Appforge",
+                            "target_gcp_project": "digido-assistant",
                         },
                         "payload": {"issue": {"number": 34}},
                     }
@@ -485,3 +514,4 @@ def test_webhook_worker_failure_logs_resolution(monkeypatch):
         webhook_app._handler = old_handler
         webhook_app._notifier = old_notifier
         webhook_app._settings = old_settings
+        webhook_app._repo_gcp_mapping = old_repo_gcp_mapping

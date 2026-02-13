@@ -21,6 +21,7 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev
 
 COPY src/ src/
+COPY docs/repo-gcp-mapping.json docs/repo-gcp-mapping.json
 COPY prompts/ prompts/
 COPY skills/ /root/.codex/skills/
 COPY skills/ /root/.claude/skills/

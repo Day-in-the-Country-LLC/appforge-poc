@@ -38,6 +38,7 @@ async def test_publish_includes_correlation_payload_and_attributes():
         workflow_id="wf-1",
         issue_key="Day-in-the-Country-LLC/digido#34",
         project="Appforge",
+        target_gcp_project="digido-assistant",
         action="created",
         queued_at="2026-02-12T18:00:00+00:00",
     )
@@ -49,6 +50,7 @@ async def test_publish_includes_correlation_payload_and_attributes():
     assert call["attrs"]["workflow_id"] == "wf-1"
     assert call["attrs"]["issue_key"] == "Day-in-the-Country-LLC/digido#34"
     assert call["attrs"]["project"] == "Appforge"
+    assert call["attrs"]["target_gcp_project"] == "digido-assistant"
     assert call["attrs"]["queued_at"] == "2026-02-12T18:00:00+00:00"
 
     envelope = json.loads(call["body"].decode("utf-8"))
@@ -58,6 +60,7 @@ async def test_publish_includes_correlation_payload_and_attributes():
     assert envelope["correlation"]["workflow_id"] == "wf-1"
     assert envelope["correlation"]["issue_key"] == "Day-in-the-Country-LLC/digido#34"
     assert envelope["correlation"]["project"] == "Appforge"
+    assert envelope["correlation"]["target_gcp_project"] == "digido-assistant"
     assert envelope["correlation"]["action"] == "created"
 
 
@@ -71,6 +74,7 @@ def test_decode_pubsub_push_reads_correlation_fields():
         "correlation": {
             "issue_key": "Day-in-the-Country-LLC/digido#99",
             "project": "Appforge",
+            "target_gcp_project": "digido-assistant",
             "action": "edited",
         },
     }
@@ -83,6 +87,7 @@ def test_decode_pubsub_push_reads_correlation_fields():
                 "workflow_id": "wf-2",
                 "issue_key": "Day-in-the-Country-LLC/digido#99",
                 "project": "Appforge",
+                "target_gcp_project": "digido-assistant",
                 "queued_at": "2026-02-12T18:00:00+00:00",
             },
         }
@@ -94,6 +99,7 @@ def test_decode_pubsub_push_reads_correlation_fields():
     assert queued.workflow_id == "wf-2"
     assert queued.issue_key == "Day-in-the-Country-LLC/digido#99"
     assert queued.project == "Appforge"
+    assert queued.target_gcp_project == "digido-assistant"
     assert queued.action == "edited"
     assert queued.queued_at == "2026-02-12T18:00:00+00:00"
 
@@ -118,4 +124,5 @@ def test_decode_pubsub_push_accepts_legacy_envelope():
     assert queued.workflow_id == "wf-legacy"
     assert queued.issue_key is None
     assert queued.project is None
+    assert queued.target_gcp_project is None
     assert queued.queued_at is None

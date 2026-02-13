@@ -21,6 +21,7 @@ class QueuedWebhookEvent:
     workflow_id: str | None = None
     issue_key: str | None = None
     project: str | None = None
+    target_gcp_project: str | None = None
     action: str | None = None
     queued_at: str | None = None
     message_id: str | None = None
@@ -55,6 +56,7 @@ class PubSubWebhookQueue:
         workflow_id: str | None = None,
         issue_key: str | None = None,
         project: str | None = None,
+        target_gcp_project: str | None = None,
         action: str | None = None,
         queued_at: str | None = None,
     ) -> str:
@@ -63,6 +65,7 @@ class PubSubWebhookQueue:
             "workflow_id": workflow_id,
             "issue_key": issue_key,
             "project": project,
+            "target_gcp_project": target_gcp_project,
             "action": action,
         }
         envelope = {
@@ -85,6 +88,8 @@ class PubSubWebhookQueue:
             attrs["issue_key"] = issue_key
         if project:
             attrs["project"] = project
+        if target_gcp_project:
+            attrs["target_gcp_project"] = target_gcp_project
         if action:
             attrs["action"] = action
         if queued_at:
@@ -151,6 +156,10 @@ def decode_pubsub_push(body: dict[str, Any]) -> QueuedWebhookEvent:
         correlation.get("project"),
         attrs.get("project"),
     )
+    target_gcp_project = _first_string(
+        correlation.get("target_gcp_project"),
+        attrs.get("target_gcp_project"),
+    )
     action = _first_string(
         correlation.get("action"),
         payload.get("action") if isinstance(payload, dict) else None,
@@ -176,6 +185,7 @@ def decode_pubsub_push(body: dict[str, Any]) -> QueuedWebhookEvent:
         workflow_id=workflow_id,
         issue_key=issue_key,
         project=project,
+        target_gcp_project=target_gcp_project,
         action=action,
         queued_at=queued_at,
         message_id=message_id,

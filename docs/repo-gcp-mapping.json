@@ -1,0 +1,50 @@
+[
+  {
+    "repo": "Day-in-the-Country-LLC/appforge-poc",
+    "gcp_project": "appforge-483920"
+  },
+  {
+    "repo": "Day-in-the-Country-LLC/ditc_terraform",
+    "gcp_project": "appforge-483920"
+  },
+  {
+    "repo": "Day-in-the-Country-LLC/appforge-mcp",
+    "gcp_project": "appforge-483920"
+  },
+  {
+    "repo": "Day-in-the-Country-LLC/appforge-ads-optimization",
+    "gcp_project": "appforge-483920"
+  },
+  {
+    "repo": "Day-in-the-Country-LLC/digido",
+    "gcp_project": "digido-assistant"
+  },
+  {
+    "repo": "Day-in-the-Country-LLC/digido-digital-assistant",
+    "gcp_project": "digido-assistant"
+  },
+  {
+    "repo": "Day-in-the-Country-LLC/digido-mcp",
+    "gcp_project": "digido-assistant"
+  },
+  {
+    "repo": "Day-in-the-Country-LLC/irlsc",
+    "gcp_project": "irlsinglesclub"
+  },
+  {
+    "repo": "Day-in-the-Country-LLC/irlsc-events",
+    "gcp_project": "irlsinglesclub"
+  },
+  {
+    "repo": "Day-in-the-Country-LLC/irlsc-admin",
+    "gcp_project": "irlsinglesclub"
+  },
+  {
+    "repo": "Day-in-the-Country-LLC/irlsc-marketing",
+    "gcp_project": "irlsinglesclub"
+  },
+  {
+    "repo": "Day-in-the-Country-LLC/belle_and_suds",
+    "gcp_project": "belleandsuds"
+  }
+]

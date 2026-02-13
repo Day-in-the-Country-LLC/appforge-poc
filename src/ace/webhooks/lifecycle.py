@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 import structlog
@@ -29,6 +29,7 @@ class WebhookLifecycleContext:
     action: str | None
     project: str | None
     issue_key: str | None
+    target_gcp_project: str | None
     delivery_id: str | None
     workflow_id: str
 
@@ -42,6 +43,8 @@ def build_lifecycle_context(
     default_project: str | None = None,
     project: str | None = None,
     issue_key: str | None = None,
+    target_gcp_project: str | None = None,
+    repo_gcp_mapping: Mapping[str, str] | None = None,
     action: str | None = None,
 ) -> WebhookLifecycleContext:
     """Build a normalized lifecycle context for listener and worker logs."""
@@ -70,11 +73,19 @@ def build_lifecycle_context(
     else:
         resolved_issue_key = resolved_issue_key.strip()
 
+    resolved_target_gcp_project = _resolve_target_gcp_project(
+        payload=payload,
+        issue_key=resolved_issue_key,
+        target_gcp_project=target_gcp_project,
+        repo_gcp_mapping=repo_gcp_mapping,
+    )
+
     return WebhookLifecycleContext(
         event=event,
         action=resolved_action,
         project=resolved_project,
         issue_key=resolved_issue_key,
+        target_gcp_project=resolved_target_gcp_project,
         delivery_id=normalized_delivery,
         workflow_id=resolved_workflow_id,
     )
@@ -94,6 +105,7 @@ def log_lifecycle_event(
         action=context.action,
         project=context.project,
         issue_key=context.issue_key,
+        target_gcp_project=context.target_gcp_project,
         delivery_id=context.delivery_id,
         workflow_id=context.workflow_id,
     )
@@ -167,6 +179,39 @@ def _extract_project(payload: dict[str, Any], *, default_project: str | None) ->
     return None
 
 
+def _resolve_target_gcp_project(
+    *,
+    payload: dict[str, Any],
+    issue_key: str | None,
+    target_gcp_project: str | None,
+    repo_gcp_mapping: Mapping[str, str] | None,
+) -> str | None:
+    if target_gcp_project is not None:
+        if not isinstance(target_gcp_project, str) or not target_gcp_project.strip():
+            raise ValueError(
+                "❌ ERROR: target_gcp_project must be a non-empty string when provided"
+            )
+        return target_gcp_project.strip()
+
+    if repo_gcp_mapping is None:
+        return None
+
+    repo_owner, repo_name = _extract_repository(payload)
+    if (not repo_owner or not repo_name) and issue_key:
+        repo_owner, repo_name = _extract_repository_from_issue_key(issue_key)
+    if not repo_owner or not repo_name:
+        return None
+
+    repo_key = f"{repo_owner}/{repo_name}".lower()
+    mapped = repo_gcp_mapping.get(repo_key)
+    if not mapped:
+        raise ValueError(
+            "❌ ERROR: repo_gcp_project_mapping_missing: "
+            f"no mapping found for repository {repo_owner}/{repo_name}"
+        )
+    return mapped
+
+
 def _extract_issue_key(payload: dict[str, Any]) -> str | None:
     repo_owner, repo_name = _extract_repository(payload)
     issue = payload.get("issue")
@@ -197,8 +242,37 @@ def _extract_issue_key(payload: dict[str, Any]) -> str | None:
     return f"{repo_owner}/{repo_name}#{number_int}"
 
 
+def _extract_repository_from_issue_key(issue_key: str) -> tuple[str | None, str | None]:
+    if "#" not in issue_key:
+        return None, None
+    repo_part, _sep, _number = issue_key.partition("#")
+    if "/" not in repo_part:
+        return None, None
+    owner, _slash, name = repo_part.partition("/")
+    owner = owner.strip()
+    name = name.strip()
+    if not owner or not name:
+        return None, None
+    return owner, name
+
+
 def _extract_repository(payload: dict[str, Any]) -> tuple[str | None, str | None]:
     repo = payload.get("repository")
+    resolved = _parse_repository(repo)
+    if resolved != (None, None):
+        return resolved
+
+    item = payload.get("projects_v2_item") or payload.get("project_v2_item") or {}
+    if isinstance(item, dict):
+        content = item.get("content")
+        if isinstance(content, dict):
+            resolved = _parse_repository(content.get("repository"))
+            if resolved != (None, None):
+                return resolved
+    return None, None
+
+
+def _parse_repository(repo: Any) -> tuple[str | None, str | None]:
     if not isinstance(repo, dict):
         return None, None
 
