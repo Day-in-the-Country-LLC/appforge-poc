@@ -151,6 +151,9 @@ gcp-credentials.json
 gcp-creds.json
 *.pem
 
+# Infrastructure mapping (contains GCP project IDs and repo inventory)
+docs/repo-gcp-mapping.json
+
 # Spyder project settings
 .spyderproject
 .spyproject

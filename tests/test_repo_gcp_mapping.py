@@ -10,8 +10,8 @@ def test_load_repo_gcp_mapping_happy_path(tmp_path):
     mapping_file.write_text(
         json.dumps(
             [
-                {"repo": "Day-in-the-Country-LLC/digido", "gcp_project": "digido-assistant"},
-                {"repo": "Day-in-the-Country-LLC/appforge-poc", "gcp_project": "appforge-483920"},
+                {"repo": "Acme-Corp/widget-api", "gcp_project": "widget-prod-123456"},
+                {"repo": "Acme-Corp/platform-tools", "gcp_project": "platform-tools-789012"},
             ]
         ),
         encoding="utf-8",
@@ -19,9 +19,47 @@ def test_load_repo_gcp_mapping_happy_path(tmp_path):
 
     mapping = load_repo_gcp_mapping(str(mapping_file))
     assert mapping == {
-        "day-in-the-country-llc/digido": "digido-assistant",
-        "day-in-the-country-llc/appforge-poc": "appforge-483920",
+        "acme-corp/widget-api": "widget-prod-123456",
+        "acme-corp/platform-tools": "platform-tools-789012",
     }
+
+
+def test_load_repo_gcp_mapping_with_valid_color(tmp_path):
+    mapping_file = tmp_path / "repo-gcp.json"
+    mapping_file.write_text(
+        json.dumps(
+            [
+                {
+                    "repo": "Acme-Corp/widget-api",
+                    "gcp_project": "widget-prod-123456",
+                    "color": "7FB3FF",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    mapping = load_repo_gcp_mapping(str(mapping_file))
+    assert mapping == {"acme-corp/widget-api": "widget-prod-123456"}
+
+
+def test_load_repo_gcp_mapping_with_invalid_color_fails(tmp_path):
+    mapping_file = tmp_path / "repo-gcp.json"
+    mapping_file.write_text(
+        json.dumps(
+            [
+                {
+                    "repo": "Acme-Corp/widget-api",
+                    "gcp_project": "widget-prod-123456",
+                    "color": "ZZZZZZ",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="color must be a valid hex color"):
+        load_repo_gcp_mapping(str(mapping_file))
 
 
 def test_load_repo_gcp_mapping_duplicate_repo_mismatch_fails(tmp_path):
@@ -29,8 +67,8 @@ def test_load_repo_gcp_mapping_duplicate_repo_mismatch_fails(tmp_path):
     mapping_file.write_text(
         json.dumps(
             [
-                {"repo": "Day-in-the-Country-LLC/digido", "gcp_project": "digido-assistant"},
-                {"repo": "day-in-the-country-llc/digido", "gcp_project": "other-project"},
+                {"repo": "Acme-Corp/widget-api", "gcp_project": "widget-prod-123456"},
+                {"repo": "acme-corp/widget-api", "gcp_project": "other-project"},
             ]
         ),
         encoding="utf-8",

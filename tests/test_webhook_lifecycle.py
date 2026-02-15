@@ -17,18 +17,18 @@ def test_build_lifecycle_context_extracts_issue_and_project():
         event="issue_comment",
         payload={
             "action": "created",
-            "project": {"title": "Appforge"},
+            "project": {"title": "Acme Platform"},
             "issue": {"number": 12},
-            "repository": {"name": "digido", "owner": {"login": "Day-in-the-Country-LLC"}},
+            "repository": {"name": "widget-api", "owner": {"login": "Acme-Corp"}},
         },
         delivery="delivery-123",
-        repo_gcp_mapping={"day-in-the-country-llc/digido": "digido-assistant"},
+        repo_gcp_mapping={"acme-corp/widget-api": "widget-prod-123456"},
     )
     assert context.event == "issue_comment"
     assert context.action == "created"
-    assert context.project == "Appforge"
-    assert context.issue_key == "Day-in-the-Country-LLC/digido#12"
-    assert context.target_gcp_project == "digido-assistant"
+    assert context.project == "Acme Platform"
+    assert context.issue_key == "Acme-Corp/widget-api#12"
+    assert context.target_gcp_project == "widget-prod-123456"
     assert context.delivery_id == "delivery-123"
     assert context.workflow_id == "delivery-123"
 
@@ -50,14 +50,14 @@ def test_build_lifecycle_context_uses_explicit_correlation_overrides():
         event="projects_v2_item",
         payload={},
         delivery="delivery-1",
-        project="Appforge",
-        issue_key="Day-in-the-Country-LLC/digido#34",
-        target_gcp_project="digido-assistant",
+        project="Acme Platform",
+        issue_key="Acme-Corp/widget-api#34",
+        target_gcp_project="widget-prod-123456",
         action="edited",
     )
-    assert context.project == "Appforge"
-    assert context.issue_key == "Day-in-the-Country-LLC/digido#34"
-    assert context.target_gcp_project == "digido-assistant"
+    assert context.project == "Acme Platform"
+    assert context.issue_key == "Acme-Corp/widget-api#34"
+    assert context.target_gcp_project == "widget-prod-123456"
     assert context.action == "edited"
 
 
@@ -69,11 +69,11 @@ def test_build_lifecycle_context_fails_for_unmapped_repo():
                 "issue": {"number": 12},
                 "repository": {
                     "name": "missing-repo",
-                    "owner": {"login": "Day-in-the-Country-LLC"},
+                    "owner": {"login": "Acme-Corp"},
                 },
             },
             delivery="delivery-123",
-            repo_gcp_mapping={"day-in-the-country-llc/digido": "digido-assistant"},
+            repo_gcp_mapping={"acme-corp/widget-api": "widget-prod-123456"},
         )
 
 

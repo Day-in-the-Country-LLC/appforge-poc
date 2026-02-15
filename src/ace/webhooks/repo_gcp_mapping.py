@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+
+_HEX_COLOR_RE = re.compile(r"^#?(?:[0-9a-fA-F]{3}){1,2}$")
 
 
 def load_repo_gcp_mapping(path: str) -> dict[str, str]:
@@ -42,6 +45,14 @@ def load_repo_gcp_mapping(path: str) -> dict[str, str]:
                 "❌ ERROR: repo_gcp_mapping_invalid_entry["
                 f"{index}]: gcp_project must be a non-empty string"
             )
+
+        color = entry.get("color")
+        if color is not None:
+            if not isinstance(color, str) or not _HEX_COLOR_RE.match(color.strip()):
+                raise ValueError(
+                    "❌ ERROR: repo_gcp_mapping_invalid_entry["
+                    f"{index}]: color must be a valid hex color (e.g. 'DCDCDC' or '#DCD')"
+                )
 
         normalized_repo = repo.strip().lower()
         normalized_project = gcp_project.strip()

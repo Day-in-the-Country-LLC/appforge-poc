@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import signal
 import subprocess
 import tempfile
 import time
@@ -83,6 +84,9 @@ class CliAgent:
 
             env_exports["DISABLE_LOGIN_COMMAND"] = "1"
             env_exports["FORCE_CODE_TERMINAL"] = "1"
+            # Ensure HOME is always set so CLI tools resolve ~/.claude/skills/
+            # and ~/.codex/skills/ for skill discovery.
+            env_exports.setdefault("HOME", os.environ.get("HOME", "/root"))
 
             if token:
                 ensure_mcp_config(workdir, self.backend, token, self.settings)
@@ -330,6 +334,9 @@ class CliAgent:
                 env=env,
                 stdout=stdout_capture,
                 stderr=stderr_capture,
+                # Run in its own process group so timeout/done-file termination
+                # can kill spawned child processes as well.
+                start_new_session=True,
             )
             try:
                 while True:
@@ -369,11 +376,32 @@ class CliAgent:
     def _terminate_process(self, proc: subprocess.Popen[bytes], grace_seconds: float = 5.0) -> None:
         if proc.poll() is not None:
             return
-        proc.terminate()
+        pgid: int | None = None
+        if hasattr(os, "getpgid"):
+            try:
+                pgid = os.getpgid(proc.pid)
+            except OSError:
+                pgid = None
+
+        use_pgid = pgid is not None and pgid > 0 and hasattr(os, "killpg")
+
+        try:
+            if use_pgid:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            return
         try:
             proc.wait(timeout=grace_seconds)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            try:
+                if use_pgid:
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except ProcessLookupError:
+                pass
             proc.wait(timeout=grace_seconds)
 
     def _load_done_marker(self, done_path: Path) -> dict[str, Any]:

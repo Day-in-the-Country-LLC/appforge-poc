@@ -82,13 +82,13 @@ def test_webhook_listener_enqueues_pubsub(monkeypatch):
     old_settings = webhook_app._settings
     old_repo_gcp_mapping = webhook_app._repo_gcp_mapping
     webhook_app._queue = StubQueue()
-    webhook_app._repo_gcp_mapping = {"day-in-the-country-llc/digido": "digido-assistant"}
+    webhook_app._repo_gcp_mapping = {"acme-corp/widget-api": "widget-prod-123456"}
     webhook_app._settings = type(
         "SettingsStub",
         (),
         {
             "webhook_service_role": "listener",
-            "github_project_name": "Appforge",
+            "github_project_name": "Acme Platform",
             "repo_gcp_mapping_path": "docs/repo-gcp-mapping.json",
             "debug": False,
             "slack_bot_token": "",
@@ -102,7 +102,7 @@ def test_webhook_listener_enqueues_pubsub(monkeypatch):
         {
             "action": "created",
             "issue": {"number": 9},
-            "repository": {"name": "digido", "owner": {"login": "Day-in-the-Country-LLC"}},
+            "repository": {"name": "widget-api", "owner": {"login": "Acme-Corp"}},
         }
     ).encode("utf-8")
     mac = hmac.new(secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256)
@@ -127,9 +127,9 @@ def test_webhook_listener_enqueues_pubsub(monkeypatch):
         assert published[0]["event"] == "issue_comment"
         assert published[0]["delivery"] == "delivery-1"
         assert published[0]["workflow_id"] == "delivery-1"
-        assert published[0]["issue_key"] == "Day-in-the-Country-LLC/digido#9"
-        assert published[0]["project"] == "Appforge"
-        assert published[0]["target_gcp_project"] == "digido-assistant"
+        assert published[0]["issue_key"] == "Acme-Corp/widget-api#9"
+        assert published[0]["project"] == "Acme Platform"
+        assert published[0]["target_gcp_project"] == "widget-prod-123456"
         assert published[0]["action"] == "created"
         assert isinstance(published[0]["queued_at"], str)
         assert published[0]["payload"]["issue"]["number"] == 9
@@ -163,7 +163,7 @@ def test_webhook_worker_success_sends_slack(monkeypatch):
     old_repo_gcp_mapping = webhook_app._repo_gcp_mapping
     webhook_app._handler = StubHandler()
     webhook_app._notifier = StubNotifier()
-    webhook_app._repo_gcp_mapping = {"day-in-the-country-llc/digido": "digido-assistant"}
+    webhook_app._repo_gcp_mapping = {"acme-corp/widget-api": "widget-prod-123456"}
     webhook_app._settings = type(
         "SettingsStub",
         (),
@@ -188,9 +188,9 @@ def test_webhook_worker_success_sends_slack(monkeypatch):
                         "correlation": {
                             "delivery_id": "delivery-1",
                             "workflow_id": "delivery-1",
-                            "issue_key": "Day-in-the-Country-LLC/digido#123",
-                            "project": "Appforge",
-                            "target_gcp_project": "digido-assistant",
+                            "issue_key": "Acme-Corp/widget-api#123",
+                            "project": "Acme Platform",
+                            "target_gcp_project": "widget-prod-123456",
                             "action": "created",
                         },
                         "payload": {},
@@ -200,9 +200,9 @@ def test_webhook_worker_success_sends_slack(monkeypatch):
             "attributes": {
                 "delivery_id": "delivery-1",
                 "workflow_id": "delivery-1",
-                "issue_key": "Day-in-the-Country-LLC/digido#123",
-                "project": "Appforge",
-                "target_gcp_project": "digido-assistant",
+                "issue_key": "Acme-Corp/widget-api#123",
+                "project": "Acme Platform",
+                "target_gcp_project": "widget-prod-123456",
                 "action": "created",
             },
         }
@@ -267,13 +267,13 @@ def test_webhook_listener_lifecycle_logs(monkeypatch):
     old_repo_gcp_mapping = webhook_app._repo_gcp_mapping
     webhook_app.logger = StubLogger()
     webhook_app._queue = StubQueue()
-    webhook_app._repo_gcp_mapping = {"day-in-the-country-llc/digido": "digido-assistant"}
+    webhook_app._repo_gcp_mapping = {"acme-corp/widget-api": "widget-prod-123456"}
     webhook_app._settings = type(
         "SettingsStub",
         (),
         {
             "webhook_service_role": "listener",
-            "github_project_name": "Appforge",
+            "github_project_name": "Acme Platform",
             "repo_gcp_mapping_path": "docs/repo-gcp-mapping.json",
             "webhook_pubsub_topic": "projects/p/topics/t",
             "debug": False,
@@ -287,7 +287,7 @@ def test_webhook_listener_lifecycle_logs(monkeypatch):
     payload = {
         "action": "created",
         "issue": {"number": 34},
-        "repository": {"name": "digido", "owner": {"login": "Day-in-the-Country-LLC"}},
+        "repository": {"name": "widget-api", "owner": {"login": "Acme-Corp"}},
     }
     body = json.dumps(payload).encode("utf-8")
     mac = hmac.new(secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256)
@@ -313,9 +313,9 @@ def test_webhook_listener_lifecycle_logs(monkeypatch):
             assert fields["event"] == "issue_comment"
             assert fields["delivery_id"] == "delivery-42"
             assert fields["workflow_id"] == "delivery-42"
-            assert fields["issue_key"] == "Day-in-the-Country-LLC/digido#34"
-            assert fields["project"] == "Appforge"
-            assert fields["target_gcp_project"] == "digido-assistant"
+            assert fields["issue_key"] == "Acme-Corp/widget-api#34"
+            assert fields["project"] == "Acme Platform"
+            assert fields["target_gcp_project"] == "widget-prod-123456"
         assert lifecycle[1]["fields"]["pubsub_message_id"] == "msg-xyz"
         assert isinstance(lifecycle[1]["fields"]["queued_at"], str)
     finally:
@@ -355,13 +355,13 @@ def test_webhook_worker_lifecycle_logs_blocked(monkeypatch):
     webhook_app.logger = StubLogger()
     webhook_app._handler = StubHandler()
     webhook_app._notifier = None
-    webhook_app._repo_gcp_mapping = {"day-in-the-country-llc/digido": "digido-assistant"}
+    webhook_app._repo_gcp_mapping = {"acme-corp/widget-api": "widget-prod-123456"}
     webhook_app._settings = type(
         "SettingsStub",
         (),
         {
             "webhook_service_role": "worker",
-            "github_project_name": "Appforge",
+            "github_project_name": "Acme Platform",
             "repo_gcp_mapping_path": "docs/repo-gcp-mapping.json",
             "debug": False,
             "slack_bot_token": "",
@@ -382,17 +382,17 @@ def test_webhook_worker_lifecycle_logs_blocked(monkeypatch):
                         "correlation": {
                             "delivery_id": "delivery-11",
                             "workflow_id": "wf-11",
-                            "issue_key": "Day-in-the-Country-LLC/digido#34",
-                            "project": "Appforge",
-                            "target_gcp_project": "digido-assistant",
+                            "issue_key": "Acme-Corp/widget-api#34",
+                            "project": "Acme Platform",
+                            "target_gcp_project": "widget-prod-123456",
                             "action": "edited",
                         },
                         "payload": {
                             "action": "edited",
                             "issue": {"number": 34},
                             "repository": {
-                                "name": "digido",
-                                "owner": {"login": "Day-in-the-Country-LLC"},
+                                "name": "widget-api",
+                                "owner": {"login": "Acme-Corp"},
                             },
                         },
                     }
@@ -421,8 +421,8 @@ def test_webhook_worker_lifecycle_logs_blocked(monkeypatch):
             fields = entry["fields"]
             assert fields["workflow_id"] == "wf-11"
             assert fields["delivery_id"] == "delivery-11"
-            assert fields["issue_key"] == "Day-in-the-Country-LLC/digido#34"
-            assert fields["target_gcp_project"] == "digido-assistant"
+            assert fields["issue_key"] == "Acme-Corp/widget-api#34"
+            assert fields["target_gcp_project"] == "widget-prod-123456"
         assert lifecycle[0]["fields"]["pubsub_message_id"] == "1234"
         assert lifecycle[0]["fields"]["queue_delay_ms"] is not None
 
@@ -465,13 +465,13 @@ def test_webhook_worker_failure_logs_resolution(monkeypatch):
     webhook_app.logger = StubLogger()
     webhook_app._handler = StubHandler()
     webhook_app._notifier = None
-    webhook_app._repo_gcp_mapping = {"day-in-the-country-llc/digido": "digido-assistant"}
+    webhook_app._repo_gcp_mapping = {"acme-corp/widget-api": "widget-prod-123456"}
     webhook_app._settings = type(
         "SettingsStub",
         (),
         {
             "webhook_service_role": "worker",
-            "github_project_name": "Appforge",
+            "github_project_name": "Acme Platform",
             "repo_gcp_mapping_path": "docs/repo-gcp-mapping.json",
             "debug": False,
             "slack_bot_token": "",
@@ -491,9 +491,9 @@ def test_webhook_worker_failure_logs_resolution(monkeypatch):
                         "correlation": {
                             "delivery_id": "delivery-1",
                             "workflow_id": "wf-1",
-                            "issue_key": "Day-in-the-Country-LLC/digido#34",
-                            "project": "Appforge",
-                            "target_gcp_project": "digido-assistant",
+                            "issue_key": "Acme-Corp/widget-api#34",
+                            "project": "Acme Platform",
+                            "target_gcp_project": "widget-prod-123456",
                         },
                         "payload": {"issue": {"number": 34}},
                     }

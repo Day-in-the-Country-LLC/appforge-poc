@@ -1,0 +1,37 @@
+[
+  {
+    "repo": "your-org/project-alpha-api",
+    "gcp_project": "project-alpha-123456",
+    "color": "DCDCDC"
+  },
+  {
+    "repo": "your-org/project-alpha-infra",
+    "gcp_project": "project-alpha-123456",
+    "color": "7DD87D"
+  },
+  {
+    "repo": "your-org/project-alpha-mcp",
+    "gcp_project": "project-alpha-123456",
+    "color": "DCDCDC"
+  },
+  {
+    "repo": "your-org/project-beta",
+    "gcp_project": "project-beta-789012",
+    "color": "7FB3FF"
+  },
+  {
+    "repo": "your-org/project-beta-assistant",
+    "gcp_project": "project-beta-789012",
+    "color": "7FB3FF"
+  },
+  {
+    "repo": "your-org/project-gamma",
+    "gcp_project": "project-gamma-345678",
+    "color": "9A275A"
+  },
+  {
+    "repo": "your-org/project-gamma-admin",
+    "gcp_project": "project-gamma-345678",
+    "color": "9A275A"
+  }
+]

@@ -14,7 +14,8 @@ status transitions, and provides tooling for local or remote execution.
 
 1. Install Python 3.12+ and `uv`.
 2. Copy `.env.example` to `.env` and fill in values.
-3. Run: `uv sync --dev`
-4. Start a run: `uv run python scripts/run_agent_pool.py --target local --max-issues 1 --secrets-backend env`
+3. Copy `docs/repo-gcp-mapping.example.json` to `docs/repo-gcp-mapping.json` and fill in your GCP project IDs.
+4. Run: `uv sync --dev`
+5. Start a run: `uv run python scripts/run_agent_pool.py --target local --max-issues 1 --secrets-backend env`
 
 For a detailed setup guide, see `docs/ONBOARDING.md`.

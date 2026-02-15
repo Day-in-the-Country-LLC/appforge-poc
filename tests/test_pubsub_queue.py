@@ -36,9 +36,9 @@ async def test_publish_includes_correlation_payload_and_attributes():
         payload={"action": "created"},
         delivery="delivery-1",
         workflow_id="wf-1",
-        issue_key="Day-in-the-Country-LLC/digido#34",
-        project="Appforge",
-        target_gcp_project="digido-assistant",
+        issue_key="Acme-Corp/widget-api#34",
+        project="Acme Platform",
+        target_gcp_project="widget-prod-123456",
         action="created",
         queued_at="2026-02-12T18:00:00+00:00",
     )
@@ -48,9 +48,9 @@ async def test_publish_includes_correlation_payload_and_attributes():
     call = publisher.calls[0]
     assert call["attrs"]["delivery_id"] == "delivery-1"
     assert call["attrs"]["workflow_id"] == "wf-1"
-    assert call["attrs"]["issue_key"] == "Day-in-the-Country-LLC/digido#34"
-    assert call["attrs"]["project"] == "Appforge"
-    assert call["attrs"]["target_gcp_project"] == "digido-assistant"
+    assert call["attrs"]["issue_key"] == "Acme-Corp/widget-api#34"
+    assert call["attrs"]["project"] == "Acme Platform"
+    assert call["attrs"]["target_gcp_project"] == "widget-prod-123456"
     assert call["attrs"]["queued_at"] == "2026-02-12T18:00:00+00:00"
 
     envelope = json.loads(call["body"].decode("utf-8"))
@@ -58,9 +58,9 @@ async def test_publish_includes_correlation_payload_and_attributes():
     assert envelope["queued_at"] == "2026-02-12T18:00:00+00:00"
     assert envelope["correlation"]["delivery_id"] == "delivery-1"
     assert envelope["correlation"]["workflow_id"] == "wf-1"
-    assert envelope["correlation"]["issue_key"] == "Day-in-the-Country-LLC/digido#34"
-    assert envelope["correlation"]["project"] == "Appforge"
-    assert envelope["correlation"]["target_gcp_project"] == "digido-assistant"
+    assert envelope["correlation"]["issue_key"] == "Acme-Corp/widget-api#34"
+    assert envelope["correlation"]["project"] == "Acme Platform"
+    assert envelope["correlation"]["target_gcp_project"] == "widget-prod-123456"
     assert envelope["correlation"]["action"] == "created"
 
 
@@ -72,9 +72,9 @@ def test_decode_pubsub_push_reads_correlation_fields():
         "workflow_id": "wf-2",
         "queued_at": "2026-02-12T18:00:00+00:00",
         "correlation": {
-            "issue_key": "Day-in-the-Country-LLC/digido#99",
-            "project": "Appforge",
-            "target_gcp_project": "digido-assistant",
+            "issue_key": "Acme-Corp/widget-api#99",
+            "project": "Acme Platform",
+            "target_gcp_project": "widget-prod-123456",
             "action": "edited",
         },
     }
@@ -85,9 +85,9 @@ def test_decode_pubsub_push_reads_correlation_fields():
             "attributes": {
                 "delivery_id": "delivery-2",
                 "workflow_id": "wf-2",
-                "issue_key": "Day-in-the-Country-LLC/digido#99",
-                "project": "Appforge",
-                "target_gcp_project": "digido-assistant",
+                "issue_key": "Acme-Corp/widget-api#99",
+                "project": "Acme Platform",
+                "target_gcp_project": "widget-prod-123456",
                 "queued_at": "2026-02-12T18:00:00+00:00",
             },
         }
@@ -97,9 +97,9 @@ def test_decode_pubsub_push_reads_correlation_fields():
     assert queued.message_id == "1234"
     assert queued.delivery == "delivery-2"
     assert queued.workflow_id == "wf-2"
-    assert queued.issue_key == "Day-in-the-Country-LLC/digido#99"
-    assert queued.project == "Appforge"
-    assert queued.target_gcp_project == "digido-assistant"
+    assert queued.issue_key == "Acme-Corp/widget-api#99"
+    assert queued.project == "Acme Platform"
+    assert queued.target_gcp_project == "widget-prod-123456"
     assert queued.action == "edited"
     assert queued.queued_at == "2026-02-12T18:00:00+00:00"
 

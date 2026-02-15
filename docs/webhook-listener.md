@@ -117,16 +117,31 @@ Listener-only required:
 
 `REPO_GCP_MAPPING_PATH` points to a JSON file that maps GitHub repos to target GCP projects.
 
+The real mapping file (`docs/repo-gcp-mapping.json`) is **gitignored** because it contains
+GCP project IDs and org repo inventory. To set up locally:
+
+```bash
+cp docs/repo-gcp-mapping.example.json docs/repo-gcp-mapping.json
+# Edit docs/repo-gcp-mapping.json with your real values
+```
+
 Expected format:
 
 ```json
 [
   {
-    "repo": "Day-in-the-Country-LLC/digido",
-    "gcp_project": "digido-assistant"
+    "repo": "your-org/your-repo",
+    "gcp_project": "your-gcp-project-id",
+    "color": "7FB3FF"
   }
 ]
 ```
+
+- **`repo`** (required): GitHub owner/repo, case-insensitive.
+- **`gcp_project`** (required): Target GCP project ID.
+- **`color`** (optional): 3- or 6-character hex color (e.g. `DCDCDC`, `#DCD`). Used by
+  `scripts/demo_log_tail.py` and `scripts/demo_log_streamlit.py` to colorize log rows
+  by `target_gcp_project`. Validated on load.
 
 The webhook app loads this file on startup and fails fast if the file is missing/invalid.
 For mapped issue events, lifecycle logs include `target_gcp_project`.
