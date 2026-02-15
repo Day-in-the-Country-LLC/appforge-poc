@@ -152,6 +152,7 @@ def _planning_app_client() -> TestClient:
         slack_bot_token="",
         slack_channel_id="",
         planning_store_backend="memory",
+        planning_review_enabled=False,
     )
     return TestClient(app, headers=_PLANNER_AUTH_HEADER)
 
@@ -323,6 +324,192 @@ def test_planner_worker_creates_github_issues_when_requested(monkeypatch) -> Non
         done_session = client.get(f"/planning/sessions/{session_id}")
         assert done_session.status_code == 200
         assert done_session.json()["status"] == "done"
+
+
+def test_planner_worker_revises_issues_before_creation(monkeypatch) -> None:
+    with _planning_app_client() as client:
+        import ace.planning.routes as planning_routes
+        from ace.config.settings import set_settings_overrides
+
+        set_settings_overrides(
+            planning_review_enabled=True,
+            planning_review_claude_model="claude-opus-4-6",
+            planning_review_openai_model="gpt-5.3",
+            planning_review_claude_max_tokens=1800,
+            planning_review_openai_max_tokens=3000,
+            secrets_backend="env",
+            claude_api_key="test-claude-key",
+            openai_api_key="test-openai-key",
+        )
+
+        artifact_store = _StubArtifactStore()
+        planning_routes._artifact_store = artifact_store
+        original_issues = json.dumps(
+            {
+                "issues": [
+                    {
+                        "id": "ISSUE-001",
+                        "repo": "owner-one/repo-one",
+                        "title": "Prepare scaffold",
+                        "description": "Plan and wire scaffold",
+                    },
+                ],
+            }
+        )
+        planning_routes._planner_pipeline = _pipeline_with_artifacts_and_payload(
+            artifact_store=artifact_store,
+            issue_payload=original_issues,
+        )
+
+        calls: dict[str, Any] = {}
+
+        async def fake_call_claude(
+            prompt: str,
+            model: str,
+            api_key: str,
+            max_tokens: int,
+            *,
+            trace_name: str = "planning_review_claude",
+            metadata: dict | None = None,  # noqa: ARG001
+        ) -> str:
+            del prompt, api_key, max_tokens, trace_name, metadata
+            calls["claude"] = model
+            return json.dumps(
+                {
+                    "plan_recommendations": [
+                        "Split the plan into explicit API and frontend tracks."
+                    ],
+                    "issue_recommendations": [
+                        {
+                            "issue_id": "ISSUE-001",
+                            "recommended_title": "Revised scaffold title",
+                            "recommended_description": "Revised description for issue.",
+                            "reason": "Aligns with review guidance.",
+                        },
+                    ],
+                    "overall_feedback": "Looks good with minor edits.",
+                }
+            )
+
+        async def fake_call_openai(
+            prompt: str,
+            model: str,
+            api_key: str,
+            max_tokens: int,
+            *,
+            trace_name: str = "planning_review_openai",
+            metadata: dict | None = None,  # noqa: ARG001
+        ) -> str:
+            del prompt, api_key, max_tokens, trace_name, metadata
+            calls["openai"] = model
+            return json.dumps(
+                {
+                    "issues": [
+                        {
+                            "id": "ISSUE-001",
+                            "repo": "owner-one/repo-one",
+                            "title": "Revised scaffold title",
+                            "description": "Revised description for issue.",
+                        },
+                    ]
+                }
+            )
+
+        monkeypatch.setattr(planning_routes, "call_claude", fake_call_claude)
+        monkeypatch.setattr(planning_routes, "call_openai", fake_call_openai)
+
+        fake_github = _FakeIssueGitHubClient(token="secret-token")
+        monkeypatch.setattr(
+            "ace.planning.issue_writer.GitHubAPIClient",
+            lambda _token: fake_github,
+        )
+
+        session_id = _planning_session_ready(
+            client,
+            mode="plan_and_create_issues",
+        )
+        push = _planner_push_envelope(session_id, mode="plan_and_create_issues")
+        resp = client.post("/internal/pubsub/planner", json=push)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "done"
+
+        assert fake_github.created
+        assert fake_github.created[0][1]["title"] == "Revised scaffold title"
+        assert calls["claude"] == "claude-opus-4-6"
+        assert calls["openai"] == "gpt-5.3"
+
+        events = client.get(f"/planning/sessions/{session_id}/events")
+        assert events.status_code == 200
+        event_types = [event["event_type"] for event in events.json()["events"]]
+        assert "issues_revised" in event_types
+
+
+def test_planner_worker_review_failures_are_advisory(monkeypatch) -> None:
+    with _planning_app_client() as client:
+        import ace.planning.routes as planning_routes
+        from ace.config.settings import set_settings_overrides
+
+        set_settings_overrides(
+            planning_review_enabled=True,
+            planning_review_claude_model="claude-opus-4-6",
+            planning_review_openai_model="gpt-5.3",
+            secrets_backend="env",
+            claude_api_key="test-claude-key",
+            openai_api_key="test-openai-key",
+        )
+
+        artifact_store = _StubArtifactStore()
+        planning_routes._artifact_store = artifact_store
+        original_issues = json.dumps(
+            {
+                "issues": [
+                    {
+                        "id": "ISSUE-001",
+                        "repo": "owner-one/repo-one",
+                        "title": "Prepare scaffold",
+                        "description": "Plan and wire scaffold",
+                    },
+                ],
+            }
+        )
+        planning_routes._planner_pipeline = _pipeline_with_artifacts_and_payload(
+            artifact_store=artifact_store,
+            issue_payload=original_issues,
+        )
+
+        async def fake_call_claude(*_args: Any, **_kwargs: Any) -> str:
+            raise RuntimeError("Claude temporarily unavailable")
+
+        async def fail_if_called(*_args: Any, **_kwargs: Any) -> str:
+            raise RuntimeError("OpenAI should not be called on review parse failure")
+
+        monkeypatch.setattr(planning_routes, "call_claude", fake_call_claude)
+        monkeypatch.setattr(planning_routes, "call_openai", fail_if_called)
+
+        fake_github = _FakeIssueGitHubClient(token="secret-token")
+        monkeypatch.setattr(
+            "ace.planning.issue_writer.GitHubAPIClient",
+            lambda _token: fake_github,
+        )
+
+        session_id = _planning_session_ready(
+            client,
+            mode="plan_and_create_issues",
+        )
+        push = _planner_push_envelope(session_id, mode="plan_and_create_issues")
+        resp = client.post("/internal/pubsub/planner", json=push)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "done"
+
+        assert fake_github.created
+        assert fake_github.created[0][1]["title"] == "Prepare scaffold"
+
+        events = client.get(f"/planning/sessions/{session_id}/events")
+        assert events.status_code == 200
+        event_payload = events.json()["events"]
+        event_types = [event["event_type"] for event in event_payload]
+        assert "issues_review_failed" in event_types
+        assert "issues_revised" not in event_types
 
 
 def test_planner_worker_failed_upload_marks_failed_event() -> None:

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import hmac as _hmac
+import json
+import time
 from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
-from ace.config.settings import get_settings
+from ace.agents.llm_client import call_claude, call_openai
+from ace.config.secrets import resolve_claude_api_key, resolve_openai_api_key
+from ace.config.settings import Settings, get_settings
 from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client
@@ -19,7 +23,10 @@ from ace.planning.artifacts import (
     PlanningArtifactStoreError,
 )
 from ace.planning.intake import generate_intake_questions, intake_complete
-from ace.planning.issue_writer import write_issues_from_payload
+from ace.planning.issue_writer import (
+    parse_issues_payload,
+    write_issues_from_payload,
+)
 from ace.planning.models import (
     PlanningArtifact,
     PlanningArtifactList,
@@ -61,6 +68,7 @@ from ace.webhooks.lifecycle import (
     STAGE_PLANNING_FAILED,
     STAGE_PLANNING_INTAKE,
     STAGE_PLANNING_ISSUE_WRITER,
+    STAGE_PLANNING_REVIEW,
     STAGE_PLANNING_SCOUTING,
     STAGE_PLANNING_SYNTHESIS,
     build_planning_lifecycle_context,
@@ -104,6 +112,7 @@ logger = structlog.get_logger(__name__)
 PLANNING_PHASE_INTAKE = "intake"
 PLANNING_PHASE_SCOUTING = "scouting"
 PLANNING_PHASE_SYNTHESIS = "synthesis"
+PLANNING_PHASE_REVIEW = "review"
 PLANNING_PHASE_ISSUES = "issues"
 PLANNING_PHASE_DONE = "done"
 
@@ -229,6 +238,219 @@ def _coerce_pipeline_output(
     if isinstance(pipeline_output, list):
         return pipeline_output, {}
     raise TypeError("❌ ERROR: planner pipeline output must be artifact list or tuple")
+
+
+def _extract_json_payload(raw: str) -> Any:
+    """Return the first JSON object/array found in LLM response text."""
+    if not isinstance(raw, str):
+        raise ValueError("❌ ERROR: expected model response to be text")
+
+    text = raw.strip()
+    if not text:
+        raise ValueError("❌ ERROR: model response was empty")
+
+    seen: set[str] = set()
+    candidates: list[str] = []
+
+    def _add(candidate: str) -> None:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    if "```" in text:
+        chunks = text.split("```")
+        for chunk in chunks:
+            candidate = chunk.strip()
+            if not candidate:
+                continue
+            if candidate.lower().startswith("json"):
+                candidate = candidate[4:].lstrip()
+            if candidate.startswith("{") and candidate.endswith("}"):
+                _add(candidate)
+            elif candidate.startswith("[") and candidate.endswith("]"):
+                _add(candidate)
+
+    if text.startswith("{") and text.endswith("}"):
+        _add(text)
+    elif text.startswith("[") and text.endswith("]"):
+        _add(text)
+    else:
+        first_curly = text.find("{")
+        last_curly = text.rfind("}")
+        if first_curly != -1 and last_curly > first_curly:
+            _add(text[first_curly : last_curly + 1])
+        first_square = text.find("[")
+        last_square = text.rfind("]")
+        if first_square != -1 and last_square > first_square:
+            _add(text[first_square : last_square + 1])
+
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
+    raise ValueError("❌ ERROR: model response did not contain valid JSON")
+
+
+def _truncate_payload(payload: str, *, max_len: int) -> str:
+    if not payload:
+        return ""
+    if len(payload) <= max_len:
+        return payload
+    try:
+        parsed = json.loads(payload)
+        if isinstance(parsed, dict) and "issues" in parsed:
+            issues = parsed["issues"]
+            if isinstance(issues, list):
+                while issues and len(json.dumps(parsed)) > max_len:
+                    issues.pop()
+                return json.dumps(parsed)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return f"{payload[:max_len]}..."
+
+
+def _format_review_prompt(
+    *,
+    session: PlanningSession,
+    plan_markdown: str,
+    issues_json: str,
+) -> str:
+    """Build the prompt for the first-pass Claude review."""
+    return (
+        "You are the Planning Quality Reviewer.\n\n"
+        f"Session ID: {session.id}\n"
+        f"Project: {session.project_slug}\n"
+        f"Mode: {session.mode.value}\n\n"
+        "Review this planning result holistically and return JSON with:\n"
+        "- plan_recommendations (array of strings)\n"
+        "- issue_recommendations (array of objects: issue_id,\n"
+        "recommended_title, recommended_description, reason)\n"
+        "- overall_feedback (string)\n\n"
+        "Keep recommendations concrete and action-oriented.\n\n"
+        "PLAN.md:\n"
+        "```markdown\n"
+        f"{_truncate_payload(plan_markdown, max_len=12000)}\n"
+        "```\n\n"
+        "ISSUES.json:\n"
+        "```json\n"
+        f"{_truncate_payload(issues_json, max_len=12000)}\n"
+        "```\n"
+    )
+
+
+def _format_revision_prompt(
+    *,
+    session: PlanningSession,
+    plan_markdown: str,
+    original_issues_json: str,
+    review_payload: dict[str, Any],
+) -> str:
+    """Build the prompt for the second-pass issue JSON revision."""
+    recommendations = json.dumps(review_payload, indent=2, sort_keys=True)
+    return (
+        "You are the Planning Issue Editor.\n\n"
+        f"Session ID: {session.id}\n"
+        f"Project: {session.project_slug}\n"
+        f"Mode: {session.mode.value}\n\n"
+        "Use the recommendations below to revise the planning issues.\n"
+        'Return only valid JSON with this exact shape: {"issues": [...]}.\n'
+        "The issues array must keep issue ids stable and remain dependency-valid.\n"
+        "Each issue object should keep keys:\n"
+        "- id, repo, title, description\n"
+        "- optional: priority, depends_on, blockers\n\n"
+        "Reviewer output:\n"
+        "```json\n"
+        f"{_truncate_payload(recommendations, max_len=12000)}\n"
+        "```\n\n"
+        "Current plan:\n"
+        "```markdown\n"
+        f"{_truncate_payload(plan_markdown, max_len=8000)}\n"
+        "```\n\n"
+        "Current ISSUES.json:\n"
+        "```json\n"
+        f"{_truncate_payload(original_issues_json, max_len=12000)}\n"
+        "```"
+    )
+
+
+async def _review_and_update_issues(
+    *,
+    session: PlanningSession,
+    plan_markdown: str,
+    issues_json: str,
+    settings: Settings,
+) -> tuple[str, dict[str, Any]]:
+    t0 = time.monotonic()
+
+    claude_api_key = resolve_claude_api_key(settings)
+
+    review_prompt = _format_review_prompt(
+        session=session,
+        plan_markdown=plan_markdown,
+        issues_json=issues_json,
+    )
+    review_response = await call_claude(
+        prompt=review_prompt,
+        model=settings.planning_review_claude_model,
+        api_key=claude_api_key,
+        max_tokens=settings.planning_review_claude_max_tokens,
+        trace_name="planning_review_claude",
+        metadata={
+            "session_id": session.id,
+            "project_slug": session.project_slug,
+        },
+    )
+    review_payload_raw = _extract_json_payload(review_response)
+    if not isinstance(review_payload_raw, dict):
+        raise ValueError("❌ ERROR: review response must be a JSON object")
+    review_payload = review_payload_raw
+
+    openai_api_key = resolve_openai_api_key(settings)
+
+    revision_prompt = _format_revision_prompt(
+        session=session,
+        plan_markdown=plan_markdown,
+        original_issues_json=issues_json,
+        review_payload=review_payload,
+    )
+    revised_response = await call_openai(
+        prompt=revision_prompt,
+        model=settings.planning_review_openai_model,
+        api_key=openai_api_key,
+        max_tokens=settings.planning_review_openai_max_tokens,
+        trace_name="planning_review_openai",
+        metadata={
+            "session_id": session.id,
+            "project_slug": session.project_slug,
+        },
+    )
+    revised_payload_raw = _extract_json_payload(revised_response)
+    if not isinstance(revised_payload_raw, dict) or "issues" not in revised_payload_raw:
+        raise ValueError("❌ ERROR: revision response must include an issues object")
+
+    revised_issues_json = json.dumps(revised_payload_raw)
+    parse_issues_payload(revised_issues_json)
+
+    plan_recommendations = review_payload.get("plan_recommendations", [])
+    issue_recommendations = review_payload.get("issue_recommendations", [])
+    if not isinstance(plan_recommendations, list):
+        plan_recommendations = []
+    if not isinstance(issue_recommendations, list):
+        issue_recommendations = []
+
+    elapsed_s = round(time.monotonic() - t0, 2)
+
+    return revised_issues_json, {
+        "review_enabled": True,
+        "plan_recommendations_count": len(plan_recommendations),
+        "issue_recommendations_count": len(issue_recommendations),
+        "reviewer_model": settings.planning_review_claude_model,
+        "revision_model": settings.planning_review_openai_model,
+        "overall_feedback": str(review_payload.get("overall_feedback", "")),
+        "elapsed_seconds": elapsed_s,
+    }
 
 
 def _resolve_planner_pipeline() -> Any:
@@ -741,6 +963,89 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
                 PlanningArtifactType.ISSUES_JSON,
                 '{"issues": []}',
             )
+            plan_markdown = artifact_payloads.get(
+                PlanningArtifactType.PLAN_MARKDOWN,
+                "",
+            )
+            settings = get_settings()
+            reviewed_issues_json = issues_json
+            review_summary: dict[str, Any] = {"review_enabled": False}
+            if settings.planning_review_enabled:
+                _log_planning_lifecycle_event(
+                    session,
+                    stage=STAGE_PLANNING_REVIEW,
+                    phase=PLANNING_PHASE_REVIEW,
+                    event_type="issues_review_started",
+                    message_id=queued.message_id,
+                )
+                try:
+                    reviewed_issues_json, review_summary = await _review_and_update_issues(
+                        session=session,
+                        plan_markdown=plan_markdown,
+                        issues_json=issues_json,
+                        settings=settings,
+                    )
+                    _log_planning_lifecycle_event(
+                        session,
+                        stage=STAGE_PLANNING_REVIEW,
+                        phase=PLANNING_PHASE_REVIEW,
+                        event_type="issues_review_complete",
+                        message_id=queued.message_id,
+                        review_plan_recommendations=review_summary.get(
+                            "plan_recommendations_count",
+                        ),
+                        review_issue_recommendations=review_summary.get(
+                            "issue_recommendations_count",
+                        ),
+                        review_overall_feedback=str(
+                            review_summary.get("overall_feedback", ""),
+                        ).strip(),
+                        review_elapsed_seconds=review_summary.get(
+                            "elapsed_seconds",
+                        ),
+                    )
+                    review_artifact_content = json.dumps(review_summary, indent=2)
+                    artifact_store = _resolve_artifact_store()
+                    review_url = await artifact_store.write_artifact(
+                        session_id=session.id,
+                        filename="REVIEW.json",
+                        content=review_artifact_content,
+                        content_type="application/json",
+                    )
+                    review_artifact = PlanningArtifact(
+                        session_id=session.id,
+                        artifact_type=PlanningArtifactType.REVIEW_JSON,
+                        content_url=review_url,
+                    )
+                    await store.add_artifact(session.id, review_artifact)
+                    persisted_artifacts.append(review_artifact)
+                except Exception as exc:
+                    reviewed_issues_json = issues_json
+                    review_summary = {
+                        "review_enabled": True,
+                        "status": "degraded",
+                        "error": str(exc),
+                    }
+                    _log_planning_lifecycle_event(
+                        session,
+                        stage=STAGE_PLANNING_REVIEW,
+                        phase=PLANNING_PHASE_REVIEW,
+                        event_type="issues_review_failed",
+                        message_id=queued.message_id,
+                        error=str(exc),
+                    )
+                    await store.append_event(
+                        session.id,
+                        PlanningEvent(
+                            session_id=session.id,
+                            event_type="issues_review_failed",
+                            payload={
+                                "status": "failed",
+                                "error": str(exc),
+                                "mode": session.mode.value,
+                            },
+                        ),
+                    )
             _log_planning_lifecycle_event(
                 session,
                 stage=STAGE_PLANNING_ISSUE_WRITER,
@@ -748,9 +1053,29 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
                 event_type="issue_writer_started",
                 message_id=queued.message_id,
             )
+            if reviewed_issues_json != issues_json:
+                await store.append_event(
+                    session.id,
+                    PlanningEvent(
+                        session_id=session.id,
+                        event_type="issues_revised",
+                        payload={
+                            "plan_recommendations_count": review_summary.get(
+                                "plan_recommendations_count",
+                                0,
+                            ),
+                            "issue_recommendations_count": review_summary.get(
+                                "issue_recommendations_count",
+                                0,
+                            ),
+                            "reviewer_model": review_summary.get("reviewer_model"),
+                            "revision_model": review_summary.get("revision_model"),
+                        },
+                    ),
+                )
             created_issues = await write_issues_from_payload(
                 session=session,
-                issues_json=issues_json,
+                issues_json=reviewed_issues_json,
                 project_slug=session.project_slug,
                 github_token=(get_settings().github_token or ""),
             )

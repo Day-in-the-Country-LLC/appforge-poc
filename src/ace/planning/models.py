@@ -23,6 +23,7 @@ class PlanningArtifactType(str, Enum):
     PLAN_MARKDOWN = "plan_md"
     ISSUES_JSON = "issues_json"
     DEPENDENCIES_MMD = "dependencies_mmd"
+    REVIEW_JSON = "review_json"
 
 
 class PlanningProjectRepository(BaseModel):
