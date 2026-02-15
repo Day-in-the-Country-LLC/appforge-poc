@@ -19,6 +19,7 @@ from ace.notifications.slack_client import (
     format_webhook_message,
 )
 from ace.webhooks.handlers import WebhookHandler
+from ace.planning.routes import planning_router
 from ace.webhooks.lifecycle import (
     STAGE_AGENT_FINISHED,
     STAGE_AGENT_STARTED,
@@ -43,6 +44,7 @@ _notifier: SlackNotifier | None = None
 _queue: PubSubWebhookQueue | None = None
 _settings: Settings | None = None
 _repo_gcp_mapping: dict[str, str] | None = None
+app.include_router(planning_router)
 
 
 @app.on_event("startup")
