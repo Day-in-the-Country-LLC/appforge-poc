@@ -4,8 +4,8 @@ from fastapi.testclient import TestClient
 
 from ace.config.settings import set_settings_overrides
 from ace.planning.models import (
-    PlanningArtifactType,
     PlanningArtifact,
+    PlanningArtifactType,
     PlanningMode,
     PlanningSession,
 )
@@ -18,6 +18,7 @@ def _planning_app_client() -> TestClient:
         repo_gcp_mapping_path="docs/repo-gcp-mapping.example.json",
         slack_bot_token="",
         slack_channel_id="",
+        planning_store_backend="memory",
     )
     return TestClient(app)
 
