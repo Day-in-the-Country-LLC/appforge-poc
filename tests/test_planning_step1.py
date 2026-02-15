@@ -12,6 +12,42 @@ from ace.planning.models import (
 from ace.webhooks.app import app
 
 
+class _StubPlannerQueue:
+    def __init__(self) -> None:
+        self.published: list[dict[str, str]] = []
+
+    async def publish(
+        self,
+        *,
+        session_id: str,
+        project_slug: str,
+        mode: str,
+        created_at: str,
+    ) -> str:
+        self.published.append(
+            {
+                "session_id": session_id,
+                "project_slug": project_slug,
+                "mode": mode,
+                "created_at": created_at,
+            }
+        )
+        return "message-id-123"
+
+
+class _FailingPlannerQueue:
+    async def publish(
+        self,
+        *,
+        session_id: str,
+        project_slug: str,
+        mode: str,
+        created_at: str,
+    ) -> str:
+        del session_id, project_slug, mode, created_at
+        raise RuntimeError("queue unavailable")
+
+
 def _planning_app_client() -> TestClient:
     set_settings_overrides(
         webhook_service_role="planner",
@@ -23,8 +59,13 @@ def _planning_app_client() -> TestClient:
     return TestClient(app)
 
 
-def test_planning_session_intake_and_state_machine() -> None:
+def test_planning_session_intake_and_state_machine(monkeypatch) -> None:
     with _planning_app_client() as client:
+        import ace.planning.routes as planning_routes
+
+        stub_queue = _StubPlannerQueue()
+        planning_routes._planner_queue = stub_queue
+
         created = client.post(
             "/planning/sessions",
             json={
@@ -86,11 +127,17 @@ def test_planning_session_intake_and_state_machine() -> None:
         assert started.status_code == 200
         assert started.json()["status"] == "running"
 
+        assert len(stub_queue.published) == 1
+        assert stub_queue.published[0]["session_id"] == session_id
+        assert stub_queue.published[0]["project_slug"] == "example-project"
+        assert stub_queue.published[0]["mode"] == "plan_only"
+
         events = client.get(f"/planning/sessions/{session_id}/events")
         assert events.status_code == 200
         event_payload = events.json()
         assert event_payload["events"][0]["event_type"] == "session_created"
-        assert event_payload["events"][-1]["event_type"] == "session_started"
+        assert event_payload["events"][-2:][0]["event_type"] == "queued"
+        assert event_payload["events"][-1]["event_type"] == "running"
 
         artifacts = client.get(f"/planning/sessions/{session_id}/artifacts")
         assert artifacts.status_code == 200
@@ -112,3 +159,52 @@ def test_planning_models_and_enums() -> None:
         mode=PlanningMode.PLAN_ONLY,
     )
     assert session.mode == PlanningMode.PLAN_ONLY
+
+
+def test_start_planning_failure_emits_failed_event(monkeypatch) -> None:
+    with _planning_app_client() as client:
+        import ace.planning.routes as planning_routes
+
+        planning_routes._planner_queue = _FailingPlannerQueue()
+
+        created = client.post(
+            "/planning/sessions",
+            json={
+                "project_slug": "example-project",
+                "mode": "plan_only",
+                "request_text": "Handle the start failure path",
+            },
+        )
+        assert created.status_code == 201
+        payload = created.json()
+        session_id = payload["id"]
+
+        assert client.post(
+            f"/planning/sessions/{session_id}/messages",
+            json={
+                "question_id": payload["questions"][0]["id"],
+                "answer": "feature",
+            },
+        ).status_code == 200
+        assert client.post(
+            f"/planning/sessions/{session_id}/messages",
+            json={
+                "question_id": payload["questions"][1]["id"],
+                "answer": "Smoke test",
+            },
+        ).status_code == 200
+        assert client.post(
+            f"/planning/sessions/{session_id}/messages",
+            json={
+                "question_id": payload["questions"][2]["id"],
+                "answer": "example-project/appforge-poc",
+            },
+        ).status_code == 200
+
+        started = client.post(f"/planning/sessions/{session_id}:start")
+        assert started.status_code == 500
+
+        events = client.get(f"/planning/sessions/{session_id}/events")
+        assert events.status_code == 200
+        event_payload = events.json()["events"]
+        assert event_payload[-1]["event_type"] == "failed"

@@ -17,6 +17,7 @@ from ace.planning.models import (
     PlanningSession,
     PlanningSessionCreateRequest,
 )
+from ace.planning.pubsub_queue import PubSubPlannerQueue
 from ace.planning.store_firestore import (
     PLANNING_STATUS_INTAKE_PENDING,
     PLANNING_STATUS_READY_TO_RUN,
@@ -31,6 +32,7 @@ planning_router = APIRouter(prefix="/planning", tags=["planning"])
 _PLANNING_INTAKE_TTL_HOURS = 24
 _PLANNING_RUNNING_TTL_HOURS = 1
 _store: PlanningStore | None = None
+_planner_queue: PubSubPlannerQueue | None = None
 
 
 def _planner_enabled() -> bool:
@@ -53,9 +55,21 @@ def _resolve_store() -> PlanningStore:
     return _store
 
 
+def _resolve_planner_queue() -> PubSubPlannerQueue:
+    global _planner_queue
+    if _planner_queue is None:
+        _planner_queue = PubSubPlannerQueue.from_settings(get_settings())
+    return _planner_queue
+
+
 def _reset_store_for_tests(store: PlanningStore | None = None) -> None:
     global _store
     _store = store
+
+
+def _reset_planner_queue_for_tests(queue: PubSubPlannerQueue | None = None) -> None:
+    global _planner_queue
+    _planner_queue = queue
 
 
 def _utc_now() -> datetime:
@@ -211,14 +225,51 @@ async def start_planning(session_id: str) -> PlanningSession:
                 f"(status={session.status})"
             ),
         )
+    queued_at = _utc_now().isoformat()
+    planner_queue = _resolve_planner_queue()
+    store = _resolve_store()
+    try:
+        message_id = await planner_queue.publish(
+            session_id=session_id,
+            project_slug=session.project_slug,
+            mode=session.mode.value,
+            created_at=queued_at,
+        )
+    except Exception as exc:
+        await store.append_event(
+            session_id,
+            PlanningEvent(
+                session_id=session_id,
+                event_type="failed",
+                payload={
+                    "status": session.status,
+                    "error": str(exc),
+                },
+            ),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"❌ ERROR: failed to queue planning job: {exc}",
+        ) from exc
+
     session.status = PLANNING_STATUS_RUNNING
     session.updated_at = _utc_now()
-    store = _resolve_store()
     await store.append_event(
         session_id,
         PlanningEvent(
             session_id=session_id,
-            event_type="session_started",
+            event_type="queued",
+            payload={
+                "status": PLANNING_STATUS_RUNNING,
+                "message_id": message_id,
+            },
+        ),
+    )
+    await store.append_event(
+        session_id,
+        PlanningEvent(
+            session_id=session_id,
+            event_type="running",
             payload={"status": PLANNING_STATUS_RUNNING},
         ),
     )
