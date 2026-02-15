@@ -263,3 +263,46 @@ class PlanningArtifactList(BaseModel):
     )
 
     artifacts: list[PlanningArtifact]
+
+
+class PlanningIssueApprovalIssue(BaseModel):
+    """Single issue reference for planning approval actions."""
+
+    issue_id: str | None = None
+    repo: str
+    number: int
+    title: str | None = None
+
+
+class PlanningIssueApprovalRequest(BaseModel):
+    """Batch approval request payload."""
+
+    issues: list[PlanningIssueApprovalIssue]
+
+
+class PlanningIssueApprovalSuccess(BaseModel):
+    """A planning issue successfully approved."""
+
+    issue_id: str | None = None
+    repo: str
+    number: int
+
+
+class PlanningIssueApprovalFailure(BaseModel):
+    """A planning issue that could not be approved."""
+
+    issue_id: str | None = None
+    repo: str
+    number: int
+    error: str
+
+
+class PlanningIssueApprovalResponse(BaseModel):
+    """Response from bulk approval of planning issues."""
+
+    session_id: str
+    requested_count: int
+    approved_count: int
+    failed_count: int
+    approved: list[PlanningIssueApprovalSuccess]
+    failed: list[PlanningIssueApprovalFailure]

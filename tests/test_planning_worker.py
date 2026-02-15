@@ -148,6 +148,7 @@ def _planning_app_client() -> TestClient:
         planner_api_token=_PLANNER_TOKEN,
         webhook_service_role="all",
         repo_gcp_mapping_path="docs/repo-gcp-mapping.example.json",
+        github_token="test-planning-github-token",
         slack_bot_token="",
         slack_channel_id="",
         planning_store_backend="memory",

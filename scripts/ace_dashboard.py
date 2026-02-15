@@ -101,6 +101,18 @@ class PlannerApiClient:
     def start_session(self, *, session_id: str) -> dict[str, Any]:
         return self._request_json("POST", f"/planning/sessions/{session_id}:start")
 
+    def approve_session_issues(
+        self,
+        *,
+        session_id: str,
+        issues: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self._request_json(
+            "POST",
+            f"/planning/sessions/{session_id}/issues/approve",
+            body={"issues": issues},
+        )
+
     def get_session(self, *, session_id: str) -> dict[str, Any]:
         return self._request_json("GET", f"/planning/sessions/{session_id}")
 
@@ -165,6 +177,7 @@ def initialize_state() -> None:
     st.session_state.setdefault("next_event_cursor", None)
     st.session_state.setdefault("message_error", "")
     st.session_state.setdefault("message_success", "")
+    st.session_state.setdefault("issue_approval_result", None)
     st.session_state.setdefault("last_event_refresh", 0.0)
 
 
@@ -175,6 +188,7 @@ def clear_session() -> None:
     st.session_state["next_event_cursor"] = None
     st.session_state["message_error"] = ""
     st.session_state["message_success"] = ""
+    st.session_state["issue_approval_result"] = None
 
 
 def apply_style() -> None:
@@ -244,6 +258,42 @@ def render_messages() -> None:
     if st.session_state["message_success"]:
         st.info(st.session_state["message_success"])
         st.session_state["message_success"] = ""
+
+
+def render_issue_approval_results() -> None:
+    approval_result = st.session_state.get("issue_approval_result")
+    if not approval_result:
+        return
+
+    approved = approval_result.get("approved", [])
+    failed = approval_result.get("failed", [])
+
+    if approved:
+        st.success(f"Approved {len(approved)} issue(s).")
+        with st.expander("Approved issues", expanded=True):
+            for issue in approved:
+                repo = str(issue.get("repo", "")).strip()
+                number = issue.get("number")
+                issue_id = str(issue.get("issue_id", "")).strip()
+                label = f"{repo}#{number}" if number is not None else "unknown"
+                if issue_id:
+                    label = f"{label} ({issue_id})"
+                st.markdown(f"- ✅ {label}")
+
+    if failed:
+        st.error(f"Failed to approve {len(failed)} issue(s).")
+        with st.expander("Failed issues", expanded=True):
+            for issue in failed:
+                repo = str(issue.get("repo", "")).strip()
+                number = issue.get("number")
+                issue_id = str(issue.get("issue_id", "")).strip()
+                error = str(issue.get("error", "unknown error"))
+                label = f"{repo}#{number}" if number is not None else "unknown"
+                if issue_id:
+                    label = f"{label} ({issue_id})"
+                st.markdown(f"- ❌ {label}: {error}")
+
+    st.session_state["issue_approval_result"] = None
 
 
 def load_session(api: PlannerApiClient) -> None:
@@ -506,6 +556,103 @@ def render_artifacts(api: PlannerApiClient, session_id: str) -> None:
             st.write(label)
 
 
+def _session_created_issues() -> list[dict[str, Any]]:
+    created: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+
+    for event in st.session_state.get("events", []):
+        if event.get("event_type") != "issues_written":
+            continue
+        for issue in (event.get("payload", {}).get("created", []) or []):
+            repo = str(issue.get("repo", "")).strip()
+            title = str(issue.get("title", "")).strip()
+            issue_id = str(issue.get("issue_id", "")).strip()
+            try:
+                number = int(issue.get("number", 0))
+            except (TypeError, ValueError):
+                number = 0
+            if not repo or number <= 0:
+                continue
+            issue_key = (repo, number)
+            if issue_key in seen:
+                continue
+            seen.add(issue_key)
+            created.append(
+                {
+                    "repo": repo,
+                    "number": number,
+                    "title": title,
+                    "issue_id": issue_id,
+                    "url": str(issue.get("url", "")).strip(),
+                }
+            )
+    return created
+
+
+def render_issue_approval(api: PlannerApiClient, session: dict[str, Any]) -> None:
+    session_id = session.get("id")
+    if not session_id:
+        return
+
+    created_issues = _session_created_issues()
+    if not created_issues:
+        return
+
+    st.subheader("Created Issues")
+    st.caption("Bulk-approve planning-created issues and send them to the Ready project queue.")
+
+    options = []
+    issue_by_option: dict[str, dict[str, Any]] = {}
+    for index, issue in enumerate(created_issues, start=1):
+        option = f"{index}. {issue['repo']}#{issue['number']} · {issue['title'] or issue['issue_id']}"
+        options.append(option)
+        issue_by_option[option] = issue
+
+    with st.form("issue_approval_form"):
+        selected = st.multiselect(
+            "Issues to approve",
+            options=options,
+            default=options,
+            help="Move selected issues to the configured Ready status in your GitHub Project.",
+        )
+        approved = st.form_submit_button("Approve selected issues")
+
+    if not approved:
+        return
+
+    if not selected:
+        set_flash("Select at least one issue to approve.", kind="error")
+        return
+
+    approve_payload: list[dict[str, Any]] = []
+    for key in selected:
+        issue = issue_by_option[key]
+        approve_payload.append(
+            {
+                "issue_id": issue.get("issue_id"),
+                "repo": issue["repo"],
+                "number": issue["number"],
+                "title": issue.get("title"),
+            }
+        )
+
+    try:
+        result = api.approve_session_issues(
+            session_id=session_id,
+            issues=approve_payload,
+        )
+    except PlannerApiError as exc:
+        set_flash(f"Failed to approve issues: {exc}", kind="error")
+        return
+
+    st.session_state["issue_approval_result"] = result
+    set_flash(
+        "Issue approval requested. Review per-item results below.",
+    )
+    load_events(api)
+    st.rerun()
+
+
 def render_planning_page(api: PlannerApiClient, config: AppConfig) -> None:
     st.markdown("<div class='page-title'>ACE Planning Dashboard</div>", unsafe_allow_html=True)
     st.caption("Create planning sessions, answer intake questions, and monitor progress events.")
@@ -535,6 +682,8 @@ def render_planning_page(api: PlannerApiClient, config: AppConfig) -> None:
     with col_right:
         render_events(api, config.poll_interval_seconds, config.auto_refresh)
         render_artifacts(api, session.get("id", ""))
+        render_issue_approval(api, session)
+        render_issue_approval_results()
 
     st.button("Reset session", on_click=clear_session, type="secondary")
 

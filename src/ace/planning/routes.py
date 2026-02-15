@@ -23,12 +23,20 @@ from ace.planning.models import (
     PlanningArtifactType,
     PlanningEvent,
     PlanningEventList,
+    PlanningIssueApprovalFailure,
+    PlanningIssueApprovalIssue,
+    PlanningIssueApprovalRequest,
+    PlanningIssueApprovalResponse,
+    PlanningIssueApprovalSuccess,
     PlanningMessage,
     PlanningMessageCreate,
     PlanningMode,
     PlanningSession,
     PlanningSessionCreateRequest,
 )
+from ace.github.issue_queue import IssueQueue
+from ace.github.projects_v2 import ProjectsV2Client
+from ace.github.api_client import GitHubAPIClient
 from ace.planning.pubsub_queue import PubSubPlannerQueue, decode_pubsub_push
 from ace.planning.scouts import (
     PlanningArtifacts,
@@ -236,6 +244,14 @@ def _utc_now() -> datetime:
 
 def _running_status_for_mode(mode_value: str) -> str:
     return f"{PLANNING_STATUS_RUNNING}_{mode_value}"
+
+
+def _parse_issue_repo(repo: str) -> tuple[str, str]:
+    """Split an `owner/name` issue repository reference."""
+    owner, sep, name = repo.partition("/")
+    if not sep or not owner or not name:
+        raise ValueError(f"❌ ERROR: invalid issue repo '{repo}', expected owner/repo")
+    return owner.strip(), name.strip()
 
 
 async def _cleanup_sessions() -> None:
@@ -514,6 +530,123 @@ async def start_planning(session_id: str) -> PlanningSession:
     )
     await store.update_session(session)
     return session
+
+
+@planning_router.post(
+    "/sessions/{session_id}/issues/approve",
+    status_code=200,
+    response_model=PlanningIssueApprovalResponse,
+)
+async def approve_session_issues(
+    session_id: str,
+    payload: PlanningIssueApprovalRequest,
+) -> PlanningIssueApprovalResponse:
+    """Move selected planning issues to the ready project status."""
+    _require_planner()
+    await _cleanup_sessions()
+    if not payload.issues:
+        raise HTTPException(status_code=400, detail="❌ ERROR: no issues provided")
+
+    session = await _ensure_session(session_id)
+    settings = get_settings()
+    github_token = (settings.github_token or "").strip()
+    if not github_token:
+        raise HTTPException(
+            status_code=500,
+            detail="❌ ERROR: GitHub token is required to approve planning issues",
+        )
+
+    store = _resolve_store()
+    ready_status = (settings.github_ready_status or "Ready").strip() or "Ready"
+    approved: list[PlanningIssueApprovalSuccess] = []
+    failed: list[PlanningIssueApprovalFailure] = []
+    seen: set[tuple[str, str, int]] = set()
+
+    api_client = GitHubAPIClient(github_token)
+    try:
+        projects_client = ProjectsV2Client(api_client)
+        issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
+        for issue in payload.issues:
+            try:
+                if issue.number <= 0:
+                    raise ValueError(f"❌ ERROR: issue number must be positive, got {issue.number}")
+                issue_repo = issue.repo.strip()
+                if not issue_repo:
+                    raise ValueError("❌ ERROR: issue repo is required")
+                owner, name = _parse_issue_repo(issue_repo)
+            except ValueError as exc:
+                failed.append(
+                    PlanningIssueApprovalFailure(
+                        issue_id=issue.issue_id,
+                        repo=issue.repo,
+                        number=issue.number,
+                        error=str(exc),
+                    )
+                )
+                continue
+
+            key = (owner, name, issue.number)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            try:
+                await issue_queue.set_project_status(
+                    issue.number,
+                    ready_status,
+                    settings.github_project_name,
+                    repo_owner=owner,
+                    repo_name=name,
+                )
+                approved.append(
+                    PlanningIssueApprovalSuccess(
+                        issue_id=issue.issue_id,
+                        repo=issue_repo,
+                        number=issue.number,
+                    )
+                )
+            except Exception as exc:
+                failed.append(
+                    PlanningIssueApprovalFailure(
+                        issue_id=issue.issue_id,
+                        repo=issue_repo,
+                        number=issue.number,
+                        error=str(exc),
+                    )
+                )
+    finally:
+        await api_client.close()
+
+    await store.append_event(
+        session_id,
+        PlanningEvent(
+            session_id=session_id,
+            event_type="issues_approved",
+            payload={
+                "requested_count": len(payload.issues),
+                "approved_count": len(approved),
+                "failed_count": len(failed),
+            },
+        ),
+    )
+
+    _log_planning_lifecycle_event(
+        session,
+        stage=STAGE_PLANNING_ISSUE_WRITER,
+        phase=PLANNING_PHASE_ISSUES,
+        event_type="issues_approved",
+        requested_count=len(payload.issues),
+        approved_count=len(approved),
+        failed_count=len(failed),
+    )
+    return PlanningIssueApprovalResponse(
+        session_id=session_id,
+        requested_count=len(payload.issues),
+        approved_count=len(approved),
+        failed_count=len(failed),
+        approved=approved,
+        failed=failed,
+    )
 
 
 @planning_worker_router.post("/internal/pubsub/planner")
