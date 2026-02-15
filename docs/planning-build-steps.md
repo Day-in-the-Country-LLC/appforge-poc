@@ -9,6 +9,11 @@ Scope assumptions for MVP (adjust anytime):
 - MVP supports `plan_only` (generate artifacts) with follow-up questions.
 - GitHub issue creation is **out of MVP**, added later.
 
+## MVP Decisions (Recorded)
+
+- Planner model/provider: OpenAI API (Option A)
+- Repo discovery for the worker: GitHub API-based scouts (recommended for MVP)
+
 ---
 
 ## Step 0: Decisions and Inputs (Stop Here Until Answered)

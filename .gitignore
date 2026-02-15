@@ -154,6 +154,10 @@ gcp-creds.json
 # Infrastructure mapping (contains GCP project IDs and repo inventory)
 docs/repo-gcp-mapping.json
 
+# Planning project registry files
+docs/projects/*.json
+!docs/projects/example-project.json
+
 # Spyder project settings
 .spyderproject
 .spyproject

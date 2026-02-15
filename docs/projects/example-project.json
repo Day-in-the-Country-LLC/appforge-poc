@@ -1,0 +1,13 @@
+{
+  "project_slug": "example-project",
+  "repos": [
+    {
+      "owner": "your-org",
+      "name": "project-alpha-api"
+    },
+    {
+      "owner": "your-org",
+      "name": "project-alpha-web"
+    }
+  ]
+}
