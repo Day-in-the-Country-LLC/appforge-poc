@@ -6,6 +6,7 @@ import pytest
 
 from ace.planning.models import (
     PlanningArtifact,
+    PlanningArtifactType,
     PlanningEvent,
     PlanningMode,
     PlanningQuestion,
@@ -110,6 +111,26 @@ async def test_in_memory_store_artifacts_default_to_empty() -> None:
     )
     await store.create_session(session)
     assert await store.get_artifacts(session.id) == []
+
+
+@pytest.mark.asyncio
+async def test_in_memory_store_add_artifact() -> None:
+    store = InMemoryPlanningStore()
+    session = PlanningSession(
+        project_slug="example-project",
+        request_text="Session for artifact writes",
+        mode=PlanningMode.PLAN_ONLY,
+    )
+    await store.create_session(session)
+    artifact = PlanningArtifact(
+        session_id=session.id,
+        artifact_type=PlanningArtifactType.PLAN_MARKDOWN,
+        content_url="https://example.com/artifacts/PLAN.md",
+    )
+    await store.add_artifact(session.id, artifact)
+    artifacts = await store.get_artifacts(session.id)
+    assert len(artifacts) == 1
+    assert artifacts[0] == artifact
 
 
 @pytest.mark.asyncio

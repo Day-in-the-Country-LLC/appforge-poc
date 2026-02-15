@@ -29,6 +29,7 @@ PLANNING_STATUS_READY_TO_RUN = "ready_to_run"
 PLANNING_STATUS_RUNNING = "running"
 PLANNING_STATUS_EXPIRED = "expired"
 PLANNING_STATUS_TIMED_OUT = "timed_out"
+PLANNING_STATUS_DONE = "done"
 
 
 class PlanningStore(ABC):
@@ -58,6 +59,9 @@ class PlanningStore(ABC):
 
     @abstractmethod
     async def get_artifacts(self, session_id: str) -> list[PlanningArtifact]: ...
+
+    @abstractmethod
+    async def add_artifact(self, session_id: str, artifact: PlanningArtifact) -> None: ...
 
     @abstractmethod
     async def sweep_expired_sessions(
@@ -114,6 +118,13 @@ class InMemoryPlanningStore(PlanningStore):
                 f"❌ ERROR: planning session not found (session_id={session_id})"
             )
         self._events.setdefault(session_id, []).append(event.model_copy(deep=True))
+
+    async def add_artifact(self, session_id: str, artifact: PlanningArtifact) -> None:
+        if session_id not in self._sessions:
+            raise PlanningStoreError(
+                f"❌ ERROR: planning session not found (session_id={session_id})"
+            )
+        self._artifacts.setdefault(session_id, []).append(artifact.model_copy(deep=True))
 
     async def get_events(
         self,
@@ -246,6 +257,15 @@ class FirestorePlanningStore(PlanningStore):
                 f"❌ ERROR: planning session not found (session_id={session_id})"
             )
         self._events_ref(session_id).document(event.id).set(_to_document_payload(event))
+
+    async def add_artifact(self, session_id: str, artifact: PlanningArtifact) -> None:
+        if not self._session_ref(session_id).get().exists:
+            raise PlanningStoreError(
+                f"❌ ERROR: planning session not found (session_id={session_id})"
+            )
+        self._artifacts_ref(session_id).document(artifact.id).set(
+            _to_document_payload(artifact)
+        )
 
     async def get_events(
         self,

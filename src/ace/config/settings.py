@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     webhook_service_role: str = os.getenv("WEBHOOK_SERVICE_ROLE", "both").lower()
     webhook_pubsub_topic: str = os.getenv("WEBHOOK_PUBSUB_TOPIC", "")
     planning_pubsub_topic: str = os.getenv("PLANNING_PUBSUB_TOPIC", "")
+    planning_artifacts_bucket: str = os.getenv(
+        "PLANNING_ARTIFACTS_BUCKET",
+        "appforge-planner-artifacts",
+    )
     repo_gcp_mapping_path: str = os.getenv("REPO_GCP_MAPPING_PATH", "docs/repo-gcp-mapping.json")
     planning_store_backend: str = os.getenv("PLANNING_STORE_BACKEND", "firestore").lower()
 

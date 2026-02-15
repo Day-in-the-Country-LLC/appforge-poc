@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from ace.config.settings import get_settings
+from ace.planning.artifacts import (
+    GCSPlanningArtifactStore,
+    PlanningArtifactStore,
+    PlanningArtifactStoreError,
+)
 from ace.planning.intake import generate_intake_questions, intake_complete
 from ace.planning.models import (
+    PlanningArtifact,
     PlanningArtifactList,
+    PlanningArtifactType,
     PlanningEvent,
     PlanningEventList,
     PlanningMessage,
@@ -17,22 +25,26 @@ from ace.planning.models import (
     PlanningSession,
     PlanningSessionCreateRequest,
 )
-from ace.planning.pubsub_queue import PubSubPlannerQueue
+from ace.planning.pubsub_queue import PubSubPlannerQueue, decode_pubsub_push
 from ace.planning.store_firestore import (
+    PLANNING_STATUS_DONE,
     PLANNING_STATUS_INTAKE_PENDING,
     PLANNING_STATUS_READY_TO_RUN,
     PLANNING_STATUS_RUNNING,
+    PLANNING_STATUS_TIMED_OUT,
     PlanningStore,
     PlanningStoreError,
     build_planning_store,
 )
 
 planning_router = APIRouter(prefix="/planning", tags=["planning"])
+planning_worker_router = APIRouter(tags=["planning"])
 
 _PLANNING_INTAKE_TTL_HOURS = 24
 _PLANNING_RUNNING_TTL_HOURS = 1
 _store: PlanningStore | None = None
 _planner_queue: PubSubPlannerQueue | None = None
+_artifact_store: PlanningArtifactStore | None = None
 
 
 def _planner_enabled() -> bool:
@@ -40,9 +52,19 @@ def _planner_enabled() -> bool:
     return role in ("planner", "both", "all")
 
 
+def _planner_worker_enabled() -> bool:
+    role = (get_settings().webhook_service_role or "").strip().lower()
+    return role in ("planner", "worker", "both", "all")
+
+
 def _require_planner() -> None:
     if not _planner_enabled():
         raise HTTPException(status_code=404, detail="❌ ERROR: planner endpoint disabled")
+
+
+def _require_planner_worker() -> None:
+    if not _planner_worker_enabled():
+        raise HTTPException(status_code=404, detail="❌ ERROR: planner worker endpoint disabled")
 
 
 def _resolve_store() -> PlanningStore:
@@ -62,6 +84,13 @@ def _resolve_planner_queue() -> PubSubPlannerQueue:
     return _planner_queue
 
 
+def _resolve_artifact_store() -> PlanningArtifactStore:
+    global _artifact_store
+    if _artifact_store is None:
+        _artifact_store = GCSPlanningArtifactStore.from_settings(get_settings())
+    return _artifact_store
+
+
 def _reset_store_for_tests(store: PlanningStore | None = None) -> None:
     global _store
     _store = store
@@ -72,8 +101,19 @@ def _reset_planner_queue_for_tests(queue: PubSubPlannerQueue | None = None) -> N
     _planner_queue = queue
 
 
+def _reset_artifact_store_for_tests(
+    store: PlanningArtifactStore | None = None,
+) -> None:
+    global _artifact_store
+    _artifact_store = store
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _running_status_for_mode(mode_value: str) -> str:
+    return f"{PLANNING_STATUS_RUNNING}_{mode_value}"
 
 
 async def _cleanup_sessions() -> None:
@@ -165,7 +205,10 @@ async def add_planning_message(
     _require_planner()
     await _cleanup_sessions()
     session = await _ensure_session(session_id)
-    if session.status == PLANNING_STATUS_RUNNING:
+    if (
+        session.status.startswith(PLANNING_STATUS_RUNNING)
+        or session.status == PLANNING_STATUS_TIMED_OUT
+    ):
         raise HTTPException(
             status_code=409,
             detail="❌ ERROR: session is already running and does not accept intake answers",
@@ -277,6 +320,107 @@ async def start_planning(session_id: str) -> PlanningSession:
     return session
 
 
+@planning_worker_router.post("/internal/pubsub/planner")
+async def run_planner_worker(request: Request) -> dict[str, Any]:
+    """Handle planning jobs from Pub/Sub push subscriptions."""
+    _require_planner_worker()
+    await _cleanup_sessions()
+
+    try:
+        body = await request.json()
+        queued = decode_pubsub_push(body)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{exc}") from exc
+
+    if queued.event != "planner.start":
+        raise HTTPException(
+            status_code=400,
+            detail=f"❌ ERROR: unsupported planner event '{queued.event}'",
+        )
+
+    store = _resolve_store()
+    session = await _ensure_session(queued.payload.session_id)
+    running_status = _running_status_for_mode(queued.payload.mode.value)
+    session.status = running_status
+    session.updated_at = _utc_now()
+
+    try:
+        artifact_store = _resolve_artifact_store()
+        await store.append_event(
+            session.id,
+            PlanningEvent(
+                session_id=session.id,
+                event_type="running",
+                payload={
+                    "status": running_status,
+                    "message_id": queued.message_id,
+                    "mode": queued.payload.mode.value,
+                },
+            ),
+        )
+        await store.update_session(session)
+        content_url = await artifact_store.write_plan_markdown(
+            session_id=session.id,
+            content="stub",
+        )
+        artifact = PlanningArtifact(
+            session_id=session.id,
+            artifact_type=PlanningArtifactType.PLAN_MARKDOWN,
+            content_url=content_url,
+        )
+        await store.add_artifact(session.id, artifact)
+        session.status = PLANNING_STATUS_DONE
+        session.updated_at = _utc_now()
+        await store.append_event(
+            session.id,
+            PlanningEvent(
+                session_id=session.id,
+                event_type="done",
+                payload={
+                    "status": PLANNING_STATUS_DONE,
+                    "artifact_id": artifact.id,
+                    "artifact_type": artifact.artifact_type.value,
+                },
+            ),
+        )
+        await store.update_session(session)
+    except Exception as exc:
+        session.status = "failed"
+        session.updated_at = _utc_now()
+        try:
+            await store.append_event(
+                session.id,
+                PlanningEvent(
+                    session_id=session.id,
+                    event_type="failed",
+                    payload={
+                        "status": session.status,
+                        "error": str(exc),
+                        "message_id": queued.message_id,
+                    },
+                ),
+            )
+            await store.update_session(session)
+        except Exception:
+            pass
+        if isinstance(exc, PlanningArtifactStoreError):
+            raise HTTPException(
+                status_code=500,
+                detail=f"❌ ERROR: planning artifact write failed: {exc}",
+            ) from exc
+        raise HTTPException(
+            status_code=500,
+            detail=f"❌ ERROR: planning worker failed: {exc}",
+        ) from exc
+
+    return {
+        "status": PLANNING_STATUS_DONE,
+        "session_id": session.id,
+        "artifact_url": artifact.content_url,
+        "message_id": queued.message_id,
+    }
+
+
 @planning_router.get(
     "/sessions/{session_id}",
     status_code=200,
@@ -324,7 +468,7 @@ async def get_planning_events(
     response_model=PlanningArtifactList,
 )
 async def get_planning_artifacts(session_id: str) -> PlanningArtifactList:
-    """List placeholder artifacts for Step 3 (none yet produced)."""
+    """List planning artifacts for a session."""
     _require_planner()
     await _cleanup_sessions()
     await _ensure_session(session_id)
