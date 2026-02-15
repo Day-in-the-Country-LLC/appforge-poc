@@ -272,9 +272,7 @@ async def _read_key_file_samples(
         if path not in present_files:
             continue
         try:
-            payload = await api_client.rest_get(
-                f"/repos/{repo.owner}/{repo.name}/contents/{path}"
-            )
+            payload = await api_client.rest_get(f"/repos/{repo.owner}/{repo.name}/contents/{path}")
         except Exception:
             continue
         if not isinstance(payload, dict):
@@ -316,8 +314,7 @@ def _score_risks(
 ) -> list[str]:
     risks: list[str] = []
     readme_present = any(
-        path in key_file_content
-        for path in {"readme.md", "readme.rst", "readme.txt"}
+        path in key_file_content for path in {"readme.md", "readme.rst", "readme.txt"}
     )
     if not readme_present:
         risks.append("Repository lacks project documentation (`README`).")
@@ -491,18 +488,10 @@ def _render_dependencies_mmd(
     if not scout_reports:
         lines.append("    P --> Z[No repos discovered]")
         return "\n".join(lines)
-    repo_nodes = []
-    for index, report in enumerate(scout_reports, start=1):
+    for report in scout_reports:
         safe_id = _safe_node_id(report.repo)
-        repo_nodes.append((safe_id, report.repo))
         lines.append(f'    {safe_id}["{report.repo}"]')
         lines.append(f"    P --> {safe_id}")
-    for index, entry in enumerate(repo_nodes):
-        from_node = repo_nodes[index - 1][0]
-        if index == 0:
-            continue
-        to_node = repo_nodes[index][0]
-        lines.append(f"    {from_node} --> {to_node}")
     return "\n".join(lines)
 
 

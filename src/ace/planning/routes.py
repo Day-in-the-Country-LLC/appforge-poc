@@ -10,6 +10,9 @@ import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from ace.config.settings import get_settings
+from ace.github.api_client import GitHubAPIClient
+from ace.github.issue_queue import IssueQueue
+from ace.github.projects_v2 import ProjectsV2Client
 from ace.planning.artifacts import (
     GCSPlanningArtifactStore,
     PlanningArtifactStore,
@@ -24,7 +27,6 @@ from ace.planning.models import (
     PlanningEvent,
     PlanningEventList,
     PlanningIssueApprovalFailure,
-    PlanningIssueApprovalIssue,
     PlanningIssueApprovalRequest,
     PlanningIssueApprovalResponse,
     PlanningIssueApprovalSuccess,
@@ -34,9 +36,6 @@ from ace.planning.models import (
     PlanningSession,
     PlanningSessionCreateRequest,
 )
-from ace.github.issue_queue import IssueQueue
-from ace.github.projects_v2 import ProjectsV2Client
-from ace.github.api_client import GitHubAPIClient
 from ace.planning.pubsub_queue import PubSubPlannerQueue, decode_pubsub_push
 from ace.planning.scouts import (
     PlanningArtifacts,
@@ -47,6 +46,8 @@ from ace.planning.scouts import (
 )
 from ace.planning.store_firestore import (
     PLANNING_STATUS_DONE,
+    PLANNING_STATUS_EXPIRED,
+    PLANNING_STATUS_FAILED,
     PLANNING_STATUS_INTAKE_PENDING,
     PLANNING_STATUS_READY_TO_RUN,
     PLANNING_STATUS_RUNNING,
@@ -74,19 +75,13 @@ def _require_planning_api_token(
     if not required_token:
         return
     if not authorization:
-        raise HTTPException(
-            status_code=401, detail="❌ ERROR: missing Authorization bearer token"
-        )
+        raise HTTPException(status_code=401, detail="❌ ERROR: missing Authorization bearer token")
     parts = authorization.split(maxsplit=1)
     if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(
-            status_code=401, detail="❌ ERROR: malformed Authorization header"
-        )
+        raise HTTPException(status_code=401, detail="❌ ERROR: malformed Authorization header")
     token = parts[1].strip()
     if not token or not _hmac.compare_digest(token, required_token):
-        raise HTTPException(
-            status_code=401, detail="❌ ERROR: invalid Authorization bearer token"
-        )
+        raise HTTPException(status_code=401, detail="❌ ERROR: invalid Authorization bearer token")
 
 
 planning_router = APIRouter(
@@ -98,6 +93,8 @@ planning_worker_router = APIRouter(tags=["planning"])
 
 _PLANNING_INTAKE_TTL_HOURS = 24
 _PLANNING_RUNNING_TTL_HOURS = 1
+_CLEANUP_DEBOUNCE_SECONDS = 300
+_last_cleanup_time: float = 0.0
 _store: PlanningStore | None = None
 _planner_queue: PubSubPlannerQueue | None = None
 _artifact_store: PlanningArtifactStore | None = None
@@ -255,6 +252,11 @@ def _parse_issue_repo(repo: str) -> tuple[str, str]:
 
 
 async def _cleanup_sessions() -> None:
+    global _last_cleanup_time
+    now_ts = _utc_now().timestamp()
+    if now_ts - _last_cleanup_time < _CLEANUP_DEBOUNCE_SECONDS:
+        return
+    _last_cleanup_time = now_ts
     store = _resolve_store()
     await store.sweep_expired_sessions(
         now=_utc_now(),
@@ -347,6 +349,8 @@ async def create_planning_session(payload: PlanningSessionCreateRequest) -> Plan
         questions=questions,
         answers={},
     )
+    for question in session.questions:
+        question.session_id = session.id
     store = _resolve_store()
     await store.create_session(session)
     _log_planning_lifecycle_event(
@@ -384,13 +388,21 @@ async def add_planning_message(
     _require_planner()
     await _cleanup_sessions()
     session = await _ensure_session(session_id)
-    if (
-        session.status.startswith(PLANNING_STATUS_RUNNING)
-        or session.status == PLANNING_STATUS_TIMED_OUT
-    ):
+    _TERMINAL_STATUSES = (
+        PLANNING_STATUS_DONE,
+        PLANNING_STATUS_EXPIRED,
+        PLANNING_STATUS_FAILED,
+        PLANNING_STATUS_TIMED_OUT,
+    )
+    if session.status.startswith(PLANNING_STATUS_RUNNING):
         raise HTTPException(
             status_code=409,
             detail="❌ ERROR: session is already running and does not accept intake answers",
+        )
+    if session.status in _TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"❌ ERROR: session is {session.status} and does not accept intake answers",
         )
 
     questions = session.questions
@@ -451,8 +463,7 @@ async def start_planning(session_id: str) -> PlanningSession:
         raise HTTPException(
             status_code=409,
             detail=(
-                "❌ ERROR: session cannot start until intake is complete "
-                f"(status={session.status})"
+                f"❌ ERROR: session cannot start until intake is complete (status={session.status})"
             ),
         )
     queued_at = _utc_now().isoformat()
@@ -809,7 +820,7 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
         await store.update_session(session)
         response_artifacts = [artifact.content_url for artifact in persisted_artifacts]
     except Exception as exc:
-        session.status = "failed"
+        session.status = PLANNING_STATUS_FAILED
         session.updated_at = _utc_now()
         try:
             _log_planning_lifecycle_event(

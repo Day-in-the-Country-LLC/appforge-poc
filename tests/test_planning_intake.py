@@ -10,8 +10,8 @@ def test_generate_intake_questions_includes_required_fields() -> None:
         mode=PlanningMode.PLAN_ONLY,
         project_slug="example-project",
         project_repos=[
-            "Day-in-the-Country-LLC/appforge-poc",
-            "Day-in-the-Country-LLC/appforge-mcp",
+            "acme-corp/widget-api",
+            "acme-corp/widget-web",
         ],
     )
     question_ids = [question.id for question in questions]
@@ -24,8 +24,7 @@ def test_generate_intake_questions_includes_required_fields() -> None:
     assert questions[0].options == ["feature", "bugfix", "infra", "docs"]
     assert (
         "Defaults for project 'example-project': "
-        "Day-in-the-Country-LLC/appforge-poc, Day-in-the-Country-LLC/appforge-mcp"
-        in questions[2].text
+        "acme-corp/widget-api, acme-corp/widget-web" in questions[2].text
     )
 
 

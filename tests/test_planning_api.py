@@ -1,4 +1,4 @@
-"""Step 3 planning API tests."""
+"""Planning API route tests."""
 
 from fastapi.testclient import TestClient
 
@@ -13,6 +13,7 @@ from ace.webhooks.app import app
 
 _PLANNER_TOKEN = "test-planning-token"
 _PLANNER_AUTH_HEADER = {"Authorization": f"Bearer {_PLANNER_TOKEN}"}
+
 
 class _StubPlannerQueue:
     def __init__(self) -> None:
@@ -213,27 +214,36 @@ def test_start_planning_failure_emits_failed_event(monkeypatch) -> None:
         payload = created.json()
         session_id = payload["id"]
 
-        assert client.post(
-            f"/planning/sessions/{session_id}/messages",
-            json={
-                "question_id": payload["questions"][0]["id"],
-                "answer": "feature",
-            },
-        ).status_code == 200
-        assert client.post(
-            f"/planning/sessions/{session_id}/messages",
-            json={
-                "question_id": payload["questions"][1]["id"],
-                "answer": "Smoke test",
-            },
-        ).status_code == 200
-        assert client.post(
-            f"/planning/sessions/{session_id}/messages",
-            json={
-                "question_id": payload["questions"][2]["id"],
-                "answer": "example-project/appforge-poc",
-            },
-        ).status_code == 200
+        assert (
+            client.post(
+                f"/planning/sessions/{session_id}/messages",
+                json={
+                    "question_id": payload["questions"][0]["id"],
+                    "answer": "feature",
+                },
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                f"/planning/sessions/{session_id}/messages",
+                json={
+                    "question_id": payload["questions"][1]["id"],
+                    "answer": "Smoke test",
+                },
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                f"/planning/sessions/{session_id}/messages",
+                json={
+                    "question_id": payload["questions"][2]["id"],
+                    "answer": "example-project/appforge-poc",
+                },
+            ).status_code
+            == 200
+        )
 
         started = client.post(f"/planning/sessions/{session_id}:start")
         assert started.status_code == 500

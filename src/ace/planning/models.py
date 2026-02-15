@@ -98,7 +98,7 @@ class PlanningMessageCreate(BaseModel):
 
     model_config = ConfigDict(
         json_schema_extra={
-        "examples": [
+            "examples": [
                 {
                     "source": "user",
                     "question_id": "primary_goal_category",
@@ -156,7 +156,7 @@ class PlanningQuestion(BaseModel):
     )
 
     id: str = Field(default_factory=_uuid)
-    session_id: str
+    session_id: str = ""
     text: str
     question_type: str = "text"
     required: bool = True

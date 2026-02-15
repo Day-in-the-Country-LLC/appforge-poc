@@ -93,14 +93,14 @@ def generate_intake_questions(
 
     if inferred_category not in _CATEGORY_OPTIONS:
         inferred_category = _CATEGORY_OPTIONS[0]
-    goal_options = [
-        option for option in _CATEGORY_OPTIONS if option == inferred_category
-    ] + [option for option in _CATEGORY_OPTIONS if option != inferred_category]
+    goal_options = [option for option in _CATEGORY_OPTIONS if option == inferred_category] + [
+        option for option in _CATEGORY_OPTIONS if option != inferred_category
+    ]
 
     questions.append(
         PlanningQuestion(
             id="primary_goal_category",
-            session_id="placeholder",
+            session_id="",
             text="What is the primary goal category?",
             question_type="single_choice",
             required=True,
@@ -111,7 +111,7 @@ def generate_intake_questions(
     questions.append(
         PlanningQuestion(
             id="success_criteria",
-            session_id="placeholder",
+            session_id="",
             text="What are the success criteria or demo expectations?",
             question_type="free_text",
             required=True,
@@ -122,7 +122,7 @@ def generate_intake_questions(
     questions.append(
         PlanningQuestion(
             id="scope_repos",
-            session_id="placeholder",
+            session_id="",
             text=_scope_repos_text(project_slug=project_slug, project_repos=project_repos),
             question_type="free_text",
             required=True,
@@ -133,13 +133,11 @@ def generate_intake_questions(
     if issue_creation_enabled:
         issue_question = "Should this planning session create GitHub issues?"
         if mode.value != "plan_only":
-            issue_question = (
-                "For this planning mode, should this session create GitHub issues?"
-            )
+            issue_question = "For this planning mode, should this session create GitHub issues?"
         questions.append(
             PlanningQuestion(
                 id="create_issues",
-                session_id="placeholder",
+                session_id="",
                 text=issue_question,
                 question_type="single_choice",
                 required=True,
