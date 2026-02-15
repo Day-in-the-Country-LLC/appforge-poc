@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
+import subprocess
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -13,16 +15,28 @@ from typing import Any
 import httpx
 import streamlit as st
 
+from ace.config.secrets import load_secret
+
 PLANNER_DEFAULT_URL = "http://127.0.0.1:8000"
 PLANNER_API_URL_ENV = "PLANNER_API_URL"
 PLANNER_URL_ENV = "PLANNER_URL"
 PLANNER_TOKEN_ENV = "PLANNER_API_TOKEN"
+PLANNER_TOKEN_SECRET_ENV = "PLANNER_API_TOKEN_SECRET"
+PLANNER_PASSWORD_SECRET_ENV = "PLANNER_DASHBOARD_PASSWORD_SECRET"
+PLANNER_SECRET_VERSION_ENV = "PLANNER_SECRET_VERSION"
+PLANNER_SECRET_PROJECT_ENV = "GCP_PROJECT_ID"
+GCP_CREDENTIALS_FILE_ENV = "GCP_CREDENTIALS_FILE"
 
 
 @dataclass
 class AppConfig:
     planner_url: str
     planner_token: str | None = None
+    planner_token_secret: str | None = None
+    planner_password_secret: str = "APPFORGE_PLANNER_DASHBOARD_PASSWORD"
+    planner_secret_version: str = "latest"
+    planner_secret_project_id: str | None = None
+    planner_credentials_file: str | None = None
     poll_interval_seconds: int = 2
     auto_refresh: bool = False
 
@@ -124,11 +138,43 @@ class PlannerApiClient:
         return self._request_json("GET", f"/planning/sessions/{session_id}/artifacts")
 
 
-def parse_args() -> AppConfig:
+def _detect_gcp_project_id() -> str | None:
+    """Return the active GCP project from env or gcloud CLI."""
+    from_env = os.environ.get(PLANNER_SECRET_PROJECT_ENV, "").strip()
+    if from_env:
+        return from_env
+    try:
+        result = subprocess.run(
+            ["gcloud", "config", "get-value", "project", "--quiet"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def parse_args(argv: list[str] | None = None) -> AppConfig:
     default_planner_url = (
         os.environ.get(PLANNER_API_URL_ENV)
         or os.environ.get(PLANNER_URL_ENV)
         or PLANNER_DEFAULT_URL
+    )
+    default_password_secret = os.environ.get(
+        PLANNER_PASSWORD_SECRET_ENV,
+        "APPFORGE_PLANNER_DASHBOARD_PASSWORD",
+    )
+    default_token_secret = os.environ.get(
+        PLANNER_TOKEN_SECRET_ENV,
+        "APPFORGE_PLANNER_API_TOKEN",
+    )
+    default_secret_version = os.environ.get(PLANNER_SECRET_VERSION_ENV, "latest")
+    default_credentials_file = os.environ.get(
+        GCP_CREDENTIALS_FILE_ENV,
+        os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", ""),
     )
     parser = argparse.ArgumentParser(description="Run the ACE planning dashboard.")
     parser.add_argument(
@@ -142,9 +188,42 @@ def parse_args() -> AppConfig:
     parser.add_argument(
         "--planner-api-token",
         default=os.environ.get(PLANNER_TOKEN_ENV, ""),
+        help=(f"Optional bearer token to skip password login (or {PLANNER_TOKEN_ENV})"),
+    )
+    parser.add_argument(
+        "--planner-token-secret",
+        default=default_token_secret,
         help=(
-            "Optional bearer token for planner API requests "
-            f"(or {PLANNER_TOKEN_ENV})"
+            f"Secret Manager secret name for planner bearer token (or {PLANNER_TOKEN_SECRET_ENV})"
+        ),
+    )
+    parser.add_argument(
+        "--planner-password-secret",
+        default=default_password_secret,
+        help=(
+            "Secret Manager secret name for dashboard login password "
+            f"(or {PLANNER_PASSWORD_SECRET_ENV})"
+        ),
+    )
+    parser.add_argument(
+        "--planner-secret-project-id",
+        default="",
+        help=(
+            f"GCP project for Secret Manager (auto-detected from gcloud if omitted, "
+            f"or {PLANNER_SECRET_PROJECT_ENV})"
+        ),
+    )
+    parser.add_argument(
+        "--planner-secret-version",
+        default=default_secret_version,
+        help=(f"Version for password/token secrets (or {PLANNER_SECRET_VERSION_ENV})"),
+    )
+    parser.add_argument(
+        "--planner-secret-credentials-file",
+        default=default_credentials_file,
+        help=(
+            "Optional service account JSON used to read Secret Manager "
+            f"(or {GCP_CREDENTIALS_FILE_ENV} / GOOGLE_APPLICATION_CREDENTIALS)"
         ),
     )
     parser.add_argument(
@@ -158,13 +237,20 @@ def parse_args() -> AppConfig:
         action="store_true",
         help="Enable periodic event polling",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.poll_interval_seconds < 1:
         args.poll_interval_seconds = 2
     token = args.planner_api_token.strip() or None
+    project_id = (args.planner_secret_project_id or "").strip() or _detect_gcp_project_id()
+    credentials_path = (args.planner_secret_credentials_file or "").strip() or None
     return AppConfig(
         planner_url=args.planner_url.rstrip("/"),
         planner_token=token,
+        planner_token_secret=(args.planner_token_secret or "").strip() or None,
+        planner_password_secret=(args.planner_password_secret or "").strip(),
+        planner_secret_version=(args.planner_secret_version or "latest").strip() or "latest",
+        planner_secret_project_id=project_id,
+        planner_credentials_file=credentials_path,
         poll_interval_seconds=args.poll_interval_seconds,
         auto_refresh=args.auto_refresh,
     )
@@ -179,6 +265,8 @@ def initialize_state() -> None:
     st.session_state.setdefault("message_success", "")
     st.session_state.setdefault("issue_approval_result", None)
     st.session_state.setdefault("last_event_refresh", 0.0)
+    st.session_state.setdefault("planner_api_token", None)
+    st.session_state.setdefault("planner_authenticated", False)
 
 
 def clear_session() -> None:
@@ -189,6 +277,77 @@ def clear_session() -> None:
     st.session_state["message_error"] = ""
     st.session_state["message_success"] = ""
     st.session_state["issue_approval_result"] = None
+
+
+def clear_planner_auth() -> None:
+    st.session_state["planner_api_token"] = None
+    st.session_state["planner_authenticated"] = False
+    clear_session()
+
+
+def _planner_token_from_secret(config: AppConfig) -> str | None:
+    if not config.planner_secret_project_id:
+        raise PlannerApiError(
+            "❌ ERROR: Planner secret project id is required for password/token login. "
+            "Set --planner-secret-project-id or --planner-secret-project env var."
+        )
+    if not config.planner_token_secret:
+        raise PlannerApiError(
+            "❌ ERROR: Planner token secret name is not configured. Set --planner-token-secret."
+        )
+    try:
+        return load_secret(
+            config.planner_secret_project_id,
+            config.planner_token_secret,
+            config.planner_secret_version,
+            config.planner_credentials_file,
+        ).strip()
+    except Exception as exc:
+        raise PlannerApiError(
+            f"❌ ERROR: failed to load planner token secret ({config.planner_token_secret}): {exc}"
+        ) from exc
+
+
+def _planner_password_from_secret(config: AppConfig) -> str | None:
+    if not config.planner_secret_project_id:
+        raise PlannerApiError(
+            "❌ ERROR: Planner secret project id is required for password login. "
+            "Set --planner-secret-project-id or --planner-secret-project env var."
+        )
+    if not config.planner_password_secret:
+        raise PlannerApiError(
+            "❌ ERROR: Planner password secret name is not configured. "
+            "Set --planner-password-secret."
+        )
+    try:
+        return load_secret(
+            config.planner_secret_project_id,
+            config.planner_password_secret,
+            config.planner_secret_version,
+            config.planner_credentials_file,
+        ).strip()
+    except Exception as exc:
+        raise PlannerApiError(
+            "❌ ERROR: failed to load planner password secret "
+            f"({config.planner_password_secret}): {exc}"
+        ) from exc
+
+
+def _login_with_password(config: AppConfig, password: str) -> None:
+    """Verify password against Secret Manager, then fetch bearer token from Secret Manager."""
+    expected_password = _planner_password_from_secret(config)
+    if not expected_password:
+        raise PlannerApiError("❌ ERROR: stored dashboard password is empty in Secret Manager")
+
+    if not hmac.compare_digest(password.strip(), expected_password):
+        raise PlannerApiError("❌ ERROR: invalid dashboard password")
+
+    token = _planner_token_from_secret(config)
+    if not token:
+        raise PlannerApiError("❌ ERROR: API token secret is empty in Secret Manager")
+
+    st.session_state["planner_api_token"] = token
+    st.session_state["planner_authenticated"] = True
 
 
 def apply_style() -> None:
@@ -342,7 +501,10 @@ def create_session_form(api: PlannerApiClient) -> None:
             "Mode",
             options=["plan_only", "plan_and_create_issues"],
             index=0,
-            help="Choose `plan_only` for artifacts only or `plan_and_create_issues` to open GitHub issues.",
+            help=(
+                "Choose `plan_only` for artifacts only or "
+                "`plan_and_create_issues` to open GitHub issues."
+            ),
         )
         request_text = st.text_area(
             "What should the planner work on?",
@@ -563,7 +725,7 @@ def _session_created_issues() -> list[dict[str, Any]]:
     for event in st.session_state.get("events", []):
         if event.get("event_type") != "issues_written":
             continue
-        for issue in (event.get("payload", {}).get("created", []) or []):
+        for issue in event.get("payload", {}).get("created", []) or []:
             repo = str(issue.get("repo", "")).strip()
             title = str(issue.get("title", "")).strip()
             issue_id = str(issue.get("issue_id", "")).strip()
@@ -589,6 +751,61 @@ def _session_created_issues() -> list[dict[str, Any]]:
     return created
 
 
+def _is_planner_authenticated() -> bool:
+    return bool(st.session_state.get("planner_api_token")) and bool(
+        st.session_state.get("planner_authenticated")
+    )
+
+
+def _set_direct_token(token: str) -> None:
+    st.session_state["planner_api_token"] = token
+    st.session_state["planner_authenticated"] = True
+
+
+def render_auth_sidebar(config: AppConfig) -> None:
+    st.sidebar.title("Planner")
+    st.sidebar.markdown(f"**API URL**  \n`{config.planner_url}`")
+
+    if st.session_state.get("planner_authenticated") and st.session_state.get("planner_api_token"):
+        st.sidebar.success("Signed in")
+        if st.sidebar.button("Sign out"):
+            clear_planner_auth()
+            st.rerun()
+        return
+
+    st.sidebar.markdown("### Sign in")
+
+    if not config.planner_secret_project_id:
+        st.sidebar.warning(
+            "Could not detect a GCP project for Secret Manager.\n\n"
+            "Run `gcloud config set project <PROJECT>` or "
+            f"set `{PLANNER_SECRET_PROJECT_ENV}`.\n\n"
+            f"Or pass `--planner-api-token` to skip password login."
+        )
+        return
+
+    st.sidebar.caption(f"GCP project: `{config.planner_secret_project_id}`")
+
+    with st.sidebar.form("planner_login_form"):
+        password = st.text_input("Dashboard password", type="password")
+        submit = st.form_submit_button("Sign in")
+
+    if not submit:
+        return
+
+    if not password.strip():
+        set_flash("Password is required.", kind="error")
+        return
+
+    try:
+        _login_with_password(config, password)
+    except PlannerApiError as exc:
+        set_flash(f"Login failed: {exc}", kind="error")
+    else:
+        set_flash("Signed in.")
+        st.rerun()
+
+
 def render_issue_approval(api: PlannerApiClient, session: dict[str, Any]) -> None:
     session_id = session.get("id")
     if not session_id:
@@ -604,7 +821,8 @@ def render_issue_approval(api: PlannerApiClient, session: dict[str, Any]) -> Non
     options = []
     issue_by_option: dict[str, dict[str, Any]] = {}
     for index, issue in enumerate(created_issues, start=1):
-        option = f"{index}. {issue['repo']}#{issue['number']} · {issue['title'] or issue['issue_id']}"
+        issue_label = issue["title"] or issue["issue_id"]
+        option = f"{index}. {issue['repo']}#{issue['number']} · {issue_label}"
         options.append(option)
         issue_by_option[option] = issue
 
@@ -703,8 +921,6 @@ def render_about_page() -> None:
 
 
 def render_sidebar(config: AppConfig) -> None:
-    st.sidebar.title("Planner")
-    st.sidebar.markdown(f"**API URL**  \n`{config.planner_url}`")
     st.sidebar.checkbox(
         "Auto-refresh events",
         value=config.auto_refresh,
@@ -726,27 +942,83 @@ def render_sidebar(config: AppConfig) -> None:
 
 def main() -> None:
     config = parse_args()
-    initialize_state()
-    st.set_page_config(page_title="ACE Planning Dashboard", layout="wide")
-    apply_style()
+    run_planner_app(config)
 
-    api = PlannerApiClient(config.planner_url, token=config.planner_token)
+
+def run_planner_app(config: AppConfig, *, selected_page: str = "Planning") -> None:
+    if selected_page not in {"Planning", "About"}:
+        selected_page = "Planning"
+
+    initialize_state()
+
+    if config.planner_token:
+        _set_direct_token(config.planner_token)
+        st.info("Using CLI-provided planner token.")
+
+    render_auth_sidebar(config)
     render_sidebar(config)
     if config.auto_refresh != st.session_state["planner_auto_refresh"]:
         config.auto_refresh = st.session_state["planner_auto_refresh"]
     if config.poll_interval_seconds != st.session_state["planner_poll_interval"]:
         config.poll_interval_seconds = st.session_state["planner_poll_interval"]
 
-    page = st.sidebar.radio("Page", ["Planning", "About"])
-    if st.session_state["active_session_id"]:
+    api: PlannerApiClient | None = None
+    if _is_planner_authenticated() and st.session_state.get("planner_api_token"):
+        api = PlannerApiClient(
+            config.planner_url,
+            token=str(st.session_state["planner_api_token"]).strip(),
+        )
+
+    if selected_page == "About":
+        render_about_page()
+        return
+
+    if not api:
+        st.markdown(
+            "<div class='page-title'>ACE Planning Dashboard</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("---")
+        st.subheader("Sign in to continue")
+        if not config.planner_secret_project_id:
+            st.warning(
+                "Could not detect a GCP project for Secret Manager.\n\n"
+                f"Run `gcloud config set project <PROJECT>` or set "
+                f"`{PLANNER_SECRET_PROJECT_ENV}`, then refresh.\n\n"
+                "Or pass `--planner-api-token` to skip password login."
+            )
+        else:
+            st.caption(f"GCP project: `{config.planner_secret_project_id}`")
+            with st.form("main_login_form"):
+                password = st.text_input("Dashboard password", type="password")
+                submit = st.form_submit_button("Sign in", type="primary")
+            if submit:
+                if not password.strip():
+                    st.error("Password is required.")
+                else:
+                    try:
+                        _login_with_password(config, password)
+                    except PlannerApiError as exc:
+                        st.error(f"Login failed: {exc}")
+                    else:
+                        st.rerun()
+        return
+
+    if api and st.session_state["active_session_id"]:
         load_session(api)
         load_events(api)
 
-    if page == "Planning":
-        render_planning_page(api, config)
-    else:
-        render_about_page()
+    render_planning_page(api, config)
+
+
+def _main_with_shell_layout() -> None:
+    config = parse_args()
+    st.set_page_config(page_title="ACE Planning Dashboard", layout="wide")
+    apply_style()
+
+    page = st.sidebar.radio("Page", ["Planning", "About"], key="planner_shell_page")
+    run_planner_app(config, selected_page=page)
 
 
 if __name__ == "__main__":
-    main()
+    _main_with_shell_layout()

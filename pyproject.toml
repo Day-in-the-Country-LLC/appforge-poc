@@ -34,7 +34,11 @@ dependencies = [
     "twilio>=8.10.0",
     "uvicorn>=0.27.1",
     "langsmith>=0.1.147",
+    "streamlit>=1.30.0",
 ]
+
+[project.scripts]
+appforge-dashboard = "ace.dashboard.cli:main"
 
 [project.optional-dependencies]
 dev = [

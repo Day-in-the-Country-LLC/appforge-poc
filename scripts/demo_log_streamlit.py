@@ -7,6 +7,7 @@ import argparse
 import csv
 import html
 import json
+import os
 import subprocess
 import threading
 import time
@@ -15,6 +16,18 @@ from pathlib import Path
 from typing import Any
 
 import streamlit as st
+from ace_dashboard import (
+    AppConfig,
+)
+from ace_dashboard import (
+    apply_style as apply_planner_style,
+)
+from ace_dashboard import (
+    parse_args as parse_planner_args,
+)
+from ace_dashboard import (
+    run_planner_app as run_planner_dashboard,
+)
 
 DEFAULT_SERVICES = ("appforge-webhooks", "appforge-webhooks-worker")
 DEFAULT_COLOR_HEX = "DCDCDC"
@@ -29,12 +42,37 @@ class TailWorker:
     stop_event: threading.Event
 
 
-def parse_app_args() -> argparse.Namespace:
+def _default_project() -> str:
+    env_project = os.environ.get("GCP_PROJECT_ID", "").strip()
+    if env_project:
+        return env_project
+
+    try:
+        result = subprocess.run(
+            ["gcloud", "config", "get-value", "project"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return ""
+
+    return (result.stdout or "").strip()
+
+
+def parse_app_args() -> tuple[argparse.Namespace, AppConfig]:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--project", required=True, help="GCP project hosting Cloud Run services")
+    parser.add_argument(
+        "--project",
+        default="",
+        help="GCP project hosting Cloud Run services",
+    )
     parser.add_argument("--mapping-file", default="docs/repo-gcp-mapping.json")
     parser.add_argument("--services", default="appforge-webhooks,appforge-webhooks-worker")
-    return parser.parse_args()
+    args, planner_argv = parser.parse_known_args()
+    if not args.project.strip():
+        args.project = _default_project()
+    return args, parse_planner_args(list(planner_argv))
 
 
 def normalize_hex_color(value: str) -> str:
@@ -303,11 +341,7 @@ def render_rows(
         )
 
 
-def main() -> None:
-    args = parse_app_args()
-    initialize_state()
-
-    st.set_page_config(page_title="ACE Live Log Stream", layout="wide")
+def apply_log_style() -> None:
     st.markdown(
         f"""
 <style>
@@ -321,6 +355,17 @@ def main() -> None:
 """,
         unsafe_allow_html=True,
     )
+
+
+def run_log_tab(args: argparse.Namespace) -> None:
+    if not args.project:
+        st.error(
+            "❌ ERROR: project is required for log streaming. "
+            "Pass --project or set GCP_PROJECT_ID."
+        )
+        return
+
+    initialize_state()
     st.title("ACE Live Log Stream")
     st.caption("Streams listener + worker logs and colorizes rows by target_gcp_project.")
 
@@ -374,6 +419,46 @@ def main() -> None:
     if st.session_state.running:
         time.sleep(1.5)
         st.rerun()
+
+
+def render_about_page() -> None:
+    st.markdown("<div class='page-title'>ACE Control Center</div>", unsafe_allow_html=True)
+    st.markdown(
+        """
+## What this app includes
+
+- **Observe**: Stream Cloud Run logs from listener + worker.
+- **Planner**: Create and monitor planning sessions.
+- **Issue workflows**: Review generated planning-created issues and send ready status.
+
+Use the page selector on the left to switch modes.
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def main() -> None:
+    observe_args, planner_config = parse_app_args()
+
+    st.set_page_config(page_title="ACE Control Center", layout="wide")
+
+    page = st.sidebar.radio(
+        "Page",
+        ["Observe", "Planner", "About"],
+        key="control_page",
+    )
+
+    if page == "Observe":
+        apply_log_style()
+        run_log_tab(observe_args)
+        return
+
+    if page == "Planner":
+        apply_planner_style()
+        run_planner_dashboard(planner_config, selected_page="Planning")
+        return
+
+    render_about_page()
 
 
 if __name__ == "__main__":
