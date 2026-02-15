@@ -70,6 +70,7 @@ class Settings(BaseSettings):
         "PLANNING_ARTIFACTS_BUCKET",
         "appforge-planner-artifacts",
     )
+    planner_api_token: str = os.getenv("PLANNER_API_TOKEN", "")
     repo_gcp_mapping_path: str = os.getenv("REPO_GCP_MAPPING_PATH", "docs/repo-gcp-mapping.json")
     planning_store_backend: str = os.getenv("PLANNING_STORE_BACKEND", "firestore").lower()
 

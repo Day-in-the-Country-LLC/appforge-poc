@@ -11,6 +11,8 @@ from ace.planning.models import (
 )
 from ace.webhooks.app import app
 
+_PLANNER_TOKEN = "test-planning-token"
+_PLANNER_AUTH_HEADER = {"Authorization": f"Bearer {_PLANNER_TOKEN}"}
 
 class _StubPlannerQueue:
     def __init__(self) -> None:
@@ -50,13 +52,14 @@ class _FailingPlannerQueue:
 
 def _planning_app_client() -> TestClient:
     set_settings_overrides(
+        planner_api_token=_PLANNER_TOKEN,
         webhook_service_role="planner",
         repo_gcp_mapping_path="docs/repo-gcp-mapping.example.json",
         slack_bot_token="",
         slack_channel_id="",
         planning_store_backend="memory",
     )
-    return TestClient(app)
+    return TestClient(app, headers=_PLANNER_AUTH_HEADER)
 
 
 def test_planning_session_intake_and_state_machine(monkeypatch) -> None:
@@ -159,6 +162,37 @@ def test_planning_models_and_enums() -> None:
         mode=PlanningMode.PLAN_ONLY,
     )
     assert session.mode == PlanningMode.PLAN_ONLY
+
+
+def test_planning_endpoints_require_bearer_token() -> None:
+    set_settings_overrides(
+        planner_api_token=_PLANNER_TOKEN,
+        webhook_service_role="planner",
+        repo_gcp_mapping_path="docs/repo-gcp-mapping.example.json",
+        slack_bot_token="",
+        slack_channel_id="",
+        planning_store_backend="memory",
+    )
+    endpoint = "/planning/sessions"
+    payload = {
+        "project_slug": "example-project",
+        "mode": "plan_only",
+        "request_text": "Plan auth checks",
+    }
+
+    with TestClient(app) as client:
+        unauth = client.post(endpoint, json=payload)
+        assert unauth.status_code == 401
+        assert "Authorization" in unauth.json()["detail"]
+
+    with TestClient(app, headers={"Authorization": "Bearer wrong-token"}) as client:
+        wrong = client.post(endpoint, json=payload)
+        assert wrong.status_code == 401
+        assert wrong.json()["detail"].startswith("❌ ERROR: invalid")
+
+    with TestClient(app, headers=_PLANNER_AUTH_HEADER) as client:
+        auth = client.post(endpoint, json=payload)
+        assert auth.status_code == 201
 
 
 def test_start_planning_failure_emits_failed_event(monkeypatch) -> None:

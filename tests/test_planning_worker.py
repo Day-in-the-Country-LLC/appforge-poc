@@ -12,6 +12,9 @@ from ace.config.settings import set_settings_overrides
 from ace.planning.models import PlanningArtifactType
 from ace.webhooks.app import app
 
+_PLANNER_TOKEN = "test-planning-token"
+_PLANNER_AUTH_HEADER = {"Authorization": f"Bearer {_PLANNER_TOKEN}"}
+
 
 class _StubArtifactStore:
     def __init__(self) -> None:
@@ -84,13 +87,14 @@ def _prepare_stub_pipeline(
 
 def _planning_app_client() -> TestClient:
     set_settings_overrides(
+        planner_api_token=_PLANNER_TOKEN,
         webhook_service_role="all",
         repo_gcp_mapping_path="docs/repo-gcp-mapping.example.json",
         slack_bot_token="",
         slack_channel_id="",
         planning_store_backend="memory",
     )
-    return TestClient(app)
+    return TestClient(app, headers=_PLANNER_AUTH_HEADER)
 
 
 def _planning_session_ready(client: TestClient, project_slug: str = "example-project") -> str:

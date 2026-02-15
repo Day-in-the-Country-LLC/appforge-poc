@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import hmac as _hmac
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from ace.config.settings import get_settings
 from ace.planning.artifacts import (
@@ -44,7 +45,34 @@ from ace.planning.store_firestore import (
     build_planning_store,
 )
 
-planning_router = APIRouter(prefix="/planning", tags=["planning"])
+
+def _require_planning_api_token(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> None:
+    required_token = (get_settings().planner_api_token or "").strip()
+    if not required_token:
+        return
+    if not authorization:
+        raise HTTPException(
+            status_code=401, detail="❌ ERROR: missing Authorization bearer token"
+        )
+    parts = authorization.split(maxsplit=1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(
+            status_code=401, detail="❌ ERROR: malformed Authorization header"
+        )
+    token = parts[1].strip()
+    if not token or not _hmac.compare_digest(token, required_token):
+        raise HTTPException(
+            status_code=401, detail="❌ ERROR: invalid Authorization bearer token"
+        )
+
+
+planning_router = APIRouter(
+    prefix="/planning",
+    tags=["planning"],
+    dependencies=[Depends(_require_planning_api_token)],
+)
 planning_worker_router = APIRouter(tags=["planning"])
 
 _PLANNING_INTAKE_TTL_HOURS = 24
