@@ -437,28 +437,34 @@ Use the page selector on the left to switch modes.
     )
 
 
+def _render_mode_selector() -> str:
+    selected = st.sidebar.segmented_control(
+        "Control Mode",
+        options=["Observe", "Plan"],
+        key="control_page",
+        default="Observe",
+        label_visibility="collapsed",
+        width="stretch",
+    )
+    return selected or "Observe"
+
+
 def main() -> None:
     observe_args, planner_config = parse_app_args()
 
     st.set_page_config(page_title="ACE Control Center", layout="wide")
 
-    page = st.sidebar.radio(
-        "Page",
-        ["Observe", "Planner", "About"],
-        key="control_page",
-    )
+    page = _render_mode_selector()
 
     if page == "Observe":
         apply_log_style()
         run_log_tab(observe_args)
         return
 
-    if page == "Planner":
+    if page == "Plan":
         apply_planner_style()
         run_planner_dashboard(planner_config, selected_page="Planning")
         return
-
-    render_about_page()
 
 
 if __name__ == "__main__":
