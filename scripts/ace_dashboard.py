@@ -265,6 +265,7 @@ def initialize_state() -> None:
     st.session_state.setdefault("message_success", "")
     st.session_state.setdefault("issue_approval_result", None)
     st.session_state.setdefault("last_event_refresh", 0.0)
+    st.session_state.setdefault("login_error", "")
     st.session_state.setdefault("planner_api_token", None)
     st.session_state.setdefault("planner_authenticated", False)
 
@@ -285,6 +286,17 @@ def clear_planner_auth() -> None:
     clear_session()
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_load_secret(
+    project_id: str,
+    secret_name: str,
+    version: str,
+    credentials_file: str | None,
+) -> str:
+    """Load a secret from GCP Secret Manager, cached for 5 minutes."""
+    return load_secret(project_id, secret_name, version, credentials_file).strip()
+
+
 def _planner_token_from_secret(config: AppConfig) -> str | None:
     if not config.planner_secret_project_id:
         raise PlannerApiError(
@@ -296,12 +308,12 @@ def _planner_token_from_secret(config: AppConfig) -> str | None:
             "❌ ERROR: Planner token secret name is not configured. Set --planner-token-secret."
         )
     try:
-        return load_secret(
+        return _cached_load_secret(
             config.planner_secret_project_id,
             config.planner_token_secret,
             config.planner_secret_version,
             config.planner_credentials_file,
-        ).strip()
+        )
     except Exception as exc:
         raise PlannerApiError(
             f"❌ ERROR: failed to load planner token secret ({config.planner_token_secret}): {exc}"
@@ -320,12 +332,12 @@ def _planner_password_from_secret(config: AppConfig) -> str | None:
             "Set --planner-password-secret."
         )
     try:
-        return load_secret(
+        return _cached_load_secret(
             config.planner_secret_project_id,
             config.planner_password_secret,
             config.planner_secret_version,
             config.planner_credentials_file,
-        ).strip()
+        )
     except Exception as exc:
         raise PlannerApiError(
             "❌ ERROR: failed to load planner password secret "
@@ -765,45 +777,14 @@ def _set_direct_token(token: str) -> None:
 def render_auth_sidebar(config: AppConfig) -> None:
     st.sidebar.title("Planner")
     st.sidebar.markdown(f"**API URL**  \n`{config.planner_url}`")
+    if config.planner_secret_project_id:
+        st.sidebar.caption(f"GCP project: `{config.planner_secret_project_id}`")
 
     if st.session_state.get("planner_authenticated") and st.session_state.get("planner_api_token"):
         st.sidebar.success("Signed in")
         if st.sidebar.button("Sign out"):
             clear_planner_auth()
             st.rerun()
-        return
-
-    st.sidebar.markdown("### Sign in")
-
-    if not config.planner_secret_project_id:
-        st.sidebar.warning(
-            "Could not detect a GCP project for Secret Manager.\n\n"
-            "Run `gcloud config set project <PROJECT>` or "
-            f"set `{PLANNER_SECRET_PROJECT_ENV}`.\n\n"
-            f"Or pass `--planner-api-token` to skip password login."
-        )
-        return
-
-    st.sidebar.caption(f"GCP project: `{config.planner_secret_project_id}`")
-
-    with st.sidebar.form("planner_login_form"):
-        password = st.text_input("Dashboard password", type="password")
-        submit = st.form_submit_button("Sign in")
-
-    if not submit:
-        return
-
-    if not password.strip():
-        set_flash("Password is required.", kind="error")
-        return
-
-    try:
-        _login_with_password(config, password)
-    except PlannerApiError as exc:
-        set_flash(f"Login failed: {exc}", kind="error")
-    else:
-        set_flash("Signed in.")
-        st.rerun()
 
 
 def render_issue_approval(api: PlannerApiClient, session: dict[str, Any]) -> None:
@@ -980,6 +961,14 @@ def run_planner_app(config: AppConfig, *, selected_page: str = "Planning") -> No
         )
         st.markdown("---")
         st.subheader("Sign in to continue")
+
+        login_err = st.session_state.get("login_error", "")
+        if login_err:
+            st.markdown(
+                f'<p style="color:#f87171;font-size:1.1rem;font-weight:bold;">{login_err}</p>',
+                unsafe_allow_html=True,
+            )
+
         if not config.planner_secret_project_id:
             st.warning(
                 "Could not detect a GCP project for Secret Manager.\n\n"
@@ -989,17 +978,23 @@ def run_planner_app(config: AppConfig, *, selected_page: str = "Planning") -> No
             )
         else:
             st.caption(f"GCP project: `{config.planner_secret_project_id}`")
-            with st.form("main_login_form"):
-                password = st.text_input("Dashboard password", type="password")
-                submit = st.form_submit_button("Sign in", type="primary")
-            if submit:
+            st.text_input("Dashboard password", type="password", key="login_pw")
+            if st.button("Sign in", type="primary"):
+                password = st.session_state.get("login_pw", "")
                 if not password.strip():
-                    st.error("Password is required.")
+                    st.session_state["login_error"] = "Password is required."
+                    st.rerun()
                 else:
-                    try:
-                        _login_with_password(config, password)
-                    except PlannerApiError as exc:
-                        st.error(f"Login failed: {exc}")
+                    with st.spinner("Signing in..."):
+                        try:
+                            _login_with_password(config, password)
+                        except Exception as exc:
+                            st.session_state["login_error"] = (
+                                f"Login failed ({type(exc).__name__}): {exc}"
+                            )
+                    if _is_planner_authenticated():
+                        st.session_state["login_error"] = ""
+                        st.rerun()
                     else:
                         st.rerun()
         return
