@@ -279,7 +279,7 @@ Terraform items:
 - real-time event list (poll `/planning/sessions/{id}/events`)
 - final artifact links (poll `/planning/sessions/{id}/artifacts`)
 
-4. Add a demo checklist doc.
+4. Add a demo checklist doc (`docs/planning-demo-checklist.md`).
 
 **Done when:** you can screen-record a session from submission → intake → plan → artifacts.
 

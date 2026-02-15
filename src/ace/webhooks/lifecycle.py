@@ -16,6 +16,12 @@ STAGE_AGENT_STARTED = "agent_started"
 STAGE_AGENT_FINISHED = "agent_finished"
 STAGE_FINAL_RESOLUTION = "final_resolution"
 
+STAGE_PLANNING_INTAKE = "planning_intake"
+STAGE_PLANNING_SCOUTING = "planning_scouting"
+STAGE_PLANNING_SYNTHESIS = "planning_synthesis"
+STAGE_PLANNING_DONE = "planning_done"
+STAGE_PLANNING_FAILED = "planning_failed"
+
 RESOLUTION_SUCCESS = "success"
 RESOLUTION_BLOCKED = "blocked"
 RESOLUTION_FAILURE = "failure"
@@ -32,6 +38,17 @@ class WebhookLifecycleContext:
     target_gcp_project: str | None
     delivery_id: str | None
     workflow_id: str
+
+
+@dataclass(frozen=True)
+class PlanningLifecycleContext:
+    """Structured context for planning lifecycle logging."""
+
+    session_id: str
+    project_slug: str
+    phase: str
+    mode: str | None
+    request_id: str | None
 
 
 def build_lifecycle_context(
@@ -89,6 +106,67 @@ def build_lifecycle_context(
         delivery_id=normalized_delivery,
         workflow_id=resolved_workflow_id,
     )
+
+
+def build_planning_lifecycle_context(
+    *,
+    session_id: str,
+    project_slug: str,
+    phase: str,
+    mode: str | None = None,
+    request_id: str | None = None,
+) -> PlanningLifecycleContext:
+    """Build planning-specific lifecycle context for structured logs."""
+    session_value = (
+        session_id.strip() if isinstance(session_id, str) and session_id.strip() else None
+    )
+    if not session_value:
+        raise ValueError("❌ ERROR: session_id is required for planning lifecycle context")
+
+    project_value = (
+        project_slug.strip() if isinstance(project_slug, str) and project_slug.strip() else ""
+    )
+    normalized_phase = phase.strip().lower() if isinstance(phase, str) else ""
+    normalized_mode = mode.strip() if isinstance(mode, str) and mode.strip() else None
+    normalized_request_id = (
+        request_id.strip() if isinstance(request_id, str) and request_id.strip() else None
+    )
+
+    if not normalized_phase:
+        raise ValueError("❌ ERROR: planning phase is required")
+
+    return PlanningLifecycleContext(
+        session_id=session_value,
+        project_slug=project_value,
+        phase=normalized_phase,
+        mode=normalized_mode,
+        request_id=normalized_request_id,
+    )
+
+
+def log_planning_lifecycle_event(
+    logger: structlog.BoundLogger,
+    stage: str,
+    context: PlanningLifecycleContext,
+    *,
+    resolution: str | None = None,
+    **fields: Any,
+) -> None:
+    """Emit a structured planning lifecycle event."""
+    bound_logger = logger.bind(
+        session_id=context.session_id,
+        project_slug=context.project_slug,
+        phase=context.phase,
+        mode=context.mode,
+    )
+    if context.request_id:
+        bound_logger = bound_logger.bind(request_id=context.request_id)
+
+    data = {"stage": stage}
+    if resolution is not None:
+        data["resolution"] = resolution
+    data.update(fields)
+    bound_logger.info("planning_lifecycle", **data)
 
 
 def log_lifecycle_event(

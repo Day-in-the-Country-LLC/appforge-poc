@@ -6,6 +6,7 @@ import hmac as _hmac
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from ace.config.settings import get_settings
@@ -44,6 +45,15 @@ from ace.planning.store_firestore import (
     PlanningStoreError,
     build_planning_store,
 )
+from ace.webhooks.lifecycle import (
+    STAGE_PLANNING_DONE,
+    STAGE_PLANNING_FAILED,
+    STAGE_PLANNING_INTAKE,
+    STAGE_PLANNING_SCOUTING,
+    STAGE_PLANNING_SYNTHESIS,
+    build_planning_lifecycle_context,
+    log_planning_lifecycle_event,
+)
 
 
 def _require_planning_api_token(
@@ -81,6 +91,12 @@ _store: PlanningStore | None = None
 _planner_queue: PubSubPlannerQueue | None = None
 _artifact_store: PlanningArtifactStore | None = None
 _planner_pipeline: Any | None = None
+logger = structlog.get_logger(__name__)
+
+PLANNING_PHASE_INTAKE = "intake"
+PLANNING_PHASE_SCOUTING = "scouting"
+PLANNING_PHASE_SYNTHESIS = "synthesis"
+PLANNING_PHASE_DONE = "done"
 
 
 def _planner_enabled() -> bool:
@@ -219,6 +235,32 @@ async def _ensure_session(session_id: str) -> PlanningSession:
     return session
 
 
+def _log_planning_lifecycle_event(
+    session: PlanningSession,
+    *,
+    stage: str,
+    phase: str,
+    resolution: str | None = None,
+    **fields: Any,
+) -> None:
+    try:
+        context = build_planning_lifecycle_context(
+            session_id=session.id,
+            project_slug=session.project_slug,
+            phase=phase,
+            mode=session.mode.value,
+        )
+    except Exception:
+        return
+    log_planning_lifecycle_event(
+        logger,
+        stage,
+        context,
+        resolution=resolution,
+        **fields,
+    )
+
+
 async def _refresh_session_state(session: PlanningSession) -> PlanningSession:
     store = _resolve_store()
     questions = session.questions
@@ -228,6 +270,13 @@ async def _refresh_session_state(session: PlanningSession) -> PlanningSession:
     ):
         session.status = PLANNING_STATUS_READY_TO_RUN
         session.updated_at = _utc_now()
+        _log_planning_lifecycle_event(
+            session,
+            stage=STAGE_PLANNING_INTAKE,
+            phase=PLANNING_PHASE_INTAKE,
+            event_type="intake_complete",
+            status=PLANNING_STATUS_READY_TO_RUN,
+        )
         await store.append_event(
             session.id,
             PlanningEvent(
@@ -261,6 +310,14 @@ async def create_planning_session(payload: PlanningSessionCreateRequest) -> Plan
     )
     store = _resolve_store()
     await store.create_session(session)
+    _log_planning_lifecycle_event(
+        session,
+        stage=STAGE_PLANNING_INTAKE,
+        phase=PLANNING_PHASE_INTAKE,
+        event_type="session_created",
+        status=PLANNING_STATUS_INTAKE_PENDING,
+        question_count=len(questions),
+    )
     await store.append_event(
         session.id,
         PlanningEvent(
@@ -315,6 +372,14 @@ async def add_planning_message(
     )
     store = _resolve_store()
     await store.add_message(session_id, message)
+    _log_planning_lifecycle_event(
+        session,
+        stage=STAGE_PLANNING_INTAKE,
+        phase=PLANNING_PHASE_INTAKE,
+        event_type="intake_answered",
+        question_id=payload.question_id,
+        status=session.status,
+    )
     session.answers[payload.question_id] = answer
     await store.append_event(
         session_id,
@@ -362,6 +427,14 @@ async def start_planning(session_id: str) -> PlanningSession:
             created_at=queued_at,
         )
     except Exception as exc:
+        _log_planning_lifecycle_event(
+            session,
+            stage=STAGE_PLANNING_FAILED,
+            phase=PLANNING_PHASE_INTAKE,
+            event_type="failed_to_queue",
+            status=session.status,
+            error=str(exc),
+        )
         await store.append_event(
             session_id,
             PlanningEvent(
@@ -380,6 +453,15 @@ async def start_planning(session_id: str) -> PlanningSession:
 
     session.status = PLANNING_STATUS_RUNNING
     session.updated_at = _utc_now()
+    _log_planning_lifecycle_event(
+        session,
+        stage=STAGE_PLANNING_SCOUTING,
+        phase=PLANNING_PHASE_SCOUTING,
+        event_type="queued",
+        status=PLANNING_STATUS_RUNNING,
+        message_id=message_id,
+        mode=session.mode.value,
+    )
     await store.append_event(
         session_id,
         PlanningEvent(
@@ -398,6 +480,14 @@ async def start_planning(session_id: str) -> PlanningSession:
             event_type="running",
             payload={"status": PLANNING_STATUS_RUNNING},
         ),
+    )
+    _log_planning_lifecycle_event(
+        session,
+        stage=STAGE_PLANNING_SCOUTING,
+        phase=PLANNING_PHASE_SCOUTING,
+        event_type="running",
+        status=PLANNING_STATUS_RUNNING,
+        mode=session.mode.value,
     )
     await store.update_session(session)
     return session
@@ -429,6 +519,15 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
 
     try:
         planner_pipeline = _resolve_planner_pipeline()
+        _log_planning_lifecycle_event(
+            session,
+            stage=STAGE_PLANNING_SCOUTING,
+            phase=PLANNING_PHASE_SCOUTING,
+            event_type="running",
+            status=running_status,
+            message_id=queued.message_id,
+            mode=queued.payload.mode.value,
+        )
         await store.append_event(
             session.id,
             PlanningEvent(
@@ -445,6 +544,13 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
         artifact_results = await planner_pipeline(session)
         persisted_artifacts: list[PlanningArtifact] = []
         for artifact_type, content_url in artifact_results:
+            _log_planning_lifecycle_event(
+                session,
+                stage=STAGE_PLANNING_SYNTHESIS,
+                phase=PLANNING_PHASE_SYNTHESIS,
+                event_type="artifact_writing",
+                artifact_type=artifact_type.value,
+            )
             artifact = PlanningArtifact(
                 session_id=session.id,
                 artifact_type=artifact_type,
@@ -452,8 +558,26 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
             )
             await store.add_artifact(session.id, artifact)
             persisted_artifacts.append(artifact)
+            _log_planning_lifecycle_event(
+                session,
+                stage=STAGE_PLANNING_SYNTHESIS,
+                phase=PLANNING_PHASE_SYNTHESIS,
+                event_type="artifact_written",
+                artifact_type=artifact_type.value,
+                artifact_id=artifact.id,
+                artifact_url=content_url,
+            )
         session.status = PLANNING_STATUS_DONE
         session.updated_at = _utc_now()
+        _log_planning_lifecycle_event(
+            session,
+            stage=STAGE_PLANNING_DONE,
+            phase=PLANNING_PHASE_DONE,
+            event_type="done",
+            status=PLANNING_STATUS_DONE,
+            artifact_count=len(persisted_artifacts),
+            message_id=queued.message_id,
+        )
         await store.append_event(
             session.id,
             PlanningEvent(
@@ -471,6 +595,16 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
         session.status = "failed"
         session.updated_at = _utc_now()
         try:
+            _log_planning_lifecycle_event(
+                session,
+                stage=STAGE_PLANNING_FAILED,
+                phase=PLANNING_PHASE_SYNTHESIS,
+                event_type="failed",
+                status=session.status,
+                error=str(exc),
+                message_id=queued.message_id,
+                mode=queued.payload.mode.value,
+            )
             await store.append_event(
                 session.id,
                 PlanningEvent(
