@@ -4,26 +4,82 @@ from __future__ import annotations
 
 import base64
 import json
+from typing import Any, Callable
 
 from fastapi.testclient import TestClient
 
 from ace.config.settings import set_settings_overrides
+from ace.planning.models import PlanningArtifactType
 from ace.webhooks.app import app
 
 
 class _StubArtifactStore:
     def __init__(self) -> None:
-        self.writes: list[tuple[str, str]] = []
+        self.writes: list[tuple[str, str, str]] = []
 
-    async def write_plan_markdown(self, session_id: str, content: str) -> str:
-        self.writes.append((session_id, content))
-        return f"https://example.test/{session_id}/PLAN.md"
+    async def write_artifact(
+        self,
+        session_id: str,
+        filename: str,
+        content: str,
+        *,
+        content_type: str,
+    ) -> str:
+        self.writes.append((session_id, filename, content))
+        del content_type
+        return f"https://example.test/{session_id}/{filename}"
+
+
+def _pipeline_with_artifacts(
+    artifact_store: _StubArtifactStore,
+) -> Callable[[Any], Any]:
+    async def _pipeline(session: Any) -> list[tuple[PlanningArtifactType, str]]:
+        session_id = session.id
+        plan_url = await artifact_store.write_artifact(
+            session_id=session_id,
+            filename="PLAN.md",
+            content="plan-markdown",
+            content_type="text/markdown",
+        )
+        issues_url = await artifact_store.write_artifact(
+            session_id=session_id,
+            filename="ISSUES.json",
+            content='{"issues": []}',
+            content_type="application/json",
+        )
+        dependencies_url = await artifact_store.write_artifact(
+            session_id=session_id,
+            filename="DEPENDENCIES.mmd",
+            content="flowchart TD",
+            content_type="text/plain",
+        )
+        return [
+            (PlanningArtifactType.PLAN_MARKDOWN, plan_url),
+            (PlanningArtifactType.ISSUES_JSON, issues_url),
+            (PlanningArtifactType.DEPENDENCIES_MMD, dependencies_url),
+        ]
+
+    return _pipeline
 
 
 class _FailingArtifactStore:
-    async def write_plan_markdown(self, session_id: str, content: str) -> str:  # noqa: ARG002
-        del session_id, content
+    async def write_artifact(
+        self,
+        session_id: str,
+        filename: str,
+        content: str,
+        *,
+        content_type: str,
+    ) -> str:  # noqa: ARG002
+        del session_id, filename, content, content_type
         raise RuntimeError("artifact upload unavailable")
+
+
+def _prepare_stub_pipeline(
+    planning_routes: Any,
+    artifact_store: _StubArtifactStore,
+) -> None:
+    planning_routes._planner_pipeline = _pipeline_with_artifacts(artifact_store)
 
 
 def _planning_app_client() -> TestClient:
@@ -101,6 +157,7 @@ def test_planner_worker_stores_stub_plan() -> None:
 
         artifact_store = _StubArtifactStore()
         planning_routes._artifact_store = artifact_store
+        _prepare_stub_pipeline(planning_routes, artifact_store)
 
         session_id = _planning_session_ready(client)
         push = _planner_push_envelope(session_id)
@@ -109,7 +166,12 @@ def test_planner_worker_stores_stub_plan() -> None:
         assert resp.json()["status"] == "done"
         assert resp.json()["session_id"] == session_id
 
-        assert artifact_store.writes == [(session_id, "stub")]
+        assert len(artifact_store.writes) == 3
+        assert artifact_store.writes == [
+            (session_id, "PLAN.md", "plan-markdown"),
+            (session_id, "ISSUES.json", '{"issues": []}'),
+            (session_id, "DEPENDENCIES.mmd", "flowchart TD"),
+        ]
 
         session = client.get(f"/planning/sessions/{session_id}")
         assert session.status_code == 200
@@ -125,18 +187,19 @@ def test_planner_worker_stores_stub_plan() -> None:
         artifacts = client.get(f"/planning/sessions/{session_id}/artifacts")
         assert artifacts.status_code == 200
         artifact_rows = artifacts.json()["artifacts"]
-        assert len(artifact_rows) == 1
+        assert len(artifact_rows) == 3
         assert artifact_rows[0]["artifact_type"] == "plan_md"
-        assert artifact_rows[0]["content_url"] == "https://example.test/{}/PLAN.md".format(
-            session_id,
-        )
+        assert artifact_rows[1]["artifact_type"] == "issues_json"
+        assert artifact_rows[2]["artifact_type"] == "dependencies_mmd"
 
 
 def test_planner_worker_failed_upload_marks_failed_event() -> None:
     with _planning_app_client() as client:
         import ace.planning.routes as planning_routes
 
-        planning_routes._artifact_store = _FailingArtifactStore()
+        failing_store = _FailingArtifactStore()
+        planning_routes._artifact_store = failing_store
+        planning_routes._planner_pipeline = _pipeline_with_artifacts(failing_store)
 
         session_id = _planning_session_ready(client)
         push = _planner_push_envelope(session_id)

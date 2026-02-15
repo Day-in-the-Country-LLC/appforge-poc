@@ -24,6 +24,20 @@ class PlanningArtifactType(str, Enum):
     DEPENDENCIES_MMD = "dependencies_mmd"
 
 
+class PlanningProjectRepository(BaseModel):
+    """Single repository declaration in a planning project registry."""
+
+    owner: str
+    name: str
+
+
+class PlanningProjectRegistry(BaseModel):
+    """Project metadata used for scout planning."""
+
+    project_slug: str
+    repos: list[PlanningProjectRepository]
+
+
 def _uuid() -> str:
     return uuid4().hex
 

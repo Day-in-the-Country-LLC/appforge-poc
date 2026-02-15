@@ -26,6 +26,13 @@ from ace.planning.models import (
     PlanningSessionCreateRequest,
 )
 from ace.planning.pubsub_queue import PubSubPlannerQueue, decode_pubsub_push
+from ace.planning.scouts import (
+    PlanningArtifacts,
+    PlanningScoutError,
+    build_planning_artifacts,
+    load_project_registry,
+    run_repositories_scout,
+)
 from ace.planning.store_firestore import (
     PLANNING_STATUS_DONE,
     PLANNING_STATUS_INTAKE_PENDING,
@@ -45,6 +52,7 @@ _PLANNING_RUNNING_TTL_HOURS = 1
 _store: PlanningStore | None = None
 _planner_queue: PubSubPlannerQueue | None = None
 _artifact_store: PlanningArtifactStore | None = None
+_planner_pipeline: Any | None = None
 
 
 def _planner_enabled() -> bool:
@@ -106,6 +114,53 @@ def _reset_artifact_store_for_tests(
 ) -> None:
     global _artifact_store
     _artifact_store = store
+
+
+def _reset_planner_pipeline_for_tests(pipeline: Any | None = None) -> None:
+    global _planner_pipeline
+    _planner_pipeline = pipeline
+
+
+async def _default_plan_pipeline(
+    session: PlanningSession,
+) -> list[tuple[PlanningArtifactType, str]]:
+    settings = get_settings()
+    project = await load_project_registry(session.project_slug, settings=settings)
+    if not project.repos:
+        raise PlanningScoutError(
+            f"❌ ERROR: project registry '{project.project_slug}' has no repos"
+        )
+    scout_reports = await run_repositories_scout(
+        project.repos,
+        github_token=(settings.github_token or ""),
+    )
+    artifacts: PlanningArtifacts = build_planning_artifacts(
+        session=session,
+        project=project,
+        scout_reports=scout_reports,
+    )
+    artifact_store = _resolve_artifact_store()
+    plan_url = await artifact_store.write_plan_markdown(
+        session_id=session.id,
+        content=artifacts.plan_markdown,
+    )
+    issues_url = await artifact_store.write_issues_json(
+        session_id=session.id,
+        content=artifacts.issues_json,
+    )
+    dependencies_url = await artifact_store.write_dependencies_mmd(
+        session_id=session.id,
+        content=artifacts.dependencies_mmd,
+    )
+    return [
+        (PlanningArtifactType.PLAN_MARKDOWN, plan_url),
+        (PlanningArtifactType.ISSUES_JSON, issues_url),
+        (PlanningArtifactType.DEPENDENCIES_MMD, dependencies_url),
+    ]
+
+
+def _resolve_planner_pipeline() -> Any:
+    return _planner_pipeline or _default_plan_pipeline
 
 
 def _utc_now() -> datetime:
@@ -345,7 +400,7 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
     session.updated_at = _utc_now()
 
     try:
-        artifact_store = _resolve_artifact_store()
+        planner_pipeline = _resolve_planner_pipeline()
         await store.append_event(
             session.id,
             PlanningEvent(
@@ -359,16 +414,16 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
             ),
         )
         await store.update_session(session)
-        content_url = await artifact_store.write_plan_markdown(
-            session_id=session.id,
-            content="stub",
-        )
-        artifact = PlanningArtifact(
-            session_id=session.id,
-            artifact_type=PlanningArtifactType.PLAN_MARKDOWN,
-            content_url=content_url,
-        )
-        await store.add_artifact(session.id, artifact)
+        artifact_results = await planner_pipeline(session)
+        persisted_artifacts: list[PlanningArtifact] = []
+        for artifact_type, content_url in artifact_results:
+            artifact = PlanningArtifact(
+                session_id=session.id,
+                artifact_type=artifact_type,
+                content_url=content_url,
+            )
+            await store.add_artifact(session.id, artifact)
+            persisted_artifacts.append(artifact)
         session.status = PLANNING_STATUS_DONE
         session.updated_at = _utc_now()
         await store.append_event(
@@ -378,12 +433,12 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
                 event_type="done",
                 payload={
                     "status": PLANNING_STATUS_DONE,
-                    "artifact_id": artifact.id,
-                    "artifact_type": artifact.artifact_type.value,
+                    "artifacts": [artifact.id for artifact in persisted_artifacts],
                 },
             ),
         )
         await store.update_session(session)
+        response_artifacts = [artifact.content_url for artifact in persisted_artifacts]
     except Exception as exc:
         session.status = "failed"
         session.updated_at = _utc_now()
@@ -413,10 +468,12 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
             detail=f"❌ ERROR: planning worker failed: {exc}",
         ) from exc
 
+    first_artifact = response_artifacts[0] if response_artifacts else ""
     return {
         "status": PLANNING_STATUS_DONE,
         "session_id": session.id,
-        "artifact_url": artifact.content_url,
+        "artifact_urls": response_artifacts,
+        "artifact_url": first_artifact,
         "message_id": queued.message_id,
     }
 
