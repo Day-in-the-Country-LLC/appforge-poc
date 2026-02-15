@@ -103,7 +103,7 @@ Optional (notifications):
 Worker-only required:
 
 - `APPFORGE_MCP_URL` (required for issue processing)
-- `WEBHOOK_SERVICE_ROLE=worker`
+- `WEBHOOK_SERVICE_ROLE=worker` (or `both`/`all` if planning endpoints are enabled)
 
 Listener-only required:
 

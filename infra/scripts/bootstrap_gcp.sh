@@ -18,7 +18,10 @@ gcloud services enable \
     run.googleapis.com \
     secretmanager.googleapis.com \
     cloudscheduler.googleapis.com \
-    cloudbuild.googleapis.com
+    cloudbuild.googleapis.com \
+    pubsub.googleapis.com \
+    firestore.googleapis.com \
+    storage.googleapis.com
 
 echo "Creating service account..."
 gcloud iam service-accounts create appforge-coding-engine \

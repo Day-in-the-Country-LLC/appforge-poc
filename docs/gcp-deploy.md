@@ -26,12 +26,12 @@ chmod +x infra/scripts/bootstrap_gcp.sh
 ```
 
 This will:
-- Enable required APIs (Compute Engine, Secret Manager, Cloud Scheduler)
+- Enable required APIs (Compute Engine, Secret Manager, Cloud Scheduler, Pub/Sub, Firestore, Cloud Storage)
 - Create a service account
 - Grant necessary IAM roles
 - Prompt for secrets (GitHub token, API keys)
 
-## Step 2: Deploy with Terraform (VM optional; HTTP service removed)
+## Step 2: Deploy with Terraform
 
 ```bash
 cd infra/terraform
@@ -48,6 +48,8 @@ terraform apply -var gcp_project_id=$PROJECT_ID -var gcp_region=$REGION
 
 Terraform can create a VM skeleton, but the previous HTTP service has been removed. For daily runs, trigger the CLI (e.g., via cron/Cloud Scheduler invoking the CLI) rather than an HTTP endpoint.
 
+Planner production infrastructure (topic/subscription/bucket and planner role wiring) is managed in `/Users/kristinday/ditc_terraform/live/prod/appforge-483920`.
+
 ## Step 3: Verify Deployment
 
 Get the VM's external IP:
@@ -56,7 +58,7 @@ Get the VM's external IP:
 gcloud compute instances describe ace-vm --zone us-central1-a --format='value(networkInterfaces[0].accessConfigs[0].natIP)'
 ```
 
-Previous HTTP endpoints are removed (no FastAPI service). Use CLI runs instead.
+Previous HTTP endpoints are removed in this VM-oriented deployment (no FastAPI container service).
 
 ## Triggering daily runs
 
