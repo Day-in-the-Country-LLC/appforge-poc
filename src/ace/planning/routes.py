@@ -552,6 +552,33 @@ async def _refresh_session_state(session: PlanningSession) -> PlanningSession:
     return session
 
 
+@planning_router.get("/projects")
+async def list_projects() -> dict[str, Any]:
+    """List available project slugs from Firestore and local registry files."""
+    from pathlib import Path
+
+    slugs: set[str] = set()
+
+    settings = get_settings()
+    project_id = (settings.gcp_project_id or "").strip()
+    try:
+        from google.cloud import firestore as _fs
+
+        if project_id and _fs is not None:
+            db = _fs.Client(project=project_id)
+            for doc in db.collection("projects").stream():
+                slugs.add(doc.id)
+    except Exception:
+        pass
+
+    local_dir = Path("docs/projects")
+    if local_dir.is_dir():
+        for path in sorted(local_dir.glob("*.json")):
+            slugs.add(path.stem)
+
+    return {"projects": sorted(slugs)}
+
+
 @planning_router.post("/sessions", status_code=201, response_model=PlanningSession)
 async def create_planning_session(payload: PlanningSessionCreateRequest) -> PlanningSession:
     """Create a new planning session and generate intake questions."""

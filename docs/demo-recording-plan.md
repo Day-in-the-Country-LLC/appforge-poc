@@ -70,10 +70,7 @@ uv run python scripts/demo_log_tail.py \
 If you want a simple app window for screen recording:
 
 ```bash
-uv run --with streamlit streamlit run scripts/demo_log_streamlit.py -- \
-  --project <your-gcp-project> \
-  --mapping-file docs/repo-gcp-mapping.json \
-  --services <service-1>,<service-2>
+uv run appforge-dashboard
 ```
 
 Then use sidebar controls in the app to:

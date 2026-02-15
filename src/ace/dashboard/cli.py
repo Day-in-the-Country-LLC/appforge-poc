@@ -1,4 +1,4 @@
-"""CLI entry point for the ACE Planning Dashboard."""
+"""CLI entry point for the unified ACE dashboard."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from pathlib import Path
 
 
 def main() -> None:
-    """Launch the Streamlit dashboard via ``uv run appforge-dashboard``."""
-    script = Path(__file__).resolve().parents[3] / "scripts" / "ace_dashboard.py"
+    """Launch the unified Streamlit dashboard via ``uv run appforge-dashboard``."""
+    script = Path(__file__).resolve().parents[3] / "scripts" / "appforge_dashboard.py"
     if not script.exists():
         print(f"❌ ERROR: Dashboard script not found at {script}", file=sys.stderr)
         sys.exit(1)

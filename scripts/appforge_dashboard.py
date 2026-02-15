@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simple local Streamlit app for live webhook log viewing."""
+"""Unified Appforge dashboard with Observe and Plan tabs."""
 
 from __future__ import annotations
 
@@ -16,18 +16,10 @@ from pathlib import Path
 from typing import Any
 
 import streamlit as st
-from ace_dashboard import (
-    AppConfig,
-)
-from ace_dashboard import (
-    apply_style as apply_planner_style,
-)
-from ace_dashboard import (
-    parse_args as parse_planner_args,
-)
-from ace_dashboard import (
-    run_planner_app as run_planner_dashboard,
-)
+from ace_dashboard import AppConfig
+from ace_dashboard import apply_style as apply_planning_style
+from ace_dashboard import parse_args as parse_planning_args
+from ace_dashboard import run_planner_app as render_plan_tab
 
 DEFAULT_SERVICES = ("appforge-webhooks", "appforge-webhooks-worker")
 DEFAULT_COLOR_HEX = "DCDCDC"
@@ -72,7 +64,7 @@ def parse_app_args() -> tuple[argparse.Namespace, AppConfig]:
     args, planner_argv = parser.parse_known_args()
     if not args.project.strip():
         args.project = _default_project()
-    return args, parse_planner_args(list(planner_argv))
+    return args, parse_planning_args(list(planner_argv))
 
 
 def normalize_hex_color(value: str) -> str:
@@ -357,11 +349,10 @@ def apply_log_style() -> None:
     )
 
 
-def run_log_tab(args: argparse.Namespace) -> None:
+def render_observe_tab(args: argparse.Namespace) -> None:
     if not args.project:
         st.error(
-            "❌ ERROR: project is required for log streaming. "
-            "Pass --project or set GCP_PROJECT_ID."
+            "❌ ERROR: project is required for log streaming. Pass --project or set GCP_PROJECT_ID."
         )
         return
 
@@ -421,50 +412,40 @@ def run_log_tab(args: argparse.Namespace) -> None:
         st.rerun()
 
 
-def render_about_page() -> None:
-    st.markdown("<div class='page-title'>ACE Control Center</div>", unsafe_allow_html=True)
-    st.markdown(
-        """
-## What this app includes
-
-- **Observe**: Stream Cloud Run logs from listener + worker.
-- **Planner**: Create and monitor planning sessions.
-- **Issue workflows**: Review generated planning-created issues and send ready status.
-
-Use the page selector on the left to switch modes.
-""",
-        unsafe_allow_html=True,
-    )
-
-
-def _render_mode_selector() -> str:
-    selected = st.sidebar.segmented_control(
-        "Control Mode",
-        options=["Observe", "Plan"],
-        key="control_page",
-        default="Observe",
-        label_visibility="collapsed",
-        width="stretch",
-    )
-    return selected or "Observe"
+def _render_tab_selector() -> str:
+    if hasattr(st, "segmented_control"):
+        selected = st.sidebar.segmented_control(
+            "Tab",
+            options=["Observe", "Plan"],
+            key="dashboard_tab",
+            default="Plan",
+            label_visibility="collapsed",
+            width="stretch",
+        )
+    else:  # pragma: no cover - fallback for older streamlit versions
+        selected = st.sidebar.radio(
+            "Tab",
+            ["Observe", "Plan"],
+            key="dashboard_tab",
+            label_visibility="collapsed",
+        )
+    return selected or "Plan"
 
 
 def main() -> None:
-    observe_args, planner_config = parse_app_args()
+    observe_args, planning_config = parse_app_args()
 
-    st.set_page_config(page_title="ACE Control Center", layout="wide")
+    st.set_page_config(page_title="Appforge Dashboard", layout="wide")
 
-    page = _render_mode_selector()
+    tab = _render_tab_selector()
 
-    if page == "Observe":
-        apply_log_style()
-        run_log_tab(observe_args)
+    if tab == "Plan":
+        apply_planning_style()
+        render_plan_tab(planning_config)
         return
 
-    if page == "Plan":
-        apply_planner_style()
-        run_planner_dashboard(planner_config, selected_page="Planning")
-        return
+    apply_log_style()
+    render_observe_tab(observe_args)
 
 
 if __name__ == "__main__":

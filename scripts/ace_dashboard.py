@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Streamlit dashboard for local planning session intake and progress polling."""
+"""Planning tab for the Appforge dashboard — intake, polling, and issue approval."""
 
 from __future__ import annotations
 
@@ -136,6 +136,10 @@ class PlannerApiClient:
 
     def get_artifacts(self, *, session_id: str) -> dict[str, Any]:
         return self._request_json("GET", f"/planning/sessions/{session_id}/artifacts")
+
+    def list_projects(self) -> list[str]:
+        result = self._request_json("GET", "/planning/projects")
+        return result.get("projects", [])
 
 
 def _detect_gcp_project_id() -> str | None:
@@ -505,10 +509,23 @@ def load_events(api: PlannerApiClient, *, force: bool = False) -> None:
 
 
 def create_session_form(api: PlannerApiClient) -> None:
-    st.markdown('<div class="session-card">', unsafe_allow_html=True)
+    st.divider()
     st.subheader("Create planning session")
+
+    try:
+        projects = api.list_projects()
+    except Exception:
+        projects = []
+
     with st.form("planning_session_form"):
-        project_slug = st.text_input("Project slug", value="example-project")
+        if projects:
+            project_slug = st.selectbox("Select Project", options=projects)
+        else:
+            project_slug = st.text_input(
+                "Select Project",
+                value="",
+                help="No projects found via API. Enter a slug manually.",
+            )
         mode = st.selectbox(
             "Mode",
             options=["plan_only", "plan_and_create_issues"],
@@ -547,7 +564,6 @@ def create_session_form(api: PlannerApiClient) -> None:
                 load_events(api, force=True)
                 set_flash("Session created. Answer each question to continue.")
                 st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_session_header(session: dict[str, Any]) -> None:
@@ -887,20 +903,6 @@ def render_planning_page(api: PlannerApiClient, config: AppConfig) -> None:
     st.button("Reset session", on_click=clear_session, type="secondary")
 
 
-def render_about_page() -> None:
-    st.markdown("<div class='page-title'>About</div>", unsafe_allow_html=True)
-    st.markdown(
-        """
-        The planning dashboard talks to the local Planner API.
-
-        1. Create a new session using a project slug and request text.
-        2. Answer generated intake questions.
-        3. Start planning when the session moves to `ready_to_run`.
-        4. Watch events and artifact links while execution advances.
-        """
-    )
-
-
 def render_sidebar(config: AppConfig) -> None:
     st.sidebar.checkbox(
         "Auto-refresh events",
@@ -921,15 +923,8 @@ def render_sidebar(config: AppConfig) -> None:
         st.rerun()
 
 
-def main() -> None:
-    config = parse_args()
-    run_planner_app(config)
-
-
-def run_planner_app(config: AppConfig, *, selected_page: str = "Planning") -> None:
-    if selected_page not in {"Planning", "About"}:
-        selected_page = "Planning"
-
+def run_planner_app(config: AppConfig) -> None:
+    """Render the planning dashboard. Called from the unified dashboard."""
     initialize_state()
 
     if config.planner_token:
@@ -949,10 +944,6 @@ def run_planner_app(config: AppConfig, *, selected_page: str = "Planning") -> No
             config.planner_url,
             token=str(st.session_state["planner_api_token"]).strip(),
         )
-
-    if selected_page == "About":
-        render_about_page()
-        return
 
     if not api:
         st.markdown(
@@ -1004,16 +995,3 @@ def run_planner_app(config: AppConfig, *, selected_page: str = "Planning") -> No
         load_events(api)
 
     render_planning_page(api, config)
-
-
-def _main_with_shell_layout() -> None:
-    config = parse_args()
-    st.set_page_config(page_title="ACE Planning Dashboard", layout="wide")
-    apply_style()
-
-    page = st.sidebar.radio("Page", ["Planning", "About"], key="planner_shell_page")
-    run_planner_app(config, selected_page=page)
-
-
-if __name__ == "__main__":
-    _main_with_shell_layout()
