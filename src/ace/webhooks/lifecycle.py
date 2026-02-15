@@ -21,6 +21,7 @@ STAGE_PLANNING_SCOUTING = "planning_scouting"
 STAGE_PLANNING_SYNTHESIS = "planning_synthesis"
 STAGE_PLANNING_DONE = "planning_done"
 STAGE_PLANNING_FAILED = "planning_failed"
+STAGE_PLANNING_ISSUE_WRITER = "planning_issue_writer"
 
 RESOLUTION_SUCCESS = "success"
 RESOLUTION_BLOCKED = "blocked"

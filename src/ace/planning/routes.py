@@ -16,6 +16,7 @@ from ace.planning.artifacts import (
     PlanningArtifactStoreError,
 )
 from ace.planning.intake import generate_intake_questions, intake_complete
+from ace.planning.issue_writer import write_issues_from_payload
 from ace.planning.models import (
     PlanningArtifact,
     PlanningArtifactList,
@@ -24,6 +25,7 @@ from ace.planning.models import (
     PlanningEventList,
     PlanningMessage,
     PlanningMessageCreate,
+    PlanningMode,
     PlanningSession,
     PlanningSessionCreateRequest,
 )
@@ -49,6 +51,7 @@ from ace.webhooks.lifecycle import (
     STAGE_PLANNING_DONE,
     STAGE_PLANNING_FAILED,
     STAGE_PLANNING_INTAKE,
+    STAGE_PLANNING_ISSUE_WRITER,
     STAGE_PLANNING_SCOUTING,
     STAGE_PLANNING_SYNTHESIS,
     build_planning_lifecycle_context,
@@ -96,6 +99,7 @@ logger = structlog.get_logger(__name__)
 PLANNING_PHASE_INTAKE = "intake"
 PLANNING_PHASE_SCOUTING = "scouting"
 PLANNING_PHASE_SYNTHESIS = "synthesis"
+PLANNING_PHASE_ISSUES = "issues"
 PLANNING_PHASE_DONE = "done"
 
 
@@ -167,7 +171,7 @@ def _reset_planner_pipeline_for_tests(pipeline: Any | None = None) -> None:
 
 async def _default_plan_pipeline(
     session: PlanningSession,
-) -> list[tuple[PlanningArtifactType, str]]:
+) -> tuple[list[tuple[PlanningArtifactType, str]], dict[PlanningArtifactType, str]]:
     settings = get_settings()
     project = await load_project_registry(session.project_slug, settings=settings)
     if not project.repos:
@@ -196,11 +200,30 @@ async def _default_plan_pipeline(
         session_id=session.id,
         content=artifacts.dependencies_mmd,
     )
-    return [
+    artifact_rows = [
         (PlanningArtifactType.PLAN_MARKDOWN, plan_url),
         (PlanningArtifactType.ISSUES_JSON, issues_url),
         (PlanningArtifactType.DEPENDENCIES_MMD, dependencies_url),
     ]
+    artifact_payloads: dict[PlanningArtifactType, str] = {
+        PlanningArtifactType.PLAN_MARKDOWN: artifacts.plan_markdown,
+        PlanningArtifactType.ISSUES_JSON: artifacts.issues_json,
+        PlanningArtifactType.DEPENDENCIES_MMD: artifacts.dependencies_mmd,
+    }
+    return artifact_rows, artifact_payloads
+
+
+def _coerce_pipeline_output(
+    pipeline_output: Any,
+) -> tuple[list[tuple[PlanningArtifactType, str]], dict[PlanningArtifactType, str]]:
+    if isinstance(pipeline_output, tuple) and len(pipeline_output) == 2:
+        artifact_rows, payloads = pipeline_output
+        if isinstance(artifact_rows, list) and isinstance(payloads, dict):
+            return artifact_rows, payloads
+        raise TypeError("❌ ERROR: planner pipeline output must be (artifacts, payloads)")
+    if isinstance(pipeline_output, list):
+        return pipeline_output, {}
+    raise TypeError("❌ ERROR: planner pipeline output must be artifact list or tuple")
 
 
 def _resolve_planner_pipeline() -> Any:
@@ -541,9 +564,11 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
             ),
         )
         await store.update_session(session)
-        artifact_results = await planner_pipeline(session)
+        pipeline_output = await planner_pipeline(session)
+        artifact_rows, artifact_payloads = _coerce_pipeline_output(pipeline_output)
         persisted_artifacts: list[PlanningArtifact] = []
-        for artifact_type, content_url in artifact_results:
+        issues_created: list[dict[str, Any]] = []
+        for artifact_type, content_url in artifact_rows:
             _log_planning_lifecycle_event(
                 session,
                 stage=STAGE_PLANNING_SYNTHESIS,
@@ -567,6 +592,63 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
                 artifact_id=artifact.id,
                 artifact_url=content_url,
             )
+        if session.mode == PlanningMode.PLAN_AND_CREATE_ISSUES:
+            issues_json = artifact_payloads.get(
+                PlanningArtifactType.ISSUES_JSON,
+                '{"issues": []}',
+            )
+            _log_planning_lifecycle_event(
+                session,
+                stage=STAGE_PLANNING_ISSUE_WRITER,
+                phase=PLANNING_PHASE_ISSUES,
+                event_type="issue_writer_started",
+                message_id=queued.message_id,
+            )
+            created_issues = await write_issues_from_payload(
+                session=session,
+                issues_json=issues_json,
+                project_slug=session.project_slug,
+                github_token=(get_settings().github_token or ""),
+            )
+            for issue in created_issues:
+                issue_payload = {
+                    "issue_id": issue.issue_id,
+                    "title": issue.title,
+                    "url": issue.url,
+                    "repo": issue.repo,
+                    "number": issue.number,
+                }
+                issues_created.append(issue_payload)
+                _log_planning_lifecycle_event(
+                    session,
+                    stage=STAGE_PLANNING_ISSUE_WRITER,
+                    phase=PLANNING_PHASE_ISSUES,
+                    event_type="issue_created",
+                    created_issue_id=issue.issue_id,
+                    created_issue_url=issue.url,
+                    created_issue_number=issue.number,
+                    created_issue_repo=issue.repo,
+                )
+            _log_planning_lifecycle_event(
+                session,
+                stage=STAGE_PLANNING_ISSUE_WRITER,
+                phase=PLANNING_PHASE_ISSUES,
+                event_type="issue_writer_done",
+                requested_count=len(issues_created),
+                created_count=len(issues_created),
+                message_id=queued.message_id,
+            )
+            await store.append_event(
+                session.id,
+                PlanningEvent(
+                    session_id=session.id,
+                    event_type="issues_written",
+                    payload={
+                        "requested_count": len(issues_created),
+                        "created": issues_created,
+                    },
+                ),
+            )
         session.status = PLANNING_STATUS_DONE
         session.updated_at = _utc_now()
         _log_planning_lifecycle_event(
@@ -576,6 +658,7 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
             event_type="done",
             status=PLANNING_STATUS_DONE,
             artifact_count=len(persisted_artifacts),
+            issue_created_count=len(issues_created),
             message_id=queued.message_id,
         )
         await store.append_event(
@@ -586,6 +669,7 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
                 payload={
                     "status": PLANNING_STATUS_DONE,
                     "artifacts": [artifact.id for artifact in persisted_artifacts],
+                    "issue_created_count": len(issues_created),
                 },
             ),
         )

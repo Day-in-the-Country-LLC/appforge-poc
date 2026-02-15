@@ -33,6 +33,24 @@ class _StubArtifactStore:
         return f"https://example.test/{session_id}/{filename}"
 
 
+class _FakeIssueGitHubClient:
+    def __init__(self, token: str) -> None:
+        self.token = token
+        self.created: list[tuple[str, dict[str, Any]]] = []
+        del token
+
+    async def rest_post(self, endpoint: str, json: dict[str, Any]) -> dict[str, Any]:
+        self.created.append((endpoint, json))
+        repo_path = endpoint.replace("/repos/", "").rsplit("/issues", maxsplit=1)[0]
+        return {
+            "html_url": f"https://github.com/{repo_path}/issues/{len(self.created)}",
+            "number": len(self.created),
+        }
+
+    async def close(self) -> None:
+        return None
+
+
 def _pipeline_with_artifacts(
     artifact_store: _StubArtifactStore,
 ) -> Callable[[Any], Any]:
@@ -61,6 +79,46 @@ def _pipeline_with_artifacts(
             (PlanningArtifactType.ISSUES_JSON, issues_url),
             (PlanningArtifactType.DEPENDENCIES_MMD, dependencies_url),
         ]
+
+    return _pipeline
+
+
+def _pipeline_with_artifacts_and_payload(
+    artifact_store: _StubArtifactStore,
+    issue_payload: str,
+) -> Callable[[Any], Any]:
+    async def _pipeline(session: Any) -> tuple[
+        list[tuple[PlanningArtifactType, str]],
+        dict[PlanningArtifactType, str],
+    ]:
+        session_id = session.id
+        plan_url = await artifact_store.write_artifact(
+            session_id=session_id,
+            filename="PLAN.md",
+            content="plan-markdown",
+            content_type="text/markdown",
+        )
+        issues_url = await artifact_store.write_artifact(
+            session_id=session_id,
+            filename="ISSUES.json",
+            content=issue_payload,
+            content_type="application/json",
+        )
+        dependencies_url = await artifact_store.write_artifact(
+            session_id=session_id,
+            filename="DEPENDENCIES.mmd",
+            content="flowchart TD",
+            content_type="text/plain",
+        )
+        return [
+            (PlanningArtifactType.PLAN_MARKDOWN, plan_url),
+            (PlanningArtifactType.ISSUES_JSON, issues_url),
+            (PlanningArtifactType.DEPENDENCIES_MMD, dependencies_url),
+        ], {
+            PlanningArtifactType.PLAN_MARKDOWN: "plan-markdown",
+            PlanningArtifactType.ISSUES_JSON: issue_payload,
+            PlanningArtifactType.DEPENDENCIES_MMD: "flowchart TD",
+        }
 
     return _pipeline
 
@@ -97,12 +155,16 @@ def _planning_app_client() -> TestClient:
     return TestClient(app, headers=_PLANNER_AUTH_HEADER)
 
 
-def _planning_session_ready(client: TestClient, project_slug: str = "example-project") -> str:
+def _planning_session_ready(
+    client: TestClient,
+    project_slug: str = "example-project",
+    mode: str = "plan_only",
+) -> str:
     created = client.post(
         "/planning/sessions",
         json={
             "project_slug": project_slug,
-            "mode": "plan_only",
+            "mode": mode,
             "request_text": "Build a migration plan",
         },
     )
@@ -128,14 +190,17 @@ def _planning_session_ready(client: TestClient, project_slug: str = "example-pro
     return session_id
 
 
-def _planner_push_envelope(session_id: str) -> dict[str, object]:
+def _planner_push_envelope(
+    session_id: str,
+    mode: str = "plan_only",
+) -> dict[str, object]:
     raw = {
         "schema_version": "1",
         "event": "planner.start",
         "payload": {
             "session_id": session_id,
             "project_slug": "example-project",
-            "mode": "plan_only",
+            "mode": mode,
             "created_at": "2026-02-15T00:00:00Z",
         },
         "queued_at": "2026-02-15T00:00:01Z",
@@ -149,7 +214,7 @@ def _planner_push_envelope(session_id: str) -> dict[str, object]:
                 "event": "planner.start",
                 "session_id": session_id,
                 "project_slug": "example-project",
-                "mode": "plan_only",
+                "mode": mode,
             },
         }
     }
@@ -195,6 +260,68 @@ def test_planner_worker_stores_stub_plan() -> None:
         assert artifact_rows[0]["artifact_type"] == "plan_md"
         assert artifact_rows[1]["artifact_type"] == "issues_json"
         assert artifact_rows[2]["artifact_type"] == "dependencies_mmd"
+
+
+def test_planner_worker_creates_github_issues_when_requested(monkeypatch) -> None:
+    with _planning_app_client() as client:
+        import ace.planning.routes as planning_routes
+
+        artifact_store = _StubArtifactStore()
+        planning_routes._artifact_store = artifact_store
+        issues_payload = json.dumps(
+            {
+                "issues": [
+                    {
+                        "id": "ISSUE-001",
+                        "repo": "owner-one/repo-one",
+                        "title": "Prepare scaffold",
+                        "description": "Plan and wire scaffold",
+                    },
+                    {
+                        "id": "ISSUE-002",
+                        "repo": "owner-two/repo-two",
+                        "title": "Implement feature",
+                        "description": "Build feature from scaffold",
+                        "depends_on": ["ISSUE-001"],
+                    },
+                ],
+            },
+        )
+        planning_routes._planner_pipeline = _pipeline_with_artifacts_and_payload(
+            artifact_store=artifact_store,
+            issue_payload=issues_payload,
+        )
+
+        fake_github = _FakeIssueGitHubClient(token="secret-token")
+        monkeypatch.setattr(
+            "ace.planning.issue_writer.GitHubAPIClient",
+            lambda _token: fake_github,
+        )
+
+        session_id = _planning_session_ready(
+            client,
+            mode="plan_and_create_issues",
+        )
+        push = _planner_push_envelope(session_id, mode="plan_and_create_issues")
+        resp = client.post("/internal/pubsub/planner", json=push)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "done"
+
+        assert len(fake_github.created) == 2
+        assert fake_github.created[0][0] == "/repos/owner-one/repo-one/issues"
+        assert fake_github.created[1][0] == "/repos/owner-two/repo-two/issues"
+
+        events = client.get(f"/planning/sessions/{session_id}/events")
+        assert events.status_code == 200
+        event_payload = events.json()["events"]
+        assert event_payload[-2]["event_type"] == "issues_written"
+        assert event_payload[-2]["payload"]["requested_count"] == 2
+        assert event_payload[-1]["event_type"] == "done"
+        assert event_payload[-1]["payload"]["issue_created_count"] == 2
+
+        done_session = client.get(f"/planning/sessions/{session_id}")
+        assert done_session.status_code == 200
+        assert done_session.json()["status"] == "done"
 
 
 def test_planner_worker_failed_upload_marks_failed_event() -> None:

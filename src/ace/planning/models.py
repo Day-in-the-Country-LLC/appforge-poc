@@ -14,6 +14,7 @@ class PlanningMode(str, Enum):
     """Planning execution mode."""
 
     PLAN_ONLY = "plan_only"
+    PLAN_AND_CREATE_ISSUES = "plan_and_create_issues"
 
 
 class PlanningArtifactType(str, Enum):

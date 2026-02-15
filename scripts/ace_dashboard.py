@@ -288,7 +288,12 @@ def create_session_form(api: PlannerApiClient) -> None:
     st.subheader("Create planning session")
     with st.form("planning_session_form"):
         project_slug = st.text_input("Project slug", value="example-project")
-        mode = st.selectbox("Mode", options=["plan_only"], index=0)
+        mode = st.selectbox(
+            "Mode",
+            options=["plan_only", "plan_and_create_issues"],
+            index=0,
+            help="Choose `plan_only` for artifacts only or `plan_and_create_issues` to open GitHub issues.",
+        )
         request_text = st.text_area(
             "What should the planner work on?",
             value="",

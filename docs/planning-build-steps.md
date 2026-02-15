@@ -285,15 +285,16 @@ Terraform items:
 
 ---
 
-## Step 12 (Later): GitHub Issue Creation
+## Step 12: GitHub Issue Creation
 
 **Output:** planner can create issues from `ISSUES.json`.
 
-- Add an Issue Writer stage.
+- Add an Issue Writer stage in the worker pipeline.
 - Enforce dependency relationships.
-- Post outcome summary back into session events.
+- Track issue writer lifecycle stages (`planning_issue_writer`).
+- Post outcome summary back into session events (`issues_written` / done payload).
 
-**Done when:** issues are created correctly across repos and match the plan.
+**Done when:** issues are created correctly across repos, dependency constraints are honored, and completion summary is included in session events.
 
 ---
 
@@ -314,6 +315,7 @@ Step 8  →  Multi-agent planning (real value)
 Step 9  →  Authentication
 Step 10 →  Terraform + deployment
 Step 11 →  Observability + demo readiness
+Step 12 →  GitHub Issue Creation
 ```
 
 Notes:

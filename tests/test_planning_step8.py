@@ -189,10 +189,13 @@ async def test_default_planner_pipeline_uses_scout_reports(monkeypatch) -> None:
         _load_project,
     )
 
-    artifact_rows = await planning_routes._default_plan_pipeline(session)
+    artifact_rows, artifact_payloads = await planning_routes._default_plan_pipeline(session)
     assert artifact_rows[0][0] == PlanningArtifactType.PLAN_MARKDOWN
     assert artifact_rows[1][0] == PlanningArtifactType.ISSUES_JSON
     assert artifact_rows[2][0] == PlanningArtifactType.DEPENDENCIES_MMD
+    assert PlanningArtifactType.PLAN_MARKDOWN in artifact_payloads
+    assert PlanningArtifactType.ISSUES_JSON in artifact_payloads
+    assert PlanningArtifactType.DEPENDENCIES_MMD in artifact_payloads
     assert artifact_store.writes == [
         (session.id, "PLAN.md"),
         (session.id, "ISSUES.json"),
