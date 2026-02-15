@@ -25,11 +25,14 @@ You must:
 3. Capture dependencies in the issue description and use GitHub issue relationships to link them.
 4. For `your-terraform-repo` update issues, add an explicit instruction to run the `terraform-apply` skill at the end of the work.
 5. When a new secret is added to Secret Manager via Terraform, create a follow-up issue assigned to `repo-owner` to add the secret value as a version, including this command in the issue: `printf %s \"$SECRET_VALUE\" | gcloud secrets versions add SECRET_NAME --data-file=-`.
-6. Choose the execution label: `developer`, `agent:local`, or `agent:remote` based on who/where the work must happen.
-7. Apply exactly one difficulty label: `difficulty:easy`, `difficulty:medium`, or `difficulty:hard`.
-8. Present the issue(s) to the human for approval.
-9. After approval, create/update the issue(s) using `github-mcp`.
-10. Set project status to `Backlog` using `appforge-mcp`.
+6. If opening follow-up work from planning outputs, align issue boundaries with the generated `ISSUES.json` entries and preserve dependency intent.
+7. If planning is expected to create issues automatically, confirm the session is in `plan_and_create_issues` mode (not `plan_only`).
+8. For manual planning follow-up issues, include the same deterministic IDs and dependency order from `ISSUES.json` (or preserve the blocker ordering explicitly in the body).
+9. Choose the execution label: `developer`, `agent:local`, or `agent:remote` based on who/where the work must happen.
+10. Apply exactly one difficulty label: `difficulty:easy`, `difficulty:medium`, or `difficulty:hard`.
+11. Present the issue(s) to the human for approval.
+12. After approval, create/update the issue(s) using `github-mcp`.
+13. Set project status to `Backlog` using `appforge-mcp`.
 
 ## Issue Requirements
 
@@ -39,7 +42,25 @@ Every issue MUST include:
 3. Detailed description (what + why)
 4. Acceptance criteria (testable)
 5. Context (links, docs, background)
-6. Dependencies (blocked-by/depends-on)
+6. Dependencies (blocked-by/depends-on) using issue IDs for `depends_on` contracts when derived from planning payloads.
+
+## Planning Issue Payload Contract
+
+When creating issues from planner outputs, these fields are expected in generated `ISSUES.json`:
+- `issues` array entries with:
+  - `id` (string, stable, unique within session)
+  - `repo` (string in `owner/repo` form)
+  - `title`
+  - optional `description`
+  - optional `depends_on` (array of prior issue ids)
+- Planner enforces acyclic dependencies.
+- The issue writer runs dependencies topologically and attaches blocker references in body as `Blocked By`.
+- Session event checks for validation after running:
+  - `issues_written` event with `requested_count` and `created` list
+  - final `done` event with `issue_created_count`
+- Lifecycle stage used by the worker is `planning_issue_writer`.
+
+When writing manual split issues from planning guidance, keep repo-scoped context high-signal, and preserve dependency intent in titles/body/links.
 
 ## Choosing the Right Repository (Multi-Repo Guidance)
 
