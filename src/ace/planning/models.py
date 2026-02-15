@@ -52,6 +52,8 @@ class PlanningSession(BaseModel):
     mode: PlanningMode = PlanningMode.PLAN_ONLY
     request_text: str
     status: str = "intake_pending"
+    questions: list[PlanningQuestion] = Field(default_factory=list)
+    answers: dict[str, str] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -81,17 +83,19 @@ class PlanningMessageCreate(BaseModel):
 
     model_config = ConfigDict(
         json_schema_extra={
-            "examples": [
+        "examples": [
                 {
                     "source": "user",
-                    "content": "Primary objective: launch checkout with mobile flow improvements.",
+                    "question_id": "primary_goal_category",
+                    "answer": "feature",
                 }
             ]
         }
     )
 
     source: str = "user"
-    content: str
+    question_id: str
+    answer: str
 
 
 class PlanningMessage(BaseModel):
