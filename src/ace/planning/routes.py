@@ -119,7 +119,9 @@ PLANNING_PHASE_DONE = "done"
 
 def _planner_enabled() -> bool:
     role = (get_settings().webhook_service_role or "").strip().lower()
-    return role in ("planner", "both", "all")
+    # Listener is the public Cloud Run entrypoint used by the dashboard.
+    # Planner APIs must be available there without enabling worker internals.
+    return role in ("listener", "planner", "both", "all")
 
 
 def _planner_worker_enabled() -> bool:
@@ -554,7 +556,7 @@ async def _refresh_session_state(session: PlanningSession) -> PlanningSession:
 
 @planning_router.get("/projects")
 async def list_projects() -> dict[str, Any]:
-    """List available project slugs from Firestore and local registry files."""
+    """List available project slugs from Firestore, local files, and repo-gcp-mapping."""
     from pathlib import Path
 
     slugs: set[str] = set()
@@ -575,6 +577,18 @@ async def list_projects() -> dict[str, Any]:
     if local_dir.is_dir():
         for path in sorted(local_dir.glob("*.json")):
             slugs.add(path.stem)
+
+    mapping_path = Path("docs/repo-gcp-mapping.json")
+    if mapping_path.is_file():
+        try:
+            entries = json.loads(mapping_path.read_text(encoding="utf-8"))
+            for entry in entries:
+                if isinstance(entry, dict):
+                    name = (entry.get("gcp_project") or "").strip()
+                    if name:
+                        slugs.add(name)
+        except Exception:
+            pass
 
     return {"projects": sorted(slugs)}
 

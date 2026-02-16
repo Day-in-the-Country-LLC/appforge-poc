@@ -145,6 +145,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Local config (dashboard settings, secrets config)
+config.local.json
+
 # Local credentials
 appforge-creds.json
 gcp-credentials.json

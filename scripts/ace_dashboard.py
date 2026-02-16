@@ -10,6 +10,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -17,15 +18,26 @@ import streamlit as st
 
 from ace.config.secrets import load_secret
 
-PLANNER_DEFAULT_URL = "http://127.0.0.1:8000"
-PLANNER_API_URL_ENV = "PLANNER_API_URL"
-PLANNER_URL_ENV = "PLANNER_URL"
-PLANNER_TOKEN_ENV = "PLANNER_API_TOKEN"
-PLANNER_TOKEN_SECRET_ENV = "PLANNER_API_TOKEN_SECRET"
-PLANNER_PASSWORD_SECRET_ENV = "PLANNER_DASHBOARD_PASSWORD_SECRET"
-PLANNER_SECRET_VERSION_ENV = "PLANNER_SECRET_VERSION"
-PLANNER_SECRET_PROJECT_ENV = "GCP_PROJECT_ID"
-GCP_CREDENTIALS_FILE_ENV = "GCP_CREDENTIALS_FILE"
+_CONFIG_FILE_NAMES = ("config.local.json",)
+_FALLBACK_PLANNER_URL = "https://appforge-webhooks-gchmaqkvia-uc.a.run.app"
+
+
+def _load_local_config() -> dict[str, Any]:
+    """Load dashboard config from config.local.json next to the scripts dir."""
+    for name in _CONFIG_FILE_NAMES:
+        path = Path(__file__).resolve().parent.parent / name
+        if path.is_file():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        cwd_path = Path.cwd() / name
+        if cwd_path.is_file():
+            try:
+                return json.loads(cwd_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+    return {}
 
 
 @dataclass
@@ -144,7 +156,7 @@ class PlannerApiClient:
 
 def _detect_gcp_project_id() -> str | None:
     """Return the active GCP project from env or gcloud CLI."""
-    from_env = os.environ.get(PLANNER_SECRET_PROJECT_ENV, "").strip()
+    from_env = os.environ.get("GCP_PROJECT_ID", "").strip()
     if from_env:
         return from_env
     try:
@@ -162,83 +174,53 @@ def _detect_gcp_project_id() -> str | None:
 
 
 def parse_args(argv: list[str] | None = None) -> AppConfig:
-    default_planner_url = (
-        os.environ.get(PLANNER_API_URL_ENV)
-        or os.environ.get(PLANNER_URL_ENV)
-        or PLANNER_DEFAULT_URL
-    )
-    default_password_secret = os.environ.get(
-        PLANNER_PASSWORD_SECRET_ENV,
-        "APPFORGE_PLANNER_DASHBOARD_PASSWORD",
-    )
-    default_token_secret = os.environ.get(
-        PLANNER_TOKEN_SECRET_ENV,
-        "APPFORGE_PLANNER_API_TOKEN",
-    )
-    default_secret_version = os.environ.get(PLANNER_SECRET_VERSION_ENV, "latest")
-    default_credentials_file = os.environ.get(
-        GCP_CREDENTIALS_FILE_ENV,
-        os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", ""),
-    )
+    cfg = _load_local_config()
     parser = argparse.ArgumentParser(description="Run the ACE planning dashboard.")
     parser.add_argument(
         "--planner-url",
-        default=default_planner_url,
-        help=(
-            "Planner API base URL (preferred over env vars "
-            f"{PLANNER_API_URL_ENV}/{PLANNER_URL_ENV})"
-        ),
+        default=cfg.get("planner_url", _FALLBACK_PLANNER_URL),
+        help="Planner API base URL",
     )
     parser.add_argument(
         "--planner-api-token",
-        default=os.environ.get(PLANNER_TOKEN_ENV, ""),
-        help=(f"Optional bearer token to skip password login (or {PLANNER_TOKEN_ENV})"),
+        default=cfg.get("planner_api_token", ""),
+        help="Optional bearer token to skip password login",
     )
     parser.add_argument(
         "--planner-token-secret",
-        default=default_token_secret,
-        help=(
-            f"Secret Manager secret name for planner bearer token (or {PLANNER_TOKEN_SECRET_ENV})"
-        ),
+        default=cfg.get("planner_token_secret", "APPFORGE_PLANNER_API_TOKEN"),
+        help="Secret Manager secret name for planner bearer token",
     )
     parser.add_argument(
         "--planner-password-secret",
-        default=default_password_secret,
-        help=(
-            "Secret Manager secret name for dashboard login password "
-            f"(or {PLANNER_PASSWORD_SECRET_ENV})"
-        ),
+        default=cfg.get("planner_password_secret", "APPFORGE_PLANNER_DASHBOARD_PASSWORD"),
+        help="Secret Manager secret name for dashboard login password",
     )
     parser.add_argument(
         "--planner-secret-project-id",
-        default="",
-        help=(
-            f"GCP project for Secret Manager (auto-detected from gcloud if omitted, "
-            f"or {PLANNER_SECRET_PROJECT_ENV})"
-        ),
+        default=cfg.get("planner_secret_project_id", ""),
+        help="GCP project for Secret Manager (auto-detected from gcloud if omitted)",
     )
     parser.add_argument(
         "--planner-secret-version",
-        default=default_secret_version,
-        help=(f"Version for password/token secrets (or {PLANNER_SECRET_VERSION_ENV})"),
+        default=cfg.get("planner_secret_version", "latest"),
+        help="Version for password/token secrets",
     )
     parser.add_argument(
         "--planner-secret-credentials-file",
-        default=default_credentials_file,
-        help=(
-            "Optional service account JSON used to read Secret Manager "
-            f"(or {GCP_CREDENTIALS_FILE_ENV} / GOOGLE_APPLICATION_CREDENTIALS)"
-        ),
+        default=cfg.get("planner_credentials_file", ""),
+        help="Optional service account JSON used to read Secret Manager",
     )
     parser.add_argument(
         "--poll-interval-seconds",
         type=int,
-        default=2,
+        default=cfg.get("poll_interval_seconds", 2),
         help="Polling interval in seconds",
     )
     parser.add_argument(
         "--auto-refresh",
         action="store_true",
+        default=cfg.get("auto_refresh", False),
         help="Enable periodic event polling",
     )
     args = parser.parse_args(argv)
@@ -370,6 +352,15 @@ def apply_style() -> None:
     st.markdown(
         """
 <style>
+  header[data-testid="stHeader"] {
+    display: none !important;
+  }
+  #MainMenu {
+    display: none !important;
+  }
+  footer {
+    display: none !important;
+  }
   .stApp {
     background: radial-gradient(circle at top left, #1f2a44 0%, #141a2a 45%, #0d121d 100%);
     color: #eef2ff;
@@ -508,14 +499,30 @@ def load_events(api: PlannerApiClient, *, force: bool = False) -> None:
     st.session_state["next_event_cursor"] = event_page.get("next_cursor")
 
 
+def _load_projects_from_mapping() -> list[str]:
+    """Return distinct gcp_project names from repo-gcp-mapping.json."""
+    mapping_path = Path(__file__).resolve().parent / "docs" / "repo-gcp-mapping.json"
+    if not mapping_path.is_file():
+        mapping_path = Path.cwd() / "docs" / "repo-gcp-mapping.json"
+    if not mapping_path.is_file():
+        return []
+    try:
+        entries = json.loads(mapping_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    seen: dict[str, None] = {}
+    for entry in entries:
+        name = (entry.get("gcp_project") or "").strip()
+        if name and name not in seen:
+            seen[name] = None
+    return list(seen)
+
+
 def create_session_form(api: PlannerApiClient) -> None:
     st.divider()
     st.subheader("Create planning session")
 
-    try:
-        projects = api.list_projects()
-    except Exception:
-        projects = []
+    projects = _load_projects_from_mapping()
 
     with st.form("planning_session_form"):
         if projects:
@@ -524,7 +531,7 @@ def create_session_form(api: PlannerApiClient) -> None:
             project_slug = st.text_input(
                 "Select Project",
                 value="",
-                help="No projects found via API. Enter a slug manually.",
+                help="No projects found. Check docs/repo-gcp-mapping.json.",
             )
         mode = st.selectbox(
             "Mode",
@@ -546,6 +553,7 @@ def create_session_form(api: PlannerApiClient) -> None:
     if create:
         if not project_slug.strip() or not request_text.strip():
             set_flash("Project slug and request text are required.", kind="error")
+            st.rerun()
         else:
             try:
                 session = api.create_session(
@@ -553,8 +561,21 @@ def create_session_form(api: PlannerApiClient) -> None:
                     mode=mode,
                     request_text=request_text.strip(),
                 )
+            except httpx.ConnectError:
+                set_flash(
+                    f"Cannot reach the planner API at {api.base_url}.",
+                    kind="error",
+                )
+                st.rerun()
             except PlannerApiError as exc:
                 set_flash(f"Failed to create session: {exc}", kind="error")
+                st.rerun()
+            except Exception as exc:
+                set_flash(
+                    f"Unexpected error creating session ({type(exc).__name__}): {exc}",
+                    kind="error",
+                )
+                st.rerun()
             else:
                 st.session_state["active_session_id"] = session["id"]
                 st.session_state["active_session"] = session
@@ -664,21 +685,47 @@ def render_question_entry(api: PlannerApiClient, session: dict[str, Any]) -> Non
 
 
 def render_start_button(api: PlannerApiClient, session: dict[str, Any]) -> None:
-    status = session.get("status")
+    status = session.get("status", "unknown")
+
+    if status.startswith("running"):
+        st.info("⏳ Planning is in progress…")
+        st.progress(100, text=f"Status: {status}")
+        return
+
+    if status in ("done", "failed", "expired", "timed_out"):
+        return
+
     can_start = status == "ready_to_run"
     if st.button("Start planning", type="primary", disabled=not can_start):
         session_id = session.get("id")
         if not session_id:
             set_flash("No active session id.", kind="error")
+            st.rerun()
             return
-        try:
-            started = api.start_session(session_id=session_id)
-        except PlannerApiError as exc:
-            set_flash(f"Failed to start session: {exc}", kind="error")
-            return
+        with st.spinner("Starting planning session…"):
+            try:
+                started = api.start_session(session_id=session_id)
+            except httpx.ConnectError:
+                set_flash(
+                    f"Cannot reach the planner API at {api.base_url}.",
+                    kind="error",
+                )
+                st.rerun()
+                return
+            except PlannerApiError as exc:
+                set_flash(f"Failed to start session: {exc}", kind="error")
+                st.rerun()
+                return
+            except Exception as exc:
+                set_flash(
+                    f"Unexpected error starting session ({type(exc).__name__}): {exc}",
+                    kind="error",
+                )
+                st.rerun()
+                return
         st.session_state["active_session"] = started
         load_events(api, force=True)
-        set_flash("Planning started.")
+        set_flash("Planning started. Events will refresh automatically.")
         st.rerun()
 
 
@@ -687,13 +734,21 @@ def render_events(
     poll_interval: int,
     auto_refresh: bool,
 ) -> None:
+    session = st.session_state.get("active_session") or {}
+    status = session.get("status", "unknown")
+    is_running = status.startswith("running")
+
     st.subheader("Events")
     if st.button("Refresh events now"):
         load_events(api, force=True)
+        load_session(api)
+        st.rerun()
 
     if not st.session_state["events"]:
-        st.info("No events yet.")
-        return
+        if is_running:
+            st.info("Waiting for planning events…")
+        else:
+            st.info("No events yet.")
 
     st.caption(f"Loaded events: {len(st.session_state['events'])}")
     for event in reversed(st.session_state["events"]):
@@ -712,14 +767,17 @@ def render_events(
             unsafe_allow_html=True,
         )
 
-    if auto_refresh:
+    should_poll = auto_refresh or is_running
+    if should_poll:
         now = time.time()
         last = st.session_state.get("last_event_refresh", 0.0)
-        if now - last >= poll_interval:
+        interval = min(poll_interval, 5) if is_running else poll_interval
+        if now - last >= interval:
             st.session_state["last_event_refresh"] = now
             load_events(api, force=False)
+            load_session(api)
             st.rerun()
-        remaining = max(0.0, poll_interval - (now - last))
+        remaining = max(0.0, interval - (now - last))
         st.caption(f"Auto-refresh in {remaining:.0f}s." if remaining else "Auto-refreshing...")
 
 
@@ -963,8 +1021,8 @@ def run_planner_app(config: AppConfig) -> None:
         if not config.planner_secret_project_id:
             st.warning(
                 "Could not detect a GCP project for Secret Manager.\n\n"
-                f"Run `gcloud config set project <PROJECT>` or set "
-                f"`{PLANNER_SECRET_PROJECT_ENV}`, then refresh.\n\n"
+                "Run `gcloud config set project <PROJECT>` or set "
+                "`GCP_PROJECT_ID`, then refresh.\n\n"
                 "Or pass `--planner-api-token` to skip password login."
             )
         else:

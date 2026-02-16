@@ -252,3 +252,29 @@ def test_start_planning_failure_emits_failed_event(monkeypatch) -> None:
         assert events.status_code == 200
         event_payload = events.json()["events"]
         assert event_payload[-1]["event_type"] == "failed"
+
+
+def test_listener_role_serves_planning_but_not_worker_endpoint() -> None:
+    set_settings_overrides(
+        planner_api_token=_PLANNER_TOKEN,
+        webhook_service_role="listener",
+        repo_gcp_mapping_path="docs/repo-gcp-mapping.example.json",
+        slack_bot_token="",
+        slack_channel_id="",
+        planning_store_backend="memory",
+    )
+
+    with TestClient(app, headers=_PLANNER_AUTH_HEADER) as client:
+        created = client.post(
+            "/planning/sessions",
+            json={
+                "project_slug": "example-project",
+                "mode": "plan_only",
+                "request_text": "Listener role planning access",
+            },
+        )
+        assert created.status_code == 201
+
+        worker = client.post("/internal/pubsub/worker", json={})
+        assert worker.status_code == 404
+        assert worker.json()["detail"] == "❌ ERROR: worker endpoint disabled"

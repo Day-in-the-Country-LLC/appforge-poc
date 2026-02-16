@@ -337,6 +337,15 @@ def apply_log_style() -> None:
     st.markdown(
         f"""
 <style>
+  header[data-testid="stHeader"] {{
+    display: none !important;
+  }}
+  #MainMenu {{
+    display: none !important;
+  }}
+  footer {{
+    display: none !important;
+  }}
   .stApp {{
     background-color: #{APP_BACKGROUND_HEX};
   }}

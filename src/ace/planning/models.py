@@ -31,6 +31,8 @@ class PlanningProjectRepository(BaseModel):
 
     owner: str
     name: str
+    local_path: str | None = None
+    github_url: str | None = None
 
 
 class PlanningProjectRegistry(BaseModel):

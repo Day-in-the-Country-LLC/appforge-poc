@@ -24,6 +24,8 @@ except ModuleNotFoundError:  # pragma: no cover - environment dependent
 
 
 _DEFAULT_PROJECT_REGISTRY_DIR = Path("docs/projects")
+_DEFAULT_REPO_GCP_MAPPING = Path("docs/repo-gcp-mapping.json")
+_ALWAYS_INCLUDE_REPO = "ditc_terraform"
 _ENTRYPOINT_FILES = (
     "__main__.py",
     "app.py",
@@ -84,7 +86,7 @@ async def load_project_registry(
     *,
     settings: Settings | None = None,
 ) -> PlanningProjectRegistry:
-    """Load project metadata from Firestore (preferred) or local registry files."""
+    """Load project metadata from Firestore, local files, or repo-gcp-mapping."""
     settings = settings or get_settings()
     firestore_registry = _load_project_registry_from_firestore(
         project_slug,
@@ -92,7 +94,12 @@ async def load_project_registry(
     )
     if firestore_registry is not None:
         return firestore_registry
-    return _load_project_registry_from_file(project_slug)
+
+    project_file = _DEFAULT_PROJECT_REGISTRY_DIR / f"{project_slug}.json"
+    if project_file.exists():
+        return _load_project_registry_from_file(project_slug)
+
+    return _load_project_registry_from_mapping(project_slug)
 
 
 def _load_project_registry_from_firestore(
@@ -109,6 +116,92 @@ def _load_project_registry_from_firestore(
         return None
     payload = snapshot.to_dict() or {}
     return _project_registry_from_payload(payload, source=f"projects/{project_slug} (firestore)")
+
+
+def _load_project_registry_from_mapping(
+    project_slug: str,
+) -> PlanningProjectRegistry:
+    """Build a project registry from repo-gcp-mapping.json by gcp_project name."""
+    if not _DEFAULT_REPO_GCP_MAPPING.is_file():
+        raise PlanningScoutError(
+            f"❌ ERROR: project registry not found for '{project_slug}' "
+            f"and {_DEFAULT_REPO_GCP_MAPPING} does not exist"
+        )
+    try:
+        entries = json.loads(_DEFAULT_REPO_GCP_MAPPING.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise PlanningScoutError(
+            f"❌ ERROR: failed to parse {_DEFAULT_REPO_GCP_MAPPING}: {exc}"
+        ) from exc
+
+    if not isinstance(entries, list):
+        raise PlanningScoutError(f"❌ ERROR: {_DEFAULT_REPO_GCP_MAPPING} must be a JSON array")
+
+    seen_repos: set[str] = set()
+    repos: list[PlanningProjectRepository] = []
+    has_always_include = False
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        gcp_project = (entry.get("gcp_project") or "").strip()
+        repo_full = (entry.get("repo") or "").strip()
+        if not repo_full:
+            continue
+
+        parts = repo_full.split("/", 1)
+        owner = parts[0] if len(parts) == 2 else ""
+        name = parts[1] if len(parts) == 2 else repo_full
+
+        if name == _ALWAYS_INCLUDE_REPO:
+            has_always_include = True
+
+        if gcp_project != project_slug and name != _ALWAYS_INCLUDE_REPO:
+            continue
+
+        repo_key = f"{owner}/{name}".lower()
+        if repo_key in seen_repos:
+            continue
+        seen_repos.add(repo_key)
+
+        repos.append(
+            PlanningProjectRepository(
+                owner=owner,
+                name=name,
+                local_path=entry.get("local_path") or None,
+                github_url=entry.get("github_url") or f"https://github.com/{owner}/{name}",
+            )
+        )
+
+    if not has_always_include:
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            repo_full = (entry.get("repo") or "").strip()
+            parts = repo_full.split("/", 1)
+            name = parts[1] if len(parts) == 2 else repo_full
+            if name == _ALWAYS_INCLUDE_REPO:
+                owner = parts[0] if len(parts) == 2 else ""
+                repo_key = f"{owner}/{name}".lower()
+                if repo_key not in seen_repos:
+                    repos.append(
+                        PlanningProjectRepository(
+                            owner=owner,
+                            name=name,
+                            local_path=entry.get("local_path") or None,
+                            github_url=(
+                                entry.get("github_url") or f"https://github.com/{owner}/{name}"
+                            ),
+                        )
+                    )
+                break
+
+    if not repos:
+        raise PlanningScoutError(
+            f"❌ ERROR: no repos found for project '{project_slug}' in {_DEFAULT_REPO_GCP_MAPPING}"
+        )
+
+    return PlanningProjectRegistry(project_slug=project_slug, repos=repos)
 
 
 def _load_project_registry_from_file(project_slug: str) -> PlanningProjectRegistry:
@@ -163,7 +256,14 @@ def _project_repository_from_payload(
         )
     owner = _required_str(raw_entry.get("owner"), field="owner", source=source)
     name = _required_str(raw_entry.get("name"), field="name", source=source)
-    return PlanningProjectRepository(owner=owner, name=name)
+    local_path = raw_entry.get("local_path") or None
+    github_url = raw_entry.get("github_url") or None
+    return PlanningProjectRepository(
+        owner=owner,
+        name=name,
+        local_path=local_path,
+        github_url=github_url,
+    )
 
 
 def _required_str(value: Any, *, field: str, source: str) -> str:
@@ -180,14 +280,86 @@ async def run_repositories_scout(
     github_token: str,
 ) -> list[ScoutReport]:
     """Run the configured repo scouts and return structured reports."""
-    api_client = GitHubAPIClient(github_token)
+    api_client: GitHubAPIClient | None = None
     reports: list[ScoutReport] = []
     try:
         for repo in repos:
-            reports.append(await _scout_repository(api_client, repo))
+            if repo.local_path:
+                reports.append(_scout_local_repository(repo))
+            else:
+                if api_client is None:
+                    api_client = GitHubAPIClient(github_token)
+                reports.append(await _scout_repository(api_client, repo))
     finally:
-        await api_client.close()
+        if api_client is not None:
+            await api_client.close()
     return reports
+
+
+def _scout_local_repository(repo: PlanningProjectRepository) -> ScoutReport:
+    """Scout a repository from the local filesystem."""
+    repo_name = f"{repo.owner}/{repo.name}"
+    root = Path(repo.local_path)  # type: ignore[arg-type]
+    if not root.is_dir():
+        raise PlanningScoutError(
+            f"❌ ERROR: local_path does not exist for {repo_name}: {repo.local_path}"
+        )
+
+    tree_entries: list[dict[str, Any]] = []
+    for item in sorted(root.rglob("*")):
+        rel = str(item.relative_to(root))
+        if any(part.startswith(".") for part in item.parts[len(root.parts) :]):
+            continue
+        if item.is_file():
+            tree_entries.append({"path": rel, "type": "blob"})
+        elif item.is_dir():
+            tree_entries.append({"path": rel, "type": "tree"})
+
+    entrypoints = _extract_entrypoints(tree_entries)
+    key_file_content = _extract_key_file_presence(tree_entries)
+    key_file_samples = _read_local_key_file_samples(root, key_file_content)
+    risks = _score_risks(tree_entries, key_file_content, entrypoints)
+    work_items = _propose_work_items(entrypoints, key_file_content, key_file_samples)
+    file_count = len([e for e in tree_entries if e.get("type") == "blob"])
+    summary = _build_repo_summary(repo_name, file_count, tree_entries)
+    return ScoutReport(
+        repo=repo_name,
+        summary=summary,
+        entrypoints=entrypoints,
+        risks=risks,
+        work_items=work_items,
+    )
+
+
+def _read_local_key_file_samples(
+    root: Path,
+    present_files: set[str],
+) -> dict[str, str]:
+    """Read key file samples from the local filesystem."""
+    candidates = (
+        "readme.md",
+        "readme.rst",
+        "readme.txt",
+        "pyproject.toml",
+        "package.json",
+        "requirements.txt",
+        "go.mod",
+        "makefile",
+        ".github/workflows/ci.yml",
+    )
+    samples: dict[str, str] = {}
+    for path in candidates:
+        if path not in present_files:
+            continue
+        full = root / path
+        if not full.is_file():
+            continue
+        try:
+            text = full.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        samples[path] = text.replace("\n", " ").strip()[:240]
+    return samples
 
 
 async def _scout_repository(
