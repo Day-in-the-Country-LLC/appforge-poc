@@ -115,18 +115,41 @@ async def call_openai(
     *,
     trace_name: str = "openai_call",
     metadata: dict | None = None,
+    reasoning_effort: str | None = None,
 ) -> str:
     """Call OpenAI responses API and return text."""
     if not api_key:
         raise ValueError("OpenAI API key not configured")
 
     tracer = _get_tracer()
+    effort: str | None = None
+    if reasoning_effort is not None:
+        candidate = str(reasoning_effort).strip().lower()
+        allowed = {"minimal", "low", "medium", "high"}
+        if candidate not in allowed:
+            raise ValueError(
+                "❌ ERROR: invalid OpenAI reasoning_effort "
+                f"'{reasoning_effort}' (allowed: minimal, low, medium, high)"
+            )
+        effort = candidate
     run_id = tracer.start_run(
         trace_name,
-        inputs={"prompt": prompt, "model": model, "max_tokens": max_tokens},
+        inputs={
+            "prompt": prompt,
+            "model": model,
+            "max_tokens": max_tokens,
+            "reasoning_effort": effort,
+        },
         metadata=metadata,
         tags=["openai"],
     )
+    payload: dict[str, object] = {
+        "model": model,
+        "input": prompt,
+        "max_output_tokens": max_tokens,
+    }
+    if effort is not None:
+        payload["reasoning"] = {"effort": effort}
     async with httpx.AsyncClient(timeout=180.0) as client:
         try:
             response = await client.post(
@@ -135,11 +158,7 @@ async def call_openai(
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": model,
-                    "input": prompt,
-                    "max_output_tokens": max_tokens,
-                },
+                json=payload,
             )
             response.raise_for_status()
             data = response.json()

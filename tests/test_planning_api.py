@@ -1,5 +1,6 @@
 """Planning API route tests."""
 
+import asyncio
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -414,6 +415,21 @@ def test_agent_intake_can_query_repo_agents_and_finish(monkeypatch) -> None:
                 )
             ]
 
+        async def fake_request_repo_scout_answer(
+            *,
+            session: Any,
+            repo_question: str,
+            condensed_reports: list[dict[str, Any]],
+            settings: Any,
+        ) -> str:
+            del session, settings
+            assert repo_question == "Which repos and entrypoints are relevant?"
+            assert condensed_reports
+            return (
+                "Primary impact is in appforge-poc, especially scripts/ace_dashboard.py, "
+                "with a testing gap around intake orchestration."
+            )
+
         monkeypatch.setattr(
             planning_routes,
             "_request_intake_agent_decision",
@@ -421,6 +437,11 @@ def test_agent_intake_can_query_repo_agents_and_finish(monkeypatch) -> None:
         )
         monkeypatch.setattr(planning_routes, "load_project_registry", fake_load_project_registry)
         monkeypatch.setattr(planning_routes, "run_repositories_scout", fake_run_repositories_scout)
+        monkeypatch.setattr(
+            planning_routes,
+            "_request_repo_scout_answer",
+            fake_request_repo_scout_answer,
+        )
 
         created = client.post(
             "/planning/sessions",
@@ -452,6 +473,7 @@ def test_agent_intake_can_query_repo_agents_and_finish(monkeypatch) -> None:
         assert session.status_code == 200
         payload = session.json()
         assert payload["status"] == "running"
+        assert "Primary impact is in appforge-poc" in payload["intake_state"]["planning_context"]
 
         events = client.get(f"/planning/sessions/{session_id}/events")
         assert events.status_code == 200
@@ -535,6 +557,18 @@ def test_agent_intake_limits_repo_scouts_per_user_turn(monkeypatch) -> None:
                 )
             ]
 
+        async def fake_request_repo_scout_answer(
+            *,
+            session: Any,
+            repo_question: str,
+            condensed_reports: list[dict[str, Any]],
+            settings: Any,
+        ) -> str:
+            del session, settings
+            assert repo_question
+            assert condensed_reports
+            return "Repo scout answer"
+
         monkeypatch.setattr(
             planning_routes,
             "_request_intake_agent_decision",
@@ -542,6 +576,11 @@ def test_agent_intake_limits_repo_scouts_per_user_turn(monkeypatch) -> None:
         )
         monkeypatch.setattr(planning_routes, "load_project_registry", fake_load_project_registry)
         monkeypatch.setattr(planning_routes, "run_repositories_scout", fake_run_repositories_scout)
+        monkeypatch.setattr(
+            planning_routes,
+            "_request_repo_scout_answer",
+            fake_request_repo_scout_answer,
+        )
 
         created = client.post(
             "/planning/sessions",
@@ -560,6 +599,68 @@ def test_agent_intake_limits_repo_scouts_per_user_turn(monkeypatch) -> None:
         )
         assert response.status_code == 500
         assert "exceeded max repo scouts for this user turn (2)" in response.json()["detail"]
+
+
+def test_repo_scout_agent_uses_configured_openai_reasoning(monkeypatch) -> None:
+    import ace.planning.routes as planning_routes
+
+    set_settings_overrides(
+        planning_repo_scout_model="gpt-5.2-codex",
+        planning_repo_scout_max_tokens=1200,
+        planning_repo_scout_reasoning_effort="medium",
+        secrets_backend="env",
+        openai_api_key="test-openai-key",
+    )
+
+    calls: dict[str, Any] = {}
+
+    async def fake_call_openai(
+        prompt: str,
+        model: str,
+        api_key: str,
+        max_tokens: int,
+        *,
+        trace_name: str = "planning_repo_scout_agent",
+        metadata: dict | None = None,  # noqa: ARG001
+        reasoning_effort: str | None = None,
+    ) -> str:
+        calls["prompt"] = prompt
+        calls["model"] = model
+        calls["api_key"] = api_key
+        calls["max_tokens"] = max_tokens
+        calls["trace_name"] = trace_name
+        calls["reasoning_effort"] = reasoning_effort
+        return '{"answer":"Scout analysis complete."}'
+
+    monkeypatch.setattr(planning_routes, "call_openai", fake_call_openai)
+
+    session = PlanningSession(
+        project_slug="example-project",
+        request_text="Plan intake updates",
+        mode=PlanningMode.PLAN_ONLY,
+    )
+    answer = asyncio.run(
+        planning_routes._request_repo_scout_answer(
+            session=session,
+            repo_question="What should we change first?",
+            condensed_reports=[
+                {
+                    "repo": "example-project/appforge-poc",
+                    "summary": "Scanned planner and dashboard files.",
+                    "entrypoints": ["scripts/ace_dashboard.py"],
+                    "risks": ["Limited integration coverage."],
+                    "work_items": ["Add intake + worker integration tests."],
+                }
+            ],
+            settings=planning_routes.get_settings(),
+        )
+    )
+
+    assert answer == "Scout analysis complete."
+    assert calls["model"] == "gpt-5.2-codex"
+    assert calls["max_tokens"] == 1200
+    assert calls["reasoning_effort"] == "medium"
+    assert calls["trace_name"] == "planning_repo_scout_agent"
 
 
 def test_user_cannot_start_planning_while_intake_pending() -> None:

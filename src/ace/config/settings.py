@@ -55,10 +55,14 @@ class Settings(BaseSettings):
     planning_review_claude_max_tokens: int = int(
         os.getenv("PLANNING_REVIEW_CLAUDE_MAX_TOKENS", "1800")
     )
-    planning_review_openai_model: str = os.getenv("PLANNING_REVIEW_OPENAI_MODEL", "gpt-5.3")
+    planning_review_openai_model: str = os.getenv("PLANNING_REVIEW_OPENAI_MODEL", "gpt-5.2-codex")
     planning_review_openai_max_tokens: int = int(
         os.getenv("PLANNING_REVIEW_OPENAI_MAX_TOKENS", "3000")
     )
+    planning_review_openai_reasoning_effort: str = os.getenv(
+        "PLANNING_REVIEW_OPENAI_REASONING_EFFORT",
+        "high",
+    ).strip().lower()
 
     # GCP
     gcp_project_id: str = os.getenv("GCP_PROJECT_ID", "")
@@ -85,8 +89,38 @@ class Settings(BaseSettings):
     planning_intake_agent_enabled: bool = (
         os.getenv("PLANNING_INTAKE_AGENT_ENABLED", "true").lower() == "true"
     )
-    planning_intake_model: str = os.getenv("PLANNING_INTAKE_MODEL", "gpt-5.3")
+    planning_intake_model: str = os.getenv("PLANNING_INTAKE_MODEL", "gpt-5.2-codex")
     planning_intake_max_tokens: int = int(os.getenv("PLANNING_INTAKE_MAX_TOKENS", "1400"))
+    planning_intake_reasoning_effort: str = os.getenv(
+        "PLANNING_INTAKE_REASONING_EFFORT",
+        "high",
+    ).strip().lower()
+    planning_repo_scout_model: str = os.getenv("PLANNING_REPO_SCOUT_MODEL", "gpt-5.2-codex")
+    planning_repo_scout_max_tokens: int = int(os.getenv("PLANNING_REPO_SCOUT_MAX_TOKENS", "1200"))
+    planning_repo_scout_reasoning_effort: str = os.getenv(
+        "PLANNING_REPO_SCOUT_REASONING_EFFORT",
+        "medium",
+    ).strip().lower()
+    planning_synthesis_model: str = os.getenv("PLANNING_SYNTHESIS_MODEL", "gpt-5.2-codex")
+    planning_synthesis_plan_max_tokens: int = int(
+        os.getenv("PLANNING_SYNTHESIS_PLAN_MAX_TOKENS", "4000")
+    )
+    planning_synthesis_issue_max_tokens: int = int(
+        os.getenv("PLANNING_SYNTHESIS_ISSUE_MAX_TOKENS", "12000")
+    )
+    planning_synthesis_dependencies_max_tokens: int = int(
+        os.getenv("PLANNING_SYNTHESIS_DEPENDENCIES_MAX_TOKENS", "2000")
+    )
+    planning_synthesis_controller_max_tokens: int = int(
+        os.getenv("PLANNING_SYNTHESIS_CONTROLLER_MAX_TOKENS", "2000")
+    )
+    planning_synthesis_reasoning_effort: str = os.getenv(
+        "PLANNING_SYNTHESIS_REASONING_EFFORT",
+        "high",
+    ).strip().lower()
+    planning_synthesis_max_turns_per_agent: int = int(
+        os.getenv("PLANNING_SYNTHESIS_MAX_TURNS_PER_AGENT", "3")
+    )
     planning_intake_max_repo_scouts_per_turn: int = int(
         os.getenv("PLANNING_INTAKE_MAX_REPO_SCOUTS_PER_TURN", "2")
     )

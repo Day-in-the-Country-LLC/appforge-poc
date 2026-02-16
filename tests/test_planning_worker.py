@@ -371,9 +371,10 @@ def test_planner_worker_revises_issues_before_creation(monkeypatch) -> None:
         set_settings_overrides(
             planning_review_enabled=True,
             planning_review_claude_model="claude-opus-4-6",
-            planning_review_openai_model="gpt-5.3",
+            planning_review_openai_model="gpt-5.2-codex",
             planning_review_claude_max_tokens=1800,
             planning_review_openai_max_tokens=3000,
+            planning_review_openai_reasoning_effort="high",
             secrets_backend="env",
             claude_api_key="test-claude-key",
             openai_api_key="test-openai-key",
@@ -436,9 +437,11 @@ def test_planner_worker_revises_issues_before_creation(monkeypatch) -> None:
             *,
             trace_name: str = "planning_review_openai",
             metadata: dict | None = None,  # noqa: ARG001
+            reasoning_effort: str | None = None,
         ) -> str:
             del prompt, api_key, max_tokens, trace_name, metadata
             calls["openai"] = model
+            calls["openai_reasoning_effort"] = reasoning_effort
             return json.dumps(
                 {
                     "issues": [
@@ -473,7 +476,8 @@ def test_planner_worker_revises_issues_before_creation(monkeypatch) -> None:
         assert fake_github.created
         assert fake_github.created[0][1]["title"] == "Revised scaffold title"
         assert calls["claude"] == "claude-opus-4-6"
-        assert calls["openai"] == "gpt-5.3"
+        assert calls["openai"] == "gpt-5.2-codex"
+        assert calls["openai_reasoning_effort"] == "high"
 
         events = client.get(f"/planning/sessions/{session_id}/events")
         assert events.status_code == 200
@@ -489,7 +493,8 @@ def test_planner_worker_review_failures_are_advisory(monkeypatch) -> None:
         set_settings_overrides(
             planning_review_enabled=True,
             planning_review_claude_model="claude-opus-4-6",
-            planning_review_openai_model="gpt-5.3",
+            planning_review_openai_model="gpt-5.2-codex",
+            planning_review_openai_reasoning_effort="high",
             secrets_backend="env",
             claude_api_key="test-claude-key",
             openai_api_key="test-openai-key",

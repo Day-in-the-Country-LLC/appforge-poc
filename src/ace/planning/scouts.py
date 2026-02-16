@@ -9,8 +9,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from ace.agents.llm_client import call_openai
 from ace.config.settings import Settings, get_settings
 from ace.github.api_client import GitHubAPIClient
+from ace.planning.issue_writer import parse_issues_payload
 from ace.planning.models import (
     PlanningProjectRegistry,
     PlanningProjectRepository,
@@ -545,141 +547,512 @@ def _parse_plan_markdown_input(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, indent=2)
 
 
-def build_planning_artifacts(
-    *,
-    session: PlanningSession,
-    project: PlanningProjectRegistry,
-    scout_reports: list[ScoutReport],
-) -> PlanningArtifacts:
-    """Combine scout reports into final plan artifacts."""
-    plan_markdown = _render_plan_markdown(
-        session=session,
-        project_slug=project.project_slug,
-        scout_reports=scout_reports,
-    )
-    issues_json = _render_issues_json(
-        session=session,
-        project_slug=project.project_slug,
-        scout_reports=scout_reports,
-    )
-    dependencies_mmd = _render_dependencies_mmd(
-        session=session,
-        project_slug=project.project_slug,
-        scout_reports=scout_reports,
-    )
-    return PlanningArtifacts(
-        plan_markdown=plan_markdown,
-        issues_json=issues_json,
-        dependencies_mmd=dependencies_mmd,
-    )
-
-
-def _render_plan_markdown(
+def _build_scout_context_payload(
     *,
     session: PlanningSession,
     project_slug: str,
     scout_reports: list[ScoutReport],
-) -> str:
-    lines = [
-        "# Planning Report",
-        "",
-        f"Session: {session.id}",
-        f"Project: {project_slug}",
-        f"Request: {_parse_plan_markdown_input(session.request_text)}",
-        "",
-        "## Repository Summaries",
-        "",
-    ]
-    for report in scout_reports:
-        lines.extend(
-            [
-                f"### {report.repo}",
-                f"- Summary: {report.summary}",
-                f"- Entrypoints: {', '.join(report.entrypoints) or 'not detected'}",
-                "- Risks:",
-            ]
-        )
-        for risk in report.risks:
-            lines.append(f"  - {risk}")
-        lines.extend(["- Work items:", *(f"  - {item}" for item in report.work_items)])
-        lines.append("")
-    lines.extend(
-        [
-            "## Synthesis",
-            "",
-            (
-                "Generated from multi-repo scouts. Coordinate implementation in"
-                " small slices and validate each repository independently."
-            ),
-            "",
-        ]
+) -> dict[str, Any]:
+    return {
+        "session_id": session.id,
+        "project_slug": project_slug,
+        "request_text": _parse_plan_markdown_input(session.request_text),
+        "repos": [
+            {
+                "repo": report.repo,
+                "summary": report.summary,
+                "entrypoints": report.entrypoints,
+                "risks": report.risks,
+                "work_items": report.work_items,
+            }
+            for report in scout_reports
+        ],
+    }
+
+
+def _truncate(value: str, *, max_chars: int) -> str:
+    text = value.strip()
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}..."
+
+
+def _format_plan_agent_prompt(context_payload: dict[str, Any]) -> str:
+    return (
+        "You are the Planning Strategist Agent.\n"
+        "Generate a production-ready implementation plan from multi-repo scout data.\n\n"
+        "Return ONLY markdown with these sections (exact headings):\n"
+        "# Implementation Plan\n"
+        "## Objective\n"
+        "## Scope\n"
+        "## Repo Findings\n"
+        "## Execution Phases\n"
+        "## Risks and Mitigations\n"
+        "## Validation Strategy\n\n"
+        "Rules:\n"
+        "- Include concrete repo paths/entrypoints where relevant.\n"
+        "- Keep the plan actionable and sequence-aware.\n"
+        "- No code fences and no JSON.\n\n"
+        "Context JSON:\n"
+        f"{json.dumps(context_payload, indent=2, ensure_ascii=True)}"
     )
-    return "\n".join(lines)
 
 
-def _render_issues_json(
+def _format_issue_agent_prompt(
+    *,
+    context_payload: dict[str, Any],
+    plan_markdown: str,
+) -> str:
+    return (
+        "You are the Issue Decomposition Agent.\n"
+        "Convert the implementation plan into executable GitHub issues.\n\n"
+        "Return ONLY JSON with this schema:\n"
+        "{\n"
+        '  "issues": [\n'
+        "    {\n"
+        '      "id": "ISSUE-001",\n'
+        '      "repo": "owner/repo",\n'
+        '      "title": "string",\n'
+        '      "description": "string",\n'
+        '      "priority": "low|medium|high",\n'
+        '      "depends_on": ["ISSUE-000"]\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "Rules:\n"
+        "- Use only repo values from the provided context.\n"
+        "- IDs must be unique and stable (ISSUE-001, ISSUE-002, ...).\n"
+        "- Keep dependencies acyclic.\n"
+        "- Every issue must be independently testable.\n"
+        "- No markdown fences.\n\n"
+        "Plan markdown:\n"
+        f"{_truncate(plan_markdown, max_chars=14000)}\n\n"
+        "Context JSON:\n"
+        f"{json.dumps(context_payload, indent=2, ensure_ascii=True)}"
+    )
+
+
+def _format_dependencies_agent_prompt(
+    *,
+    context_payload: dict[str, Any],
+    issues_json: str,
+) -> str:
+    return (
+        "You are the Dependency Graph Agent.\n"
+        "Build a Mermaid flowchart that captures issue dependencies.\n\n"
+        "Return ONLY JSON with this schema:\n"
+        "{\n"
+        '  "dependencies_mmd": "flowchart TD\\n    A --> B"\n'
+        "}\n\n"
+        "Rules:\n"
+        "- Output must start with `flowchart TD`.\n"
+        "- Include one node per issue id.\n"
+        "- Include one edge per depends_on relation.\n"
+        "- No markdown fences.\n\n"
+        "Issues JSON:\n"
+        f"{_truncate(issues_json, max_chars=14000)}\n\n"
+        "Context JSON:\n"
+        f"{json.dumps(context_payload, indent=2, ensure_ascii=True)}"
+    )
+
+
+def _format_plan_collaboration_prompt(
+    *,
+    context_payload: dict[str, Any],
+    current_plan_markdown: str,
+    issues_json: str,
+    dependencies_mmd: str,
+    controller_feedback: str,
+    round_index: int,
+) -> str:
+    return (
+        f"You are the Planning Strategist Agent in collaboration round {round_index}.\n"
+        "Review the issue and dependency outputs from peer agents and revise the plan so all "
+        "artifacts are aligned.\n\n"
+        "Return ONLY markdown with these exact headings:\n"
+        "# Implementation Plan\n"
+        "## Objective\n"
+        "## Scope\n"
+        "## Repo Findings\n"
+        "## Execution Phases\n"
+        "## Risks and Mitigations\n"
+        "## Validation Strategy\n\n"
+        "Current PLAN.md:\n"
+        f"{_truncate(current_plan_markdown, max_chars=14000)}\n\n"
+        "Current ISSUES.json:\n"
+        f"{_truncate(issues_json, max_chars=14000)}\n\n"
+        "Current DEPENDENCIES.mmd:\n"
+        f"{_truncate(dependencies_mmd, max_chars=12000)}\n\n"
+        "Controller feedback:\n"
+        f"{_truncate(controller_feedback, max_chars=4000)}\n\n"
+        "Context JSON:\n"
+        f"{json.dumps(context_payload, indent=2, ensure_ascii=True)}"
+    )
+
+
+def _format_issue_collaboration_prompt(
+    *,
+    context_payload: dict[str, Any],
+    plan_markdown: str,
+    current_issues_json: str,
+    dependencies_mmd: str,
+    controller_feedback: str,
+    round_index: int,
+) -> str:
+    return (
+        f"You are the Issue Decomposition Agent in collaboration round {round_index}.\n"
+        "Coordinate with the updated plan and dependency graph to revise issues so they are "
+        "complete, testable, and dependency-consistent.\n\n"
+        "Return ONLY JSON with this schema:\n"
+        "{\n"
+        '  "issues": [\n'
+        "    {\n"
+        '      "id": "ISSUE-001",\n'
+        '      "repo": "owner/repo",\n'
+        '      "title": "string",\n'
+        '      "description": "string",\n'
+        '      "priority": "low|medium|high",\n'
+        '      "depends_on": ["ISSUE-000"]\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "Updated PLAN.md:\n"
+        f"{_truncate(plan_markdown, max_chars=14000)}\n\n"
+        "Current ISSUES.json:\n"
+        f"{_truncate(current_issues_json, max_chars=14000)}\n\n"
+        "Current DEPENDENCIES.mmd:\n"
+        f"{_truncate(dependencies_mmd, max_chars=12000)}\n\n"
+        "Controller feedback:\n"
+        f"{_truncate(controller_feedback, max_chars=4000)}\n\n"
+        "Context JSON:\n"
+        f"{json.dumps(context_payload, indent=2, ensure_ascii=True)}"
+    )
+
+
+def _format_dependencies_collaboration_prompt(
+    *,
+    context_payload: dict[str, Any],
+    plan_markdown: str,
+    issues_json: str,
+    current_dependencies_mmd: str,
+    controller_feedback: str,
+    round_index: int,
+) -> str:
+    return (
+        f"You are the Dependency Graph Agent in collaboration round {round_index}.\n"
+        "Coordinate with the updated plan and issues and return a corrected dependency graph.\n\n"
+        "Return ONLY JSON with this schema:\n"
+        "{\n"
+        '  "dependencies_mmd": "flowchart TD\\n    A --> B"\n'
+        "}\n\n"
+        "Updated PLAN.md:\n"
+        f"{_truncate(plan_markdown, max_chars=12000)}\n\n"
+        "Updated ISSUES.json:\n"
+        f"{_truncate(issues_json, max_chars=14000)}\n\n"
+        "Current DEPENDENCIES.mmd:\n"
+        f"{_truncate(current_dependencies_mmd, max_chars=12000)}\n\n"
+        "Controller feedback:\n"
+        f"{_truncate(controller_feedback, max_chars=4000)}\n\n"
+        "Context JSON:\n"
+        f"{json.dumps(context_payload, indent=2, ensure_ascii=True)}"
+    )
+
+
+def _format_controller_agent_prompt(
+    *,
+    context_payload: dict[str, Any],
+    plan_markdown: str,
+    issues_json: str,
+    dependencies_mmd: str,
+    round_index: int,
+    max_turns_per_agent: int,
+) -> str:
+    return (
+        f"You are the Planning Controller Agent in collaboration round {round_index}.\n"
+        "Your job is to coordinate specialist agents for coherence and stop when artifacts are "
+        "sufficiently aligned.\n\n"
+        "Return ONLY JSON with this exact schema:\n"
+        "{\n"
+        '  "decision": "continue" | "finalize",\n'
+        '  "feedback": "string"\n'
+        "}\n\n"
+        "Rules:\n"
+        "- Use `continue` when specific changes are still needed.\n"
+        "- Use `finalize` only when plan, issues, and dependency graph are aligned.\n"
+        "- feedback must be concise and actionable for all three specialist agents.\n"
+        f"- Maximum turns per specialist agent: {max_turns_per_agent}.\n\n"
+        "Current PLAN.md:\n"
+        f"{_truncate(plan_markdown, max_chars=12000)}\n\n"
+        "Current ISSUES.json:\n"
+        f"{_truncate(issues_json, max_chars=12000)}\n\n"
+        "Current DEPENDENCIES.mmd:\n"
+        f"{_truncate(dependencies_mmd, max_chars=10000)}\n\n"
+        "Context JSON:\n"
+        f"{json.dumps(context_payload, indent=2, ensure_ascii=True)}"
+    )
+
+
+def _strip_markdown_fences(raw: str) -> str:
+    text = raw.strip()
+    if "```" not in text:
+        return text
+    parts = [part.strip() for part in text.split("```") if part.strip()]
+    if not parts:
+        return ""
+    candidate = parts[0]
+    if candidate.lower().startswith("markdown"):
+        candidate = candidate[8:].lstrip()
+    return candidate.strip()
+
+
+def _extract_json_payload(raw: str, *, context: str) -> Any:
+    text = raw.strip()
+    if not text:
+        raise ValueError(f"❌ ERROR: {context} agent returned empty response")
+
+    candidates: list[str] = []
+    if text.startswith("{") and text.endswith("}"):
+        candidates.append(text)
+    if text.startswith("[") and text.endswith("]"):
+        candidates.append(text)
+    if "```" in text:
+        for block in text.split("```"):
+            candidate = block.strip()
+            if not candidate:
+                continue
+            if candidate.lower().startswith("json"):
+                candidate = candidate[4:].lstrip()
+            if (candidate.startswith("{") and candidate.endswith("}")) or (
+                candidate.startswith("[") and candidate.endswith("]")
+            ):
+                candidates.append(candidate)
+    first_curly = text.find("{")
+    last_curly = text.rfind("}")
+    if first_curly >= 0 and last_curly > first_curly:
+        candidates.append(text[first_curly : last_curly + 1])
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            return json.loads(candidate)
+        except Exception:
+            continue
+    raise ValueError(f"❌ ERROR: {context} agent did not return valid JSON")
+
+
+def _normalize_issues_payload(
     *,
     session: PlanningSession,
     project_slug: str,
-    scout_reports: list[ScoutReport],
+    payload: Any,
 ) -> str:
-    issues: list[dict[str, Any]] = []
-    counter = 1
-    request_context = _parse_plan_markdown_input(session.request_text).strip()
-    if len(request_context) > 400:
-        request_context = f"{request_context[:400]}..."
-    for report in scout_reports:
-        for work_item in report.work_items:
-            description = f"Derived from scout output: {report.summary}"
-            if request_context:
-                description = (
-                    f"Request context: {request_context}. "
-                    f"Derived from scout output: {report.summary}"
-                )
-            issues.append(
-                {
-                    "id": f"{session.id}-{counter:03d}",
-                    "project_slug": project_slug,
-                    "repo": report.repo,
-                    "title": work_item,
-                    "description": description,
-                    "priority": "medium",
-                }
-            )
-            counter += 1
-
-    payload = {
+    if not isinstance(payload, dict):
+        raise ValueError("❌ ERROR: issue agent response must be a JSON object")
+    issues = payload.get("issues")
+    if not isinstance(issues, list):
+        raise ValueError("❌ ERROR: issue agent response must include an issues array")
+    normalized = {
         "project_slug": project_slug,
         "session_id": session.id,
         "generated_at": datetime.now(UTC).isoformat(),
         "issues": issues,
         "total": len(issues),
     }
-    return json.dumps(payload, indent=2, ensure_ascii=True)
+    issues_json = json.dumps(normalized, indent=2, ensure_ascii=True)
+    parse_issues_payload(issues_json)
+    return issues_json
 
 
-def _render_dependencies_mmd(
+def _parse_dependencies_payload(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        raise ValueError("❌ ERROR: dependency agent response must be a JSON object")
+    dependencies_mmd = str(payload.get("dependencies_mmd", "")).strip()
+    if not dependencies_mmd:
+        raise ValueError("❌ ERROR: dependency agent response missing dependencies_mmd")
+    if not dependencies_mmd.startswith("flowchart TD"):
+        raise ValueError("❌ ERROR: dependency agent output must start with 'flowchart TD'")
+    return dependencies_mmd
+
+
+def _parse_controller_payload(payload: Any) -> tuple[str, str]:
+    if not isinstance(payload, dict):
+        raise ValueError("❌ ERROR: controller agent response must be a JSON object")
+    decision = str(payload.get("decision", "")).strip().lower()
+    if decision not in {"continue", "finalize"}:
+        raise ValueError(
+            f"❌ ERROR: controller agent returned invalid decision '{decision}'"
+        )
+    feedback = str(payload.get("feedback", "")).strip()
+    if not feedback:
+        raise ValueError("❌ ERROR: controller agent feedback is required")
+    return decision, feedback
+
+
+async def build_planning_artifacts(
     *,
     session: PlanningSession,
-    project_slug: str,
+    project: PlanningProjectRegistry,
     scout_reports: list[ScoutReport],
-) -> str:
-    del session
-    lines = ["flowchart TD", f'    P["{project_slug}"]']
-    if not scout_reports:
-        lines.append("    P --> Z[No repos discovered]")
-        return "\n".join(lines)
-    for report in scout_reports:
-        safe_id = _safe_node_id(report.repo)
-        lines.append(f'    {safe_id}["{report.repo}"]')
-        lines.append(f"    P --> {safe_id}")
-    return "\n".join(lines)
+    openai_api_key: str,
+    model: str,
+    plan_max_tokens: int,
+    issue_max_tokens: int,
+    dependencies_max_tokens: int,
+    controller_max_tokens: int,
+    reasoning_effort: str,
+    max_turns_per_agent: int,
+) -> PlanningArtifacts:
+    """Generate planning artifacts via a multi-agent OpenAI synthesis chain."""
+    if max_turns_per_agent < 1:
+        raise ValueError("❌ ERROR: planning synthesis max turns per agent must be >= 1")
 
+    context_payload = _build_scout_context_payload(
+        session=session,
+        project_slug=project.project_slug,
+        scout_reports=scout_reports,
+    )
 
-def _safe_node_id(repo: str) -> str:
-    normalized = "".join(char if char.isalnum() else "_" for char in repo)
-    if not normalized:
-        return "repo"
-    if normalized[0].isdigit():
-        return f"r_{normalized}"
-    return normalized
+    plan_markdown_raw = await call_openai(
+        prompt=_format_plan_agent_prompt(context_payload),
+        model=model,
+        api_key=openai_api_key,
+        max_tokens=plan_max_tokens,
+        trace_name="planning_synthesis_plan_agent",
+        metadata={"session_id": session.id, "project_slug": project.project_slug},
+        reasoning_effort=reasoning_effort,
+    )
+    plan_markdown = _strip_markdown_fences(plan_markdown_raw).strip()
+    if not plan_markdown:
+        raise ValueError("❌ ERROR: planning strategist agent returned empty markdown")
+
+    issues_response = await call_openai(
+        prompt=_format_issue_agent_prompt(
+            context_payload=context_payload,
+            plan_markdown=plan_markdown,
+        ),
+        model=model,
+        api_key=openai_api_key,
+        max_tokens=issue_max_tokens,
+        trace_name="planning_synthesis_issue_agent",
+        metadata={"session_id": session.id, "project_slug": project.project_slug},
+        reasoning_effort=reasoning_effort,
+    )
+    issues_payload = _extract_json_payload(issues_response, context="issue")
+    issues_json = _normalize_issues_payload(
+        session=session,
+        project_slug=project.project_slug,
+        payload=issues_payload,
+    )
+
+    dependencies_response = await call_openai(
+        prompt=_format_dependencies_agent_prompt(
+            context_payload=context_payload,
+            issues_json=issues_json,
+        ),
+        model=model,
+        api_key=openai_api_key,
+        max_tokens=dependencies_max_tokens,
+        trace_name="planning_synthesis_dependency_agent",
+        metadata={"session_id": session.id, "project_slug": project.project_slug},
+        reasoning_effort=reasoning_effort,
+    )
+    dependencies_payload = _extract_json_payload(dependencies_response, context="dependency")
+    dependencies_mmd = _parse_dependencies_payload(dependencies_payload)
+
+    for round_index in range(1, max_turns_per_agent):
+        controller_response = await call_openai(
+            prompt=_format_controller_agent_prompt(
+                context_payload=context_payload,
+                plan_markdown=plan_markdown,
+                issues_json=issues_json,
+                dependencies_mmd=dependencies_mmd,
+                round_index=round_index,
+                max_turns_per_agent=max_turns_per_agent,
+            ),
+            model=model,
+            api_key=openai_api_key,
+            max_tokens=controller_max_tokens,
+            trace_name=f"planning_synthesis_controller_agent_round_{round_index}",
+            metadata={"session_id": session.id, "project_slug": project.project_slug},
+            reasoning_effort=reasoning_effort,
+        )
+        controller_payload = _extract_json_payload(controller_response, context="controller")
+        controller_decision, controller_feedback = _parse_controller_payload(controller_payload)
+        if controller_decision == "finalize":
+            break
+
+        plan_collab_response = await call_openai(
+            prompt=_format_plan_collaboration_prompt(
+                context_payload=context_payload,
+                current_plan_markdown=plan_markdown,
+                issues_json=issues_json,
+                dependencies_mmd=dependencies_mmd,
+                controller_feedback=controller_feedback,
+                round_index=round_index,
+            ),
+            model=model,
+            api_key=openai_api_key,
+            max_tokens=plan_max_tokens,
+            trace_name=f"planning_synthesis_plan_agent_collab_round_{round_index}",
+            metadata={"session_id": session.id, "project_slug": project.project_slug},
+            reasoning_effort=reasoning_effort,
+        )
+        plan_markdown = _strip_markdown_fences(plan_collab_response).strip()
+        if not plan_markdown:
+            raise ValueError(
+                f"❌ ERROR: planning strategist collaboration round {round_index} returned empty markdown"
+            )
+
+        issues_collab_response = await call_openai(
+            prompt=_format_issue_collaboration_prompt(
+                context_payload=context_payload,
+                plan_markdown=plan_markdown,
+                current_issues_json=issues_json,
+                dependencies_mmd=dependencies_mmd,
+                controller_feedback=controller_feedback,
+                round_index=round_index,
+            ),
+            model=model,
+            api_key=openai_api_key,
+            max_tokens=issue_max_tokens,
+            trace_name=f"planning_synthesis_issue_agent_collab_round_{round_index}",
+            metadata={"session_id": session.id, "project_slug": project.project_slug},
+            reasoning_effort=reasoning_effort,
+        )
+        issues_payload = _extract_json_payload(issues_collab_response, context="issue")
+        issues_json = _normalize_issues_payload(
+            session=session,
+            project_slug=project.project_slug,
+            payload=issues_payload,
+        )
+
+        dependencies_collab_response = await call_openai(
+            prompt=_format_dependencies_collaboration_prompt(
+                context_payload=context_payload,
+                plan_markdown=plan_markdown,
+                issues_json=issues_json,
+                current_dependencies_mmd=dependencies_mmd,
+                controller_feedback=controller_feedback,
+                round_index=round_index,
+            ),
+            model=model,
+            api_key=openai_api_key,
+            max_tokens=dependencies_max_tokens,
+            trace_name=f"planning_synthesis_dependency_agent_collab_round_{round_index}",
+            metadata={"session_id": session.id, "project_slug": project.project_slug},
+            reasoning_effort=reasoning_effort,
+        )
+        dependencies_payload = _extract_json_payload(
+            dependencies_collab_response,
+            context="dependency",
+        )
+        dependencies_mmd = _parse_dependencies_payload(dependencies_payload)
+
+    return PlanningArtifacts(
+        plan_markdown=plan_markdown,
+        issues_json=issues_json,
+        dependencies_mmd=dependencies_mmd,
+    )

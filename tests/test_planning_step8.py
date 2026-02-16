@@ -31,21 +31,22 @@ async def test_load_project_registry_falls_back_to_local_file() -> None:
     assert registry.repos[0].owner == "your-org"
 
 
-def test_build_plan_artifacts_from_scout_reports() -> None:
+@pytest.mark.asyncio
+async def test_build_plan_artifacts_from_scout_reports(monkeypatch) -> None:
     session = PlanningSession(
         project_slug="example-project",
         request_text="Plan the release",
     )
     reports = [
         scouts.ScoutReport(
-            repo="repo-one",
+            repo="team/repo-one",
             summary="Repository report",
             entrypoints=["app.py"],
             risks=["No tests found"],
             work_items=["Add integration coverage"],
         ),
         scouts.ScoutReport(
-            repo="repo-two",
+            repo="team/repo-two",
             summary="Worker report",
             entrypoints=["main.py"],
             risks=[],
@@ -62,15 +63,118 @@ def test_build_plan_artifacts_from_scout_reports() -> None:
         },
         source="tests",
     )
-    artifacts = scouts.build_planning_artifacts(
+
+    calls: list[str] = []
+
+    async def fake_call_openai(
+        prompt: str,
+        model: str,
+        api_key: str,
+        max_tokens: int,
+        *,
+        trace_name: str = "openai_call",
+        metadata: dict | None = None,  # noqa: ARG001
+        reasoning_effort: str | None = None,
+    ) -> str:
+        del prompt, metadata
+        assert model == "gpt-5.2-codex"
+        assert api_key == "test-openai-key"
+        assert reasoning_effort == "high"
+        calls.append(trace_name)
+        if trace_name in {
+            "planning_synthesis_plan_agent",
+            "planning_synthesis_plan_agent_collab_round_1",
+        }:
+            assert max_tokens == 4000
+            return (
+                "# Implementation Plan\n\n"
+                "## Objective\nShip the release.\n\n"
+                "## Scope\n- team/repo-one\n- team/repo-two\n\n"
+                "## Repo Findings\n- app.py and main.py are entrypoints.\n\n"
+                "## Execution Phases\n1. Prepare changes.\n\n"
+                "## Risks and Mitigations\n- Missing tests.\n\n"
+                "## Validation Strategy\n- Run targeted tests."
+            )
+        if trace_name in {
+            "planning_synthesis_issue_agent",
+            "planning_synthesis_issue_agent_collab_round_1",
+        }:
+            assert max_tokens == 12000
+            return json.dumps(
+                {
+                    "issues": [
+                        {
+                            "id": "ISSUE-001",
+                            "repo": "team/repo-one",
+                            "title": "Add integration coverage",
+                            "description": "Cover release execution path in app.py.",
+                            "priority": "high",
+                            "depends_on": [],
+                        },
+                        {
+                            "id": "ISSUE-002",
+                            "repo": "team/repo-two",
+                            "title": "Verify startup path",
+                            "description": "Validate worker startup and release checks.",
+                            "priority": "medium",
+                            "depends_on": ["ISSUE-001"],
+                        },
+                    ]
+                }
+            )
+        if trace_name in {
+            "planning_synthesis_dependency_agent",
+            "planning_synthesis_dependency_agent_collab_round_1",
+        }:
+            assert max_tokens == 2000
+            return json.dumps(
+                {
+                    "dependencies_mmd": (
+                        "flowchart TD\n"
+                        "    ISSUE_001[ISSUE-001]\n"
+                        "    ISSUE_002[ISSUE-002]\n"
+                        "    ISSUE_001 --> ISSUE_002"
+                    )
+                }
+            )
+        if trace_name == "planning_synthesis_controller_agent_round_1":
+            assert max_tokens == 2000
+            return json.dumps(
+                {
+                    "decision": "continue",
+                    "feedback": "Tighten issue text and ensure dependency alignment.",
+                }
+            )
+        raise AssertionError(f"unexpected trace_name: {trace_name}")
+
+    monkeypatch.setattr(scouts, "call_openai", fake_call_openai)
+
+    artifacts = await scouts.build_planning_artifacts(
         session=session,
         project=project,
         scout_reports=reports,
+        openai_api_key="test-openai-key",
+        model="gpt-5.2-codex",
+        plan_max_tokens=4000,
+        issue_max_tokens=12000,
+        dependencies_max_tokens=2000,
+        controller_max_tokens=2000,
+        reasoning_effort="high",
+        max_turns_per_agent=2,
     )
-    assert "repo-one" in artifacts.plan_markdown
+    assert calls == [
+        "planning_synthesis_plan_agent",
+        "planning_synthesis_issue_agent",
+        "planning_synthesis_dependency_agent",
+        "planning_synthesis_controller_agent_round_1",
+        "planning_synthesis_plan_agent_collab_round_1",
+        "planning_synthesis_issue_agent_collab_round_1",
+        "planning_synthesis_dependency_agent_collab_round_1",
+    ]
+    assert "team/repo-one" in artifacts.plan_markdown
     issues_payload = json.loads(artifacts.issues_json)
     assert issues_payload["total"] == 2
-    assert issues_payload["issues"][0]["repo"] == "repo-one"
+    assert issues_payload["issues"][0]["repo"] == "team/repo-one"
     assert "flowchart TD" in artifacts.dependencies_mmd
 
 
@@ -156,6 +260,18 @@ class _StubArtifactStore:
 async def test_default_planner_pipeline_uses_scout_reports(monkeypatch) -> None:
     import ace.planning.routes as planning_routes
 
+    set_settings_overrides(
+        secrets_backend="env",
+        openai_api_key="test-openai-key",
+        planning_synthesis_model="gpt-5.2-codex",
+        planning_synthesis_plan_max_tokens=4000,
+        planning_synthesis_issue_max_tokens=12000,
+        planning_synthesis_dependencies_max_tokens=2000,
+        planning_synthesis_controller_max_tokens=2000,
+        planning_synthesis_reasoning_effort="high",
+        planning_synthesis_max_turns_per_agent=2,
+    )
+
     artifact_store = _StubArtifactStore()
     planning_routes._planner_pipeline = None
     planning_routes._artifact_store = artifact_store
@@ -196,6 +312,74 @@ async def test_default_planner_pipeline_uses_scout_reports(monkeypatch) -> None:
         _load_project,
     )
 
+    calls: list[str] = []
+
+    async def fake_call_openai(
+        prompt: str,
+        model: str,
+        api_key: str,
+        max_tokens: int,
+        *,
+        trace_name: str = "openai_call",
+        metadata: dict | None = None,  # noqa: ARG001
+        reasoning_effort: str | None = None,
+    ) -> str:
+        calls.append(trace_name)
+        assert model == "gpt-5.2-codex"
+        assert api_key == "test-openai-key"
+        assert reasoning_effort == "high"
+        if trace_name in {
+            "planning_synthesis_plan_agent",
+            "planning_synthesis_plan_agent_collab_round_1",
+        }:
+            assert max_tokens == 4000
+            assert "Intake context:" in prompt
+            return (
+                "# Implementation Plan\n\n"
+                "## Objective\nDeliver migration safely.\n\n"
+                "## Scope\n- owner-one/repo-one\n- owner-two/repo-two\n\n"
+                "## Repo Findings\n- app.py and src/main.go are relevant.\n\n"
+                "## Execution Phases\n1. Migrate one repo at a time.\n\n"
+                "## Risks and Mitigations\n- CI instability.\n\n"
+                "## Validation Strategy\n- Staging deploy and CI green."
+            )
+        if trace_name in {
+            "planning_synthesis_issue_agent",
+            "planning_synthesis_issue_agent_collab_round_1",
+        }:
+            assert max_tokens == 12000
+            return json.dumps(
+                {
+                    "issues": [
+                        {
+                            "id": "ISSUE-001",
+                            "repo": "owner-one/repo-one",
+                            "title": "Prepare migration scaffold",
+                            "description": "Set up initial migration scaffolding.",
+                            "priority": "high",
+                            "depends_on": [],
+                        }
+                    ]
+                }
+            )
+        if trace_name in {
+            "planning_synthesis_dependency_agent",
+            "planning_synthesis_dependency_agent_collab_round_1",
+        }:
+            assert max_tokens == 2000
+            return json.dumps({"dependencies_mmd": "flowchart TD\n    ISSUE_001[ISSUE-001]"})
+        if trace_name == "planning_synthesis_controller_agent_round_1":
+            assert max_tokens == 2000
+            return json.dumps(
+                {
+                    "decision": "continue",
+                    "feedback": "Ensure issues and dependency graph remain consistent.",
+                }
+            )
+        raise AssertionError(f"unexpected trace_name: {trace_name}")
+
+    monkeypatch.setattr(scouts, "call_openai", fake_call_openai)
+
     artifact_rows, artifact_payloads = await planning_routes._default_plan_pipeline(session)
     assert artifact_rows[0][0] == PlanningArtifactType.PLAN_MARKDOWN
     assert artifact_rows[1][0] == PlanningArtifactType.ISSUES_JSON
@@ -203,9 +387,18 @@ async def test_default_planner_pipeline_uses_scout_reports(monkeypatch) -> None:
     assert PlanningArtifactType.PLAN_MARKDOWN in artifact_payloads
     assert PlanningArtifactType.ISSUES_JSON in artifact_payloads
     assert PlanningArtifactType.DEPENDENCIES_MMD in artifact_payloads
-    assert "Intake context:" in artifact_payloads[PlanningArtifactType.PLAN_MARKDOWN]
+    assert "## Objective" in artifact_payloads[PlanningArtifactType.PLAN_MARKDOWN]
     issues_payload = json.loads(artifact_payloads[PlanningArtifactType.ISSUES_JSON])
-    assert "Request context:" in issues_payload["issues"][0]["description"]
+    assert issues_payload["issues"][0]["repo"] == "owner-one/repo-one"
+    assert calls == [
+        "planning_synthesis_plan_agent",
+        "planning_synthesis_issue_agent",
+        "planning_synthesis_dependency_agent",
+        "planning_synthesis_controller_agent_round_1",
+        "planning_synthesis_plan_agent_collab_round_1",
+        "planning_synthesis_issue_agent_collab_round_1",
+        "planning_synthesis_dependency_agent_collab_round_1",
+    ]
     assert artifact_store.writes == [
         (session.id, "PLAN.md"),
         (session.id, "ISSUES.json"),

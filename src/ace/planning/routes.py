@@ -234,10 +234,19 @@ async def _default_plan_pipeline(
     )
     synthesis_session = session.model_copy(deep=True)
     synthesis_session.request_text = _compose_request_with_intake_context(session)
-    artifacts: PlanningArtifacts = build_planning_artifacts(
+    openai_api_key = resolve_openai_api_key(settings)
+    artifacts: PlanningArtifacts = await build_planning_artifacts(
         session=synthesis_session,
         project=project,
         scout_reports=scout_reports,
+        openai_api_key=openai_api_key,
+        model=settings.planning_synthesis_model,
+        plan_max_tokens=settings.planning_synthesis_plan_max_tokens,
+        issue_max_tokens=settings.planning_synthesis_issue_max_tokens,
+        dependencies_max_tokens=settings.planning_synthesis_dependencies_max_tokens,
+        controller_max_tokens=settings.planning_synthesis_controller_max_tokens,
+        reasoning_effort=settings.planning_synthesis_reasoning_effort,
+        max_turns_per_agent=settings.planning_synthesis_max_turns_per_agent,
     )
     artifact_store = _resolve_artifact_store()
     plan_url = await artifact_store.write_plan_markdown(
@@ -463,6 +472,7 @@ async def _review_and_update_issues(
             "session_id": session.id,
             "project_slug": session.project_slug,
         },
+        reasoning_effort=settings.planning_review_openai_reasoning_effort,
     )
     revised_payload_raw = _extract_json_payload(revised_response)
     if not isinstance(revised_payload_raw, dict) or "issues" not in revised_payload_raw:
@@ -620,6 +630,69 @@ def _compact_repo_report(report: ScoutReport) -> dict[str, Any]:
     }
 
 
+def _format_repo_scout_agent_prompt(
+    *,
+    session: PlanningSession,
+    repo_question: str,
+    condensed_reports: list[dict[str, Any]],
+) -> str:
+    context = {
+        "session_id": session.id,
+        "project_slug": session.project_slug,
+        "question": repo_question,
+        "repo_reports": condensed_reports,
+    }
+    return (
+        "You are a code scout synthesis agent.\n"
+        "Answer the user's repo question using the provided scout reports.\n"
+        "Be specific and actionable, cite concrete repo facts, and avoid filler.\n\n"
+        "Return ONLY JSON with this exact schema:\n"
+        "{\n"
+        '  "answer": "string"\n'
+        "}\n\n"
+        "Context JSON:\n"
+        f"{json.dumps(context, indent=2, ensure_ascii=True)}"
+    )
+
+
+def _parse_repo_scout_agent_answer(raw_response: str) -> str:
+    payload = _extract_json_payload(raw_response)
+    if not isinstance(payload, dict):
+        raise ValueError("❌ ERROR: repo scout agent response must be a JSON object")
+    answer = str(payload.get("answer", "")).strip()
+    if not answer:
+        raise ValueError("❌ ERROR: repo scout agent must include a non-empty answer")
+    return answer
+
+
+async def _request_repo_scout_answer(
+    *,
+    session: PlanningSession,
+    repo_question: str,
+    condensed_reports: list[dict[str, Any]],
+    settings: Settings,
+) -> str:
+    openai_api_key = resolve_openai_api_key(settings)
+    prompt = _format_repo_scout_agent_prompt(
+        session=session,
+        repo_question=repo_question,
+        condensed_reports=condensed_reports,
+    )
+    response_text = await call_openai(
+        prompt=prompt,
+        model=settings.planning_repo_scout_model,
+        api_key=openai_api_key,
+        max_tokens=settings.planning_repo_scout_max_tokens,
+        trace_name="planning_repo_scout_agent",
+        metadata={
+            "session_id": session.id,
+            "project_slug": session.project_slug,
+        },
+        reasoning_effort=settings.planning_repo_scout_reasoning_effort,
+    )
+    return _parse_repo_scout_agent_answer(response_text)
+
+
 async def _run_intake_repo_agents(
     *,
     store: PlanningStore,
@@ -642,9 +715,16 @@ async def _run_intake_repo_agents(
     github_token = resolve_github_token(settings) if needs_github_token else ""
     scout_reports = await run_repositories_scout(repos_to_scan, github_token=github_token)
     condensed_reports = [_compact_repo_report(report) for report in scout_reports]
+    repo_answer = await _request_repo_scout_answer(
+        session=session,
+        repo_question=repo_question,
+        condensed_reports=condensed_reports,
+        settings=settings,
+    )
 
     repo_report_payload = {
         "question": repo_question.strip(),
+        "answer": repo_answer,
         "repos_scanned": [report["repo"] for report in condensed_reports],
         "reports": condensed_reports,
         "created_at": _utc_now().isoformat(),
@@ -665,6 +745,7 @@ async def _run_intake_repo_agents(
             event_type="intake_repo_agents_answered",
             payload={
                 "question": repo_report_payload["question"],
+                "answer_preview": repo_answer[:400],
                 "repos_scanned": repo_report_payload["repos_scanned"],
                 "status": session.status,
             },
@@ -676,6 +757,7 @@ async def _run_intake_repo_agents(
         phase=PLANNING_PHASE_INTAKE,
         event_type="intake_repo_agents_answered",
         question=repo_report_payload["question"],
+        answer_preview=repo_answer[:180],
         repo_count=len(repo_report_payload["repos_scanned"]),
     )
 
@@ -706,6 +788,9 @@ def _build_planning_context_from_intake(
             repos_text = ", ".join(str(repo).strip() for repo in repos_scanned if str(repo).strip())
             if question:
                 lines.append(f"- question: {question}")
+            answer = str(report.get("answer", "")).strip()
+            if answer:
+                lines.append(f"- answer: {answer}")
             if repos_text:
                 lines.append(f"- repos: {repos_text}")
             reports = report.get("reports", [])
@@ -816,6 +901,7 @@ async def _request_intake_agent_decision(
             "session_id": session.id,
             "project_slug": session.project_slug,
         },
+        reasoning_effort=settings.planning_intake_reasoning_effort,
     )
     return _parse_intake_agent_decision(response_text)
 
