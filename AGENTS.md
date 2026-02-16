@@ -11,6 +11,7 @@ Repository agent practices
 - Terraform for deployment and infrastructure is managed in `/Users/kristinday/ditc_terraform`. Do not add new Terraform changes in this repository.
 - Prefer `--arg` style CLI arguments over setting environment variables for configuration.
 - No fallbacks unless explicitly requested; errors must be loud (use "❌ ERROR" and stop execution).
+- If the user asks to change behavior, implement that behavior directly; do not preserve or introduce fallback/alternate paths unless explicitly requested by the user.
 - Every error log must include a "❌ ERROR" banner; never log errors without the banner.
 - Skilling guidance for issue creation:
   - For creating GitHub issues, use `~/.codex/skills/github-issue-creation/SKILL.md` (or the equivalent `~/.claude/skills/...` path for Claude tools).

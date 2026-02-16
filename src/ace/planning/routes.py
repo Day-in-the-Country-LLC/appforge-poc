@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac as _hmac
 import json
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -12,7 +13,7 @@ import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from ace.agents.llm_client import call_claude, call_openai
-from ace.config.secrets import resolve_claude_api_key, resolve_openai_api_key
+from ace.config.secrets import resolve_claude_api_key, resolve_github_token, resolve_openai_api_key
 from ace.config.settings import Settings, get_settings
 from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import IssueQueue
@@ -22,7 +23,6 @@ from ace.planning.artifacts import (
     PlanningArtifactStore,
     PlanningArtifactStoreError,
 )
-from ace.planning.intake import generate_intake_questions, intake_complete
 from ace.planning.issue_writer import (
     parse_issues_payload,
     write_issues_from_payload,
@@ -39,6 +39,7 @@ from ace.planning.models import (
     PlanningIssueApprovalSuccess,
     PlanningMessage,
     PlanningMessageCreate,
+    PlanningMessageList,
     PlanningMode,
     PlanningSession,
     PlanningSessionCreateRequest,
@@ -47,6 +48,7 @@ from ace.planning.pubsub_queue import PubSubPlannerQueue, decode_pubsub_push
 from ace.planning.scouts import (
     PlanningArtifacts,
     PlanningScoutError,
+    ScoutReport,
     build_planning_artifacts,
     load_project_registry,
     run_repositories_scout,
@@ -115,6 +117,22 @@ PLANNING_PHASE_SYNTHESIS = "synthesis"
 PLANNING_PHASE_REVIEW = "review"
 PLANNING_PHASE_ISSUES = "issues"
 PLANNING_PHASE_DONE = "done"
+_INTAKE_AGENT_ACTION_ASK_USER = "ask_user"
+_INTAKE_AGENT_ACTION_ASK_REPO_AGENTS = "ask_repo_agents"
+_INTAKE_AGENT_ACTION_READY_TO_PLAN = "ready_to_plan"
+_INTAKE_AGENT_ACTIONS = {
+    _INTAKE_AGENT_ACTION_ASK_USER,
+    _INTAKE_AGENT_ACTION_ASK_REPO_AGENTS,
+    _INTAKE_AGENT_ACTION_READY_TO_PLAN,
+}
+_INTAKE_AGENT_MAX_INTERNAL_ACTIONS = 4
+
+
+@dataclass(frozen=True)
+class _IntakeAgentDecision:
+    action: str
+    assistant_message: str
+    repo_question: str | None = None
 
 
 def _planner_enabled() -> bool:
@@ -185,6 +203,22 @@ def _reset_planner_pipeline_for_tests(pipeline: Any | None = None) -> None:
     _planner_pipeline = pipeline
 
 
+def _compose_request_with_intake_context(session: PlanningSession) -> str:
+    intake_state = session.intake_state if isinstance(session.intake_state, dict) else {}
+    planning_context = intake_state.get("planning_context")
+    if not isinstance(planning_context, str):
+        return session.request_text
+    context_text = planning_context.strip()
+    if not context_text:
+        return session.request_text
+    base_request = (session.request_text or "").strip()
+    if context_text in base_request:
+        return base_request
+    if not base_request:
+        return f"Intake context:\n{context_text}"
+    return f"{base_request}\n\nIntake context:\n{context_text}"
+
+
 async def _default_plan_pipeline(
     session: PlanningSession,
 ) -> tuple[list[tuple[PlanningArtifactType, str]], dict[PlanningArtifactType, str]]:
@@ -198,8 +232,10 @@ async def _default_plan_pipeline(
         project.repos,
         github_token=(settings.github_token or ""),
     )
+    synthesis_session = session.model_copy(deep=True)
+    synthesis_session.request_text = _compose_request_with_intake_context(session)
     artifacts: PlanningArtifacts = build_planning_artifacts(
-        session=session,
+        session=synthesis_session,
         project=project,
         scout_reports=scout_reports,
     )
@@ -528,11 +564,8 @@ def _log_planning_lifecycle_event(
 
 async def _refresh_session_state(session: PlanningSession) -> PlanningSession:
     store = _resolve_store()
-    questions = session.questions
-    if session.status == PLANNING_STATUS_INTAKE_PENDING and intake_complete(
-        questions,
-        session.answers,
-    ):
+    intake_state = session.intake_state if isinstance(session.intake_state, dict) else {}
+    if session.status == PLANNING_STATUS_INTAKE_PENDING and bool(intake_state.get("ready_to_plan")):
         session.status = PLANNING_STATUS_READY_TO_RUN
         session.updated_at = _utc_now()
         _log_planning_lifecycle_event(
@@ -547,11 +580,351 @@ async def _refresh_session_state(session: PlanningSession) -> PlanningSession:
             PlanningEvent(
                 session_id=session.id,
                 event_type="intake_complete",
-                payload={"status": session.status},
+                payload={"status": session.status, "source": "agent"},
             ),
         )
         await store.update_session(session)
     return session
+
+
+def _build_initial_intake_state() -> dict[str, Any]:
+    return {
+        "ready_to_plan": False,
+        "agent_turn": 0,
+        "repo_reports": [],
+    }
+
+
+def _normalized_intake_state(session: PlanningSession) -> dict[str, Any]:
+    base = _build_initial_intake_state()
+    raw = session.intake_state if isinstance(session.intake_state, dict) else {}
+    base["ready_to_plan"] = bool(raw.get("ready_to_plan", base["ready_to_plan"]))
+    try:
+        base["agent_turn"] = max(0, int(raw.get("agent_turn", base["agent_turn"])))
+    except (TypeError, ValueError):
+        base["agent_turn"] = 0
+    repo_reports = raw.get("repo_reports", [])
+    base["repo_reports"] = repo_reports if isinstance(repo_reports, list) else []
+    planning_context = raw.get("planning_context")
+    base["planning_context"] = planning_context if isinstance(planning_context, str) else ""
+    return base
+
+
+def _compact_repo_report(report: ScoutReport) -> dict[str, Any]:
+    return {
+        "repo": report.repo,
+        "summary": report.summary,
+        "entrypoints": report.entrypoints[:6],
+        "risks": report.risks[:6],
+        "work_items": report.work_items[:6],
+    }
+
+
+async def _run_intake_repo_agents(
+    *,
+    store: PlanningStore,
+    session: PlanningSession,
+    state: dict[str, Any],
+    repo_question: str,
+    settings: Settings,
+) -> None:
+    if not repo_question.strip():
+        raise ValueError("❌ ERROR: intake agent returned empty repo_question")
+
+    project = await load_project_registry(session.project_slug, settings=settings)
+    repos = list(project.repos)
+    if not repos:
+        raise PlanningScoutError(
+            f"❌ ERROR: project registry '{project.project_slug}' has no repos"
+        )
+    repos_to_scan = repos[: settings.planning_intake_max_repo_reports]
+    needs_github_token = any(not repo.local_path for repo in repos_to_scan)
+    github_token = resolve_github_token(settings) if needs_github_token else ""
+    scout_reports = await run_repositories_scout(repos_to_scan, github_token=github_token)
+    condensed_reports = [_compact_repo_report(report) for report in scout_reports]
+
+    repo_report_payload = {
+        "question": repo_question.strip(),
+        "repos_scanned": [report["repo"] for report in condensed_reports],
+        "reports": condensed_reports,
+        "created_at": _utc_now().isoformat(),
+    }
+    state.setdefault("repo_reports", [])
+    if not isinstance(state["repo_reports"], list):
+        state["repo_reports"] = []
+    state["repo_reports"].append(repo_report_payload)
+    state["repo_reports"] = state["repo_reports"][-settings.planning_intake_max_repo_reports :]
+
+    session.intake_state = state
+    session.updated_at = _utc_now()
+    await store.update_session(session)
+    await store.append_event(
+        session.id,
+        PlanningEvent(
+            session_id=session.id,
+            event_type="intake_repo_agents_answered",
+            payload={
+                "question": repo_report_payload["question"],
+                "repos_scanned": repo_report_payload["repos_scanned"],
+                "status": session.status,
+            },
+        ),
+    )
+    _log_planning_lifecycle_event(
+        session,
+        stage=STAGE_PLANNING_SCOUTING,
+        phase=PLANNING_PHASE_INTAKE,
+        event_type="intake_repo_agents_answered",
+        question=repo_report_payload["question"],
+        repo_count=len(repo_report_payload["repos_scanned"]),
+    )
+
+
+def _build_planning_context_from_intake(
+    *,
+    messages: list[PlanningMessage],
+    state: dict[str, Any],
+    settings: Settings,
+) -> str:
+    lines: list[str] = ["Conversation transcript:"]
+    for message in messages[-24:]:
+        content = (message.content or "").strip()
+        if not content:
+            continue
+        source = (message.source or "assistant").strip().lower()
+        lines.append(f"- {source}: {content}")
+
+    repo_reports = state.get("repo_reports", [])
+    if isinstance(repo_reports, list) and repo_reports:
+        lines.append("")
+        lines.append("Repo scout findings:")
+        for report in repo_reports[-settings.planning_intake_max_repo_reports :]:
+            if not isinstance(report, dict):
+                continue
+            question = str(report.get("question", "")).strip()
+            repos_scanned = report.get("repos_scanned", [])
+            repos_text = ", ".join(str(repo).strip() for repo in repos_scanned if str(repo).strip())
+            if question:
+                lines.append(f"- question: {question}")
+            if repos_text:
+                lines.append(f"- repos: {repos_text}")
+            reports = report.get("reports", [])
+            if isinstance(reports, list):
+                for condensed in reports:
+                    if not isinstance(condensed, dict):
+                        continue
+                    repo_name = str(condensed.get("repo", "")).strip() or "unknown"
+                    summary = str(condensed.get("summary", "")).strip()
+                    lines.append(f"  - {repo_name}: {summary}")
+
+    return "\n".join(lines).strip()
+
+
+def _format_intake_agent_prompt(
+    *,
+    session: PlanningSession,
+    messages: list[PlanningMessage],
+    state: dict[str, Any],
+    settings: Settings,
+) -> str:
+    transcript = [
+        {"source": message.source, "content": message.content} for message in messages[-24:]
+    ]
+    repo_reports = state.get("repo_reports", [])
+    if not isinstance(repo_reports, list):
+        repo_reports = []
+    context = {
+        "session_id": session.id,
+        "project_slug": session.project_slug,
+        "mode": session.mode.value,
+        "request_text": session.request_text,
+        "repo_reports": repo_reports[-settings.planning_intake_max_repo_reports :],
+        "conversation": transcript,
+    }
+    return (
+        "You are the Planning Intake Orchestrator.\n"
+        "Decide the next best action to gather enough input before plan generation.\n"
+        "You can ask the user clarifying questions and ask repo agents for codebase context.\n"
+        "When enough information exists, mark intake ready.\n\n"
+        "Return ONLY JSON with this exact schema:\n"
+        "{\n"
+        '  "action": "ask_user" | "ask_repo_agents" | "ready_to_plan",\n'
+        '  "assistant_message": "string (required for ask_user/ready_to_plan)",\n'
+        '  "repo_question": "string (required for ask_repo_agents)"\n'
+        "}\n\n"
+        "Rules:\n"
+        "- Ask repo agents only when codebase/project facts are missing.\n"
+        "- Keep assistant_message concise and specific.\n"
+        "- Do not include keys outside this schema.\n\n"
+        "Context JSON:\n"
+        f"{json.dumps(context, indent=2, ensure_ascii=True)}"
+    )
+
+
+def _parse_intake_agent_decision(raw_response: str) -> _IntakeAgentDecision:
+    payload = _extract_json_payload(raw_response)
+    if not isinstance(payload, dict):
+        raise ValueError("❌ ERROR: intake agent response must be a JSON object")
+
+    action = str(payload.get("action", "")).strip().lower()
+    if action not in _INTAKE_AGENT_ACTIONS:
+        raise ValueError(f"❌ ERROR: intake agent returned invalid action '{action}'")
+
+    assistant_message = str(payload.get("assistant_message", "")).strip()
+    if action in (_INTAKE_AGENT_ACTION_ASK_USER, _INTAKE_AGENT_ACTION_READY_TO_PLAN):
+        if not assistant_message:
+            raise ValueError(
+                "❌ ERROR: intake agent must include assistant_message for ask_user/ready_to_plan"
+            )
+
+    repo_question: str | None = None
+    if action == _INTAKE_AGENT_ACTION_ASK_REPO_AGENTS:
+        repo_question = str(payload.get("repo_question", "")).strip()
+        if not repo_question:
+            raise ValueError(
+                "❌ ERROR: intake agent must include repo_question for ask_repo_agents"
+            )
+
+    return _IntakeAgentDecision(
+        action=action,
+        assistant_message=assistant_message,
+        repo_question=repo_question,
+    )
+
+
+async def _request_intake_agent_decision(
+    *,
+    session: PlanningSession,
+    messages: list[PlanningMessage],
+    state: dict[str, Any],
+    settings: Settings,
+) -> _IntakeAgentDecision:
+    openai_api_key = resolve_openai_api_key(settings)
+    prompt = _format_intake_agent_prompt(
+        session=session,
+        messages=messages,
+        state=state,
+        settings=settings,
+    )
+    response_text = await call_openai(
+        prompt=prompt,
+        model=settings.planning_intake_model,
+        api_key=openai_api_key,
+        max_tokens=settings.planning_intake_max_tokens,
+        trace_name="planning_intake_agent",
+        metadata={
+            "session_id": session.id,
+            "project_slug": session.project_slug,
+        },
+    )
+    return _parse_intake_agent_decision(response_text)
+
+
+def _intake_agent_intro(session: PlanningSession) -> str:
+    return (
+        "I am your planning intake agent. I will ask follow-up questions and can query repo "
+        "agents for code context before planning starts. "
+        f"Request noted: {session.request_text} "
+        "What outcome should this planning run achieve?"
+    )
+
+
+async def _run_agent_intake_turn(
+    *,
+    store: PlanningStore,
+    session: PlanningSession,
+    settings: Settings,
+) -> PlanningMessage:
+    if settings.planning_intake_max_repo_scouts_per_turn < 1:
+        raise ValueError(
+            "❌ ERROR: PLANNING_INTAKE_MAX_REPO_SCOUTS_PER_TURN must be >= 1"
+        )
+    state = _normalized_intake_state(session)
+    repo_scout_calls_this_turn = 0
+
+    for _ in range(_INTAKE_AGENT_MAX_INTERNAL_ACTIONS):
+        state["agent_turn"] = int(state.get("agent_turn", 0)) + 1
+        messages = await store.get_messages(session.id)
+        decision = await _request_intake_agent_decision(
+            session=session,
+            messages=messages,
+            state=state,
+            settings=settings,
+        )
+        if decision.action == _INTAKE_AGENT_ACTION_ASK_REPO_AGENTS:
+            if repo_scout_calls_this_turn >= settings.planning_intake_max_repo_scouts_per_turn:
+                raise ValueError(
+                    "❌ ERROR: intake agent exceeded max repo scouts for this user turn "
+                    f"({settings.planning_intake_max_repo_scouts_per_turn})"
+                )
+            repo_scout_calls_this_turn += 1
+            await _run_intake_repo_agents(
+                store=store,
+                session=session,
+                state=state,
+                repo_question=decision.repo_question or "",
+                settings=settings,
+            )
+            continue
+
+        if decision.action == _INTAKE_AGENT_ACTION_READY_TO_PLAN:
+            state["ready_to_plan"] = True
+            state["planning_context"] = _build_planning_context_from_intake(
+                messages=messages,
+                state=state,
+                settings=settings,
+            )
+            session.intake_state = state
+            session.updated_at = _utc_now()
+            session = await _refresh_session_state(session)
+            await store.update_session(session)
+            # Intake completion always triggers planning start immediately.
+            await start_planning(session.id)
+            session = await _ensure_session(session.id)
+            return await _append_intake_assistant_message(
+                store=store,
+                session=session,
+                content=decision.assistant_message,
+                event_type="intake_agent_complete",
+            )
+
+        session.intake_state = state
+        session.updated_at = _utc_now()
+        session = await _refresh_session_state(session)
+        await store.update_session(session)
+        return await _append_intake_assistant_message(
+            store=store,
+            session=session,
+            content=decision.assistant_message,
+            event_type="intake_agent_prompt",
+        )
+
+    raise ValueError("❌ ERROR: intake agent exceeded maximum internal actions for one user turn")
+
+
+async def _append_intake_assistant_message(
+    *,
+    store: PlanningStore,
+    session: PlanningSession,
+    content: str,
+    event_type: str = "intake_agent_prompt",
+) -> PlanningMessage:
+    assistant = PlanningMessage(
+        session_id=session.id,
+        source="assistant",
+        content=content,
+    )
+    await store.add_message(session.id, assistant)
+    payload: dict[str, Any] = {"status": session.status, "content": content}
+    await store.append_event(
+        session.id,
+        PlanningEvent(
+            session_id=session.id,
+            event_type=event_type,
+            payload=payload,
+        ),
+    )
+    return assistant
 
 
 @planning_router.get("/projects")
@@ -595,25 +968,25 @@ async def list_projects() -> dict[str, Any]:
 
 @planning_router.post("/sessions", status_code=201, response_model=PlanningSession)
 async def create_planning_session(payload: PlanningSessionCreateRequest) -> PlanningSession:
-    """Create a new planning session and generate intake questions."""
+    """Create a new planning session."""
     _require_planner()
     await _cleanup_sessions()
-    questions = generate_intake_questions(
-        payload.request_text,
-        mode=payload.mode,
-        project_slug=payload.project_slug,
-        issue_creation_enabled=False,
-    )
+    settings = get_settings()
+    if not settings.planning_intake_agent_enabled:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "❌ ERROR: PLANNING_INTAKE_AGENT_ENABLED=false is not allowed; "
+                "deterministic intake fallback has been removed"
+            ),
+        )
     session = PlanningSession(
         project_slug=payload.project_slug,
         mode=payload.mode,
         request_text=payload.request_text,
         status=PLANNING_STATUS_INTAKE_PENDING,
-        questions=questions,
-        answers={},
+        intake_state=_build_initial_intake_state(),
     )
-    for question in session.questions:
-        question.session_id = session.id
     store = _resolve_store()
     await store.create_session(session)
     _log_planning_lifecycle_event(
@@ -622,7 +995,6 @@ async def create_planning_session(payload: PlanningSessionCreateRequest) -> Plan
         phase=PLANNING_PHASE_INTAKE,
         event_type="session_created",
         status=PLANNING_STATUS_INTAKE_PENDING,
-        question_count=len(questions),
     )
     await store.append_event(
         session.id,
@@ -631,9 +1003,14 @@ async def create_planning_session(payload: PlanningSessionCreateRequest) -> Plan
             event_type="session_created",
             payload={
                 "status": PLANNING_STATUS_INTAKE_PENDING,
-                "question_count": len(questions),
             },
         ),
+    )
+    await _append_intake_assistant_message(
+        store=store,
+        session=session,
+        content=_intake_agent_intro(session),
+        event_type="intake_agent_prompt",
     )
     return session
 
@@ -647,10 +1024,11 @@ async def add_planning_message(
     session_id: str,
     payload: PlanningMessageCreate,
 ) -> PlanningMessage:
-    """Record an intake answer and advance state when required questions are answered."""
+    """Record an intake message and run the agent turn."""
     _require_planner()
     await _cleanup_sessions()
     session = await _ensure_session(session_id)
+    settings = get_settings()
     _TERMINAL_STATUSES = (
         PLANNING_STATUS_DONE,
         PLANNING_STATUS_EXPIRED,
@@ -660,55 +1038,67 @@ async def add_planning_message(
     if session.status.startswith(PLANNING_STATUS_RUNNING):
         raise HTTPException(
             status_code=409,
-            detail="❌ ERROR: session is already running and does not accept intake answers",
+            detail="❌ ERROR: session is already running and does not accept messages",
+        )
+    if session.status == PLANNING_STATUS_READY_TO_RUN:
+        raise HTTPException(
+            status_code=409,
+            detail="❌ ERROR: intake is complete; use :start to begin planning",
         )
     if session.status in _TERMINAL_STATUSES:
         raise HTTPException(
             status_code=409,
-            detail=f"❌ ERROR: session is {session.status} and does not accept intake answers",
+            detail=f"❌ ERROR: session is {session.status} and does not accept messages",
         )
 
-    questions = session.questions
-    valid_ids = {question.id for question in questions}
-    if payload.question_id not in valid_ids:
-        raise HTTPException(
-            status_code=400,
-            detail=f"❌ ERROR: unknown question_id '{payload.question_id}'",
-        )
-    answer = payload.answer.strip()
-    if not answer:
-        raise HTTPException(status_code=400, detail="❌ ERROR: answer cannot be empty")
-
-    message = PlanningMessage(
-        session_id=session_id,
-        source=payload.source,
-        content=answer,
-    )
     store = _resolve_store()
-    await store.add_message(session_id, message)
-    _log_planning_lifecycle_event(
-        session,
-        stage=STAGE_PLANNING_INTAKE,
-        phase=PLANNING_PHASE_INTAKE,
-        event_type="intake_answered",
-        question_id=payload.question_id,
-        status=session.status,
+    user_text = (payload.content or "").strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="❌ ERROR: content cannot be empty")
+
+    user_message = PlanningMessage(
+        session_id=session_id,
+        source=payload.source or "user",
+        content=user_text,
     )
-    session.answers[payload.question_id] = answer
+    await store.add_message(session_id, user_message)
     await store.append_event(
         session_id,
         PlanningEvent(
             session_id=session_id,
-            event_type="intake_answered",
+            event_type="intake_message",
             payload={
-                "question_id": payload.question_id,
+                "source": user_message.source,
+                "content": user_message.content,
                 "status": session.status,
             },
         ),
     )
-    session = await _refresh_session_state(session)
-    await store.update_session(session)
-    return message
+
+    if not settings.planning_intake_agent_enabled:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "❌ ERROR: PLANNING_INTAKE_AGENT_ENABLED=false is not allowed; "
+                "deterministic intake fallback has been removed"
+            ),
+        )
+
+    try:
+        return await _run_agent_intake_turn(
+            store=store,
+            session=session,
+            settings=settings,
+        )
+    except HTTPException:
+        raise
+    except (PlanningScoutError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"❌ ERROR: intake agent turn failed: {exc}",
+        ) from exc
 
 
 @planning_router.post(
@@ -725,9 +1115,7 @@ async def start_planning(session_id: str) -> PlanningSession:
     if session.status != PLANNING_STATUS_READY_TO_RUN:
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"❌ ERROR: session cannot start until intake is complete (status={session.status})"
-            ),
+            detail=(f"❌ ERROR: session cannot start (status={session.status})"),
         )
     queued_at = _utc_now().isoformat()
     planner_queue = _resolve_planner_queue()
@@ -1240,11 +1628,29 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
     response_model=PlanningSession,
 )
 async def get_planning_session(session_id: str) -> PlanningSession:
-    """Fetch session details and current question/answer state."""
+    """Fetch session details."""
     _require_planner()
     await _cleanup_sessions()
     session = await _ensure_session(session_id)
     return await _refresh_session_state(session)
+
+
+@planning_router.get(
+    "/sessions/{session_id}/messages",
+    status_code=200,
+    response_model=PlanningMessageList,
+)
+async def get_planning_messages(session_id: str) -> PlanningMessageList:
+    """List planning conversation messages for a session."""
+    _require_planner()
+    await _cleanup_sessions()
+    await _ensure_session(session_id)
+    store = _resolve_store()
+    try:
+        messages = await store.get_messages(session_id)
+    except PlanningStoreError as exc:
+        raise HTTPException(status_code=500, detail=f"{exc}") from exc
+    return PlanningMessageList(messages=messages)
 
 
 @planning_router.get(

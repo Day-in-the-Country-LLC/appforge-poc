@@ -167,6 +167,13 @@ async def test_default_planner_pipeline_uses_scout_reports(monkeypatch) -> None:
     session = PlanningSession(
         project_slug="step8-project",
         request_text="Plan a cross-repo migration",
+        intake_state={
+            "planning_context": (
+                "Conversation transcript:\n"
+                "- user: Success means staging deploy + CI green.\n"
+                "- user: Scope includes owner-one/repo-one and owner-two/repo-two."
+            )
+        },
     )
     project = scouts._project_registry_from_payload(
         {
@@ -196,6 +203,9 @@ async def test_default_planner_pipeline_uses_scout_reports(monkeypatch) -> None:
     assert PlanningArtifactType.PLAN_MARKDOWN in artifact_payloads
     assert PlanningArtifactType.ISSUES_JSON in artifact_payloads
     assert PlanningArtifactType.DEPENDENCIES_MMD in artifact_payloads
+    assert "Intake context:" in artifact_payloads[PlanningArtifactType.PLAN_MARKDOWN]
+    issues_payload = json.loads(artifact_payloads[PlanningArtifactType.ISSUES_JSON])
+    assert "Request context:" in issues_payload["issues"][0]["description"]
     assert artifact_store.writes == [
         (session.id, "PLAN.md"),
         (session.id, "ISSUES.json"),

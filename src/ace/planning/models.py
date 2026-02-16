@@ -70,8 +70,7 @@ class PlanningSession(BaseModel):
     mode: PlanningMode = PlanningMode.PLAN_ONLY
     request_text: str
     status: str = "intake_pending"
-    questions: list[PlanningQuestion] = Field(default_factory=list)
-    answers: dict[str, str] = Field(default_factory=dict)
+    intake_state: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -104,16 +103,14 @@ class PlanningMessageCreate(BaseModel):
             "examples": [
                 {
                     "source": "user",
-                    "question_id": "primary_goal_category",
-                    "answer": "feature",
-                }
+                    "content": "We need a feature plan for checkout rollout.",
+                },
             ]
         }
     )
 
     source: str = "user"
-    question_id: str
-    answer: str
+    content: str | None = None
 
 
 class PlanningMessage(BaseModel):
@@ -140,31 +137,10 @@ class PlanningMessage(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class PlanningQuestion(BaseModel):
-    """An intake question surfaced to the user."""
+class PlanningMessageList(BaseModel):
+    """List of conversation messages for a planning session."""
 
-    model_config = ConfigDict(
-        json_schema_extra={
-            "examples": [
-                {
-                    "id": "q-001",
-                    "session_id": "plan-session-01",
-                    "text": "What is the primary goal category?",
-                    "question_type": "single_choice",
-                    "required": True,
-                    "options": ["feature", "bugfix", "infra", "docs"],
-                }
-            ]
-        }
-    )
-
-    id: str = Field(default_factory=_uuid)
-    session_id: str = ""
-    text: str
-    question_type: str = "text"
-    required: bool = True
-    options: list[str] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    messages: list[PlanningMessage]
 
 
 class PlanningEvent(BaseModel):

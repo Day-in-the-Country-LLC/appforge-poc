@@ -625,15 +625,24 @@ def _render_issues_json(
 ) -> str:
     issues: list[dict[str, Any]] = []
     counter = 1
+    request_context = _parse_plan_markdown_input(session.request_text).strip()
+    if len(request_context) > 400:
+        request_context = f"{request_context[:400]}..."
     for report in scout_reports:
         for work_item in report.work_items:
+            description = f"Derived from scout output: {report.summary}"
+            if request_context:
+                description = (
+                    f"Request context: {request_context}. "
+                    f"Derived from scout output: {report.summary}"
+                )
             issues.append(
                 {
                     "id": f"{session.id}-{counter:03d}",
                     "project_slug": project_slug,
                     "repo": report.repo,
                     "title": work_item,
-                    "description": f"Derived from scout output: {report.summary}",
+                    "description": description,
                     "priority": "medium",
                 }
             )

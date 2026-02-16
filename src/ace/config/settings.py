@@ -50,18 +50,12 @@ class Settings(BaseSettings):
     claude_secret_name: str = os.getenv("CLAUDE_SECRET_NAME", "appforge-anthropic-api-key")
     claude_secret_version: str = os.getenv("CLAUDE_SECRET_VERSION", "latest")
     claude_model: str = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
-    planning_review_enabled: bool = os.getenv(
-        "PLANNING_REVIEW_ENABLED", "false"
-    ).lower() == "true"
-    planning_review_claude_model: str = os.getenv(
-        "PLANNING_REVIEW_CLAUDE_MODEL", "claude-opus-4-6"
-    )
+    planning_review_enabled: bool = os.getenv("PLANNING_REVIEW_ENABLED", "false").lower() == "true"
+    planning_review_claude_model: str = os.getenv("PLANNING_REVIEW_CLAUDE_MODEL", "claude-opus-4-6")
     planning_review_claude_max_tokens: int = int(
         os.getenv("PLANNING_REVIEW_CLAUDE_MAX_TOKENS", "1800")
     )
-    planning_review_openai_model: str = os.getenv(
-        "PLANNING_REVIEW_OPENAI_MODEL", "gpt-5.3"
-    )
+    planning_review_openai_model: str = os.getenv("PLANNING_REVIEW_OPENAI_MODEL", "gpt-5.3")
     planning_review_openai_max_tokens: int = int(
         os.getenv("PLANNING_REVIEW_OPENAI_MAX_TOKENS", "3000")
     )
@@ -88,6 +82,15 @@ class Settings(BaseSettings):
     planner_api_token: str = os.getenv("PLANNER_API_TOKEN", "")
     repo_gcp_mapping_path: str = os.getenv("REPO_GCP_MAPPING_PATH", "docs/repo-gcp-mapping.json")
     planning_store_backend: str = os.getenv("PLANNING_STORE_BACKEND", "firestore").lower()
+    planning_intake_agent_enabled: bool = (
+        os.getenv("PLANNING_INTAKE_AGENT_ENABLED", "true").lower() == "true"
+    )
+    planning_intake_model: str = os.getenv("PLANNING_INTAKE_MODEL", "gpt-5.3")
+    planning_intake_max_tokens: int = int(os.getenv("PLANNING_INTAKE_MAX_TOKENS", "1400"))
+    planning_intake_max_repo_scouts_per_turn: int = int(
+        os.getenv("PLANNING_INTAKE_MAX_REPO_SCOUTS_PER_TURN", "2")
+    )
+    planning_intake_max_repo_reports: int = int(os.getenv("PLANNING_INTAKE_MAX_REPO_REPORTS", "6"))
 
     # CLI agent commands
     codex_cli_command: str = os.getenv(

@@ -50,6 +50,9 @@ class PlanningStore(ABC):
     async def add_message(self, session_id: str, message: PlanningMessage) -> None: ...
 
     @abstractmethod
+    async def get_messages(self, session_id: str) -> list[PlanningMessage]: ...
+
+    @abstractmethod
     async def append_event(self, session_id: str, event: PlanningEvent) -> None: ...
 
     @abstractmethod
@@ -113,6 +116,13 @@ class InMemoryPlanningStore(PlanningStore):
                 f"❌ ERROR: planning session not found (session_id={session_id})"
             )
         self._messages.setdefault(session_id, []).append(message.model_copy(deep=True))
+
+    async def get_messages(self, session_id: str) -> list[PlanningMessage]:
+        if session_id not in self._sessions:
+            raise PlanningStoreError(
+                f"❌ ERROR: planning session not found (session_id={session_id})"
+            )
+        return [message.model_copy(deep=True) for message in self._messages.get(session_id, [])]
 
     async def append_event(self, session_id: str, event: PlanningEvent) -> None:
         if session_id not in self._sessions:
@@ -257,6 +267,17 @@ class FirestorePlanningStore(PlanningStore):
         doc_ref = self._messages_ref(session_id).document(message.id)
         await asyncio.to_thread(doc_ref.set, _to_document_payload(message))
 
+    async def get_messages(self, session_id: str) -> list[PlanningMessage]:
+        snapshot = await asyncio.to_thread(self._session_ref(session_id).get)
+        if not snapshot.exists:
+            raise PlanningStoreError(
+                f"❌ ERROR: planning session not found (session_id={session_id})"
+            )
+        docs = await asyncio.to_thread(
+            lambda: list(self._messages_ref(session_id).order_by("created_at").stream())
+        )
+        return [_message_from_payload(doc.to_dict() or {}, doc.id) for doc in docs]
+
     async def append_event(self, session_id: str, event: PlanningEvent) -> None:
         snapshot = await asyncio.to_thread(self._session_ref(session_id).get)
         if not snapshot.exists:
@@ -398,6 +419,12 @@ def _event_from_payload(payload: dict[str, Any], doc_id: str) -> PlanningEvent:
     if "id" not in payload:
         payload = {"id": doc_id, **payload}
     return PlanningEvent.model_validate(payload)
+
+
+def _message_from_payload(payload: dict[str, Any], doc_id: str) -> PlanningMessage:
+    if "id" not in payload:
+        payload = {"id": doc_id, **payload}
+    return PlanningMessage.model_validate(payload)
 
 
 def _artifact_from_payload(payload: dict[str, Any], doc_id: str) -> PlanningArtifact:

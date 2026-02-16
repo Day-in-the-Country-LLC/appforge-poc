@@ -110,18 +110,17 @@ class PlannerApiClient:
             },
         )
 
-    def post_answer(
+    def send_message(
         self,
         *,
         session_id: str,
-        question_id: str,
-        answer: str,
+        content: str,
         source: str = "user",
     ) -> dict[str, Any]:
         return self._request_json(
             "POST",
             f"/planning/sessions/{session_id}/messages",
-            body={"question_id": question_id, "answer": answer, "source": source},
+            body={"content": content, "source": source},
         )
 
     def start_session(self, *, session_id: str) -> dict[str, Any]:
@@ -145,6 +144,9 @@ class PlannerApiClient:
     def get_events(self, *, session_id: str, after: str | None = None) -> dict[str, Any]:
         params = None if after is None else {"after": after}
         return self._request_json("GET", f"/planning/sessions/{session_id}/events", params=params)
+
+    def get_messages(self, *, session_id: str) -> dict[str, Any]:
+        return self._request_json("GET", f"/planning/sessions/{session_id}/messages")
 
     def get_artifacts(self, *, session_id: str) -> dict[str, Any]:
         return self._request_json("GET", f"/planning/sessions/{session_id}/artifacts")
@@ -246,6 +248,7 @@ def initialize_state() -> None:
     st.session_state.setdefault("active_session_id", None)
     st.session_state.setdefault("active_session", None)
     st.session_state.setdefault("events", [])
+    st.session_state.setdefault("messages", [])
     st.session_state.setdefault("next_event_cursor", None)
     st.session_state.setdefault("message_error", "")
     st.session_state.setdefault("message_success", "")
@@ -260,6 +263,7 @@ def clear_session() -> None:
     st.session_state["active_session_id"] = None
     st.session_state["active_session"] = None
     st.session_state["events"] = []
+    st.session_state["messages"] = []
     st.session_state["next_event_cursor"] = None
     st.session_state["message_error"] = ""
     st.session_state["message_success"] = ""
@@ -499,6 +503,18 @@ def load_events(api: PlannerApiClient, *, force: bool = False) -> None:
     st.session_state["next_event_cursor"] = event_page.get("next_cursor")
 
 
+def load_messages(api: PlannerApiClient) -> None:
+    session_id = st.session_state.get("active_session_id")
+    if not session_id:
+        return
+    try:
+        page = api.get_messages(session_id=session_id)
+    except PlannerApiError as exc:
+        set_flash(f"Failed to load messages: {exc}", kind="error")
+        return
+    st.session_state["messages"] = page.get("messages") or []
+
+
 def _load_projects_from_mapping() -> list[str]:
     """Return distinct gcp_project names from repo-gcp-mapping.json."""
     mapping_path = Path(__file__).resolve().parent / "docs" / "repo-gcp-mapping.json"
@@ -580,10 +596,12 @@ def create_session_form(api: PlannerApiClient) -> None:
                 st.session_state["active_session_id"] = session["id"]
                 st.session_state["active_session"] = session
                 st.session_state["events"] = []
+                st.session_state["messages"] = []
                 st.session_state["next_event_cursor"] = None
                 st.session_state["last_event_refresh"] = 0.0
                 load_events(api, force=True)
-                set_flash("Session created. Answer each question to continue.")
+                load_messages(api)
+                set_flash("Session created. Continue intake in the chat below.")
                 st.rerun()
 
 
@@ -604,129 +622,89 @@ def render_session_header(session: dict[str, Any]) -> None:
 
 
 def render_conversation(session: dict[str, Any]) -> None:
-    st.subheader("Conversation")
-    questions = session.get("questions", [])
-    answers = session.get("answers", {})
-    if not questions:
-        st.info("No questions available for this session yet.")
+    st.subheader("Intake conversation")
+    messages = st.session_state.get("messages") or []
+    if not messages:
+        st.info("No intake messages yet.")
         return
 
-    for index, question in enumerate(questions, start=1):
-        question_id = question.get("id", f"q-{index}")
-        answered = question_id in answers
-        if answered:
-            st.success(f"Q{index}: {question.get('text')}")
-            st.markdown(
-                f"<div class='mono subtle'>A: {answers[question_id]}</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.info(f"Q{index}: {question.get('text')}")
-            st.markdown("<div class='subtle'>Awaiting answer</div>", unsafe_allow_html=True)
+    for message in messages:
+        source = str(message.get("source", "assistant")).strip().lower()
+        role = "assistant" if source != "user" else "user"
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        with st.chat_message(role):
+            st.markdown(content)
 
 
-def render_question_entry(api: PlannerApiClient, session: dict[str, Any]) -> None:
+def render_intake_chat_input(api: PlannerApiClient, session: dict[str, Any]) -> None:
     session_id = session.get("id")
     if not session_id:
         return
-
-    questions = session.get("questions", [])
-    answers = session.get("answers", {})
-    next_question = next(
-        (question for question in questions if question.get("id") not in answers),
-        None,
-    )
-    if next_question is None:
-        st.success("Intake complete. You can start planning now.")
+    status = str(session.get("status", "")).strip().lower()
+    if status != "intake_pending":
+        if status == "ready_to_run":
+            st.info("Intake complete. Planning starts automatically.")
         return
 
-    question_id = next_question.get("id", "")
-    question_type = next_question.get("question_type", "text")
-    text = next_question.get("text", "")
-    options = next_question.get("options", [])
-    default_value = options[0] if options else ""
-
     st.markdown("<hr/>", unsafe_allow_html=True)
-    st.subheader("Answer next question")
-    with st.form(f"answer_form_{question_id}"):
-        st.markdown(f"**{text}**")
-        if question_type == "single_choice" and options:
-            answer = st.radio(
-                "Select one",
-                options=options,
-                index=0,
-                label_visibility="collapsed",
-            )
-        else:
-            answer = st.text_area("Your answer", value=default_value, height=90)
-
-        posted = st.form_submit_button("Submit answer")
+    st.subheader("Reply to intake agent")
+    with st.form("intake_chat_form"):
+        content = st.text_area(
+            "Your message",
+            value="",
+            height=90,
+            placeholder="Type your response for the intake agent...",
+        )
+        posted = st.form_submit_button("Send message")
     if not posted:
         return
 
-    if not str(answer).strip():
-        set_flash("Answer cannot be empty.", kind="error")
+    if not str(content).strip():
+        set_flash("Message cannot be empty.", kind="error")
         return
     try:
-        api.post_answer(
+        api.send_message(
             session_id=session_id,
-            question_id=question_id,
-            answer=str(answer).strip(),
+            content=str(content).strip(),
             source="user",
         )
+    except httpx.ConnectError:
+        set_flash(
+            f"Cannot reach the planner API at {api.base_url}.",
+            kind="error",
+        )
+        return
     except PlannerApiError as exc:
-        set_flash(f"Failed to submit answer: {exc}", kind="error")
+        set_flash(f"Failed to send message: {exc}", kind="error")
+        return
+    except Exception as exc:
+        set_flash(
+            f"Unexpected error sending message ({type(exc).__name__}): {exc}",
+            kind="error",
+        )
         return
 
     load_session(api)
     load_events(api)
-    set_flash("Answer recorded.")
+    load_messages(api)
+    set_flash("Message sent.")
     st.rerun()
 
 
-def render_start_button(api: PlannerApiClient, session: dict[str, Any]) -> None:
-    status = session.get("status", "unknown")
-
+def render_planning_status(session: dict[str, Any]) -> None:
+    status = str(session.get("status", "unknown")).strip().lower()
     if status.startswith("running"):
         st.info("⏳ Planning is in progress…")
         st.progress(100, text=f"Status: {status}")
         return
-
-    if status in ("done", "failed", "expired", "timed_out"):
+    if status == "intake_pending":
+        st.info("Intake is in progress. Planning starts automatically when intake completes.")
         return
-
-    can_start = status == "ready_to_run"
-    if st.button("Start planning", type="primary", disabled=not can_start):
-        session_id = session.get("id")
-        if not session_id:
-            set_flash("No active session id.", kind="error")
-            st.rerun()
-            return
-        with st.spinner("Starting planning session…"):
-            try:
-                started = api.start_session(session_id=session_id)
-            except httpx.ConnectError:
-                set_flash(
-                    f"Cannot reach the planner API at {api.base_url}.",
-                    kind="error",
-                )
-                st.rerun()
-                return
-            except PlannerApiError as exc:
-                set_flash(f"Failed to start session: {exc}", kind="error")
-                st.rerun()
-                return
-            except Exception as exc:
-                set_flash(
-                    f"Unexpected error starting session ({type(exc).__name__}): {exc}",
-                    kind="error",
-                )
-                st.rerun()
-                return
-        st.session_state["active_session"] = started
-        load_events(api, force=True)
-        set_flash("Planning started. Events will refresh automatically.")
-        st.rerun()
+    if status == "ready_to_run":
+        st.info("Intake complete. Planning is queued automatically.")
+        return
 
 
 def render_events(
@@ -928,7 +906,7 @@ def render_issue_approval(api: PlannerApiClient, session: dict[str, Any]) -> Non
 
 def render_planning_page(api: PlannerApiClient, config: AppConfig) -> None:
     st.markdown("<div class='page-title'>ACE Planning Dashboard</div>", unsafe_allow_html=True)
-    st.caption("Create planning sessions, answer intake questions, and monitor progress events.")
+    st.caption("Create planning sessions, chat through intake, and monitor progress events.")
 
     render_messages()
 
@@ -941,17 +919,20 @@ def render_planning_page(api: PlannerApiClient, config: AppConfig) -> None:
 
     if not session:
         load_session(api)
+        load_messages(api)
         session = st.session_state.get("active_session") or {}
         if not session:
             clear_session()
             st.rerun()
             return
+    elif not st.session_state.get("messages"):
+        load_messages(api)
 
     col_left, col_right = st.columns([2, 1])
     with col_left:
         render_conversation(session)
-        render_question_entry(api, session)
-        render_start_button(api, session)
+        render_intake_chat_input(api, session)
+        render_planning_status(session)
     with col_right:
         render_events(api, config.poll_interval_seconds, config.auto_refresh)
         render_artifacts(api, session.get("id", ""))

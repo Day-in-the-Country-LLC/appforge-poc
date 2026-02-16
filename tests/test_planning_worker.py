@@ -87,7 +87,9 @@ def _pipeline_with_artifacts_and_payload(
     artifact_store: _StubArtifactStore,
     issue_payload: str,
 ) -> Callable[[Any], Any]:
-    async def _pipeline(session: Any) -> tuple[
+    async def _pipeline(
+        session: Any,
+    ) -> tuple[
         list[tuple[PlanningArtifactType, str]],
         dict[PlanningArtifactType, str],
     ]:
@@ -136,6 +138,19 @@ class _FailingArtifactStore:
         raise RuntimeError("artifact upload unavailable")
 
 
+class _StubPlannerQueue:
+    async def publish(
+        self,
+        *,
+        session_id: str,
+        project_slug: str,
+        mode: str,
+        created_at: str,
+    ) -> str:
+        del session_id, project_slug, mode, created_at
+        return "message-id-123"
+
+
 def _prepare_stub_pipeline(
     planning_routes: Any,
     artifact_store: _StubArtifactStore,
@@ -153,6 +168,7 @@ def _planning_app_client() -> TestClient:
         slack_channel_id="",
         planning_store_backend="memory",
         planning_review_enabled=False,
+        planning_intake_agent_enabled=True,
     )
     return TestClient(app, headers=_PLANNER_AUTH_HEADER)
 
@@ -162,34 +178,55 @@ def _planning_session_ready(
     project_slug: str = "example-project",
     mode: str = "plan_only",
 ) -> str:
-    created = client.post(
-        "/planning/sessions",
-        json={
-            "project_slug": project_slug,
-            "mode": mode,
-            "request_text": "Build a migration plan",
-        },
-    )
-    assert created.status_code == 201
-    payload = created.json()
-    session_id = payload["id"]
+    import ace.planning.routes as planning_routes
 
-    for question in payload["questions"]:
+    original_request = planning_routes._request_intake_agent_decision
+    original_queue = planning_routes._planner_queue
+
+    async def fake_request_intake_agent_decision(
+        *,
+        session: Any,
+        messages: Any,
+        state: Any,
+        settings: Any,
+    ) -> Any:
+        del session, messages, state, settings
+        return planning_routes._IntakeAgentDecision(
+            action="ready_to_plan",
+            assistant_message="Intake complete. Click Start planning when ready.",
+            repo_question=None,
+        )
+
+    planning_routes._request_intake_agent_decision = fake_request_intake_agent_decision
+    planning_routes._planner_queue = _StubPlannerQueue()
+    try:
+        created = client.post(
+            "/planning/sessions",
+            json={
+                "project_slug": project_slug,
+                "mode": mode,
+                "request_text": "Build a migration plan",
+            },
+        )
+        assert created.status_code == 201
+        session_id = created.json()["id"]
+
         created_answer = client.post(
             f"/planning/sessions/{session_id}/messages",
             json={
-                "question_id": question["id"],
-                "answer": "feature",
+                "content": "Need migration plan and worker execution.",
                 "source": "user",
             },
         )
         assert created_answer.status_code == 200
 
-    session = client.get(f"/planning/sessions/{session_id}")
-    assert session.status_code == 200
-    assert session.json()["status"] == "ready_to_run"
-
-    return session_id
+        session = client.get(f"/planning/sessions/{session_id}")
+        assert session.status_code == 200
+        assert session.json()["status"] == "running"
+        return session_id
+    finally:
+        planning_routes._request_intake_agent_decision = original_request
+        planning_routes._planner_queue = original_queue
 
 
 def _planner_push_envelope(

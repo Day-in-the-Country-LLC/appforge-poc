@@ -9,7 +9,6 @@ from ace.planning.models import (
     PlanningArtifactType,
     PlanningEvent,
     PlanningMode,
-    PlanningQuestion,
     PlanningSession,
 )
 from ace.planning.store_firestore import (
@@ -33,20 +32,12 @@ async def test_in_memory_store_persists_session_and_events() -> None:
         mode=PlanningMode.PLAN_ONLY,
         request_text="Prepare rollout plan",
         status=PLANNING_STATUS_INTAKE_PENDING,
-        questions=[
-            PlanningQuestion(
-                id="q1",
-                session_id="s1",
-                text="What is the goal?",
-                required=True,
-            )
-        ],
     )
 
     await store.create_session(session)
     fetched = await store.get_session(session.id)
     assert fetched is not None
-    assert fetched.questions[0].id == "q1"
+    assert fetched.project_slug == "example-project"
 
     await store.append_event(
         session.id,
