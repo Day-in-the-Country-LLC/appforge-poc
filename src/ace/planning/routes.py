@@ -1500,47 +1500,7 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
                         issues_json=issues_json,
                         settings=settings,
                     )
-                    _log_planning_lifecycle_event(
-                        session,
-                        stage=STAGE_PLANNING_REVIEW,
-                        phase=PLANNING_PHASE_REVIEW,
-                        event_type="issues_review_complete",
-                        message_id=queued.message_id,
-                        review_plan_recommendations=review_summary.get(
-                            "plan_recommendations_count",
-                        ),
-                        review_issue_recommendations=review_summary.get(
-                            "issue_recommendations_count",
-                        ),
-                        review_overall_feedback=str(
-                            review_summary.get("overall_feedback", ""),
-                        ).strip(),
-                        review_elapsed_seconds=review_summary.get(
-                            "elapsed_seconds",
-                        ),
-                    )
-                    review_artifact_content = json.dumps(review_summary, indent=2)
-                    artifact_store = _resolve_artifact_store()
-                    review_url = await artifact_store.write_artifact(
-                        session_id=session.id,
-                        filename="REVIEW.json",
-                        content=review_artifact_content,
-                        content_type="application/json",
-                    )
-                    review_artifact = PlanningArtifact(
-                        session_id=session.id,
-                        artifact_type=PlanningArtifactType.REVIEW_JSON,
-                        content_url=review_url,
-                    )
-                    await store.add_artifact(session.id, review_artifact)
-                    persisted_artifacts.append(review_artifact)
                 except Exception as exc:
-                    reviewed_issues_json = issues_json
-                    review_summary = {
-                        "review_enabled": True,
-                        "status": "degraded",
-                        "error": str(exc),
-                    }
                     _log_planning_lifecycle_event(
                         session,
                         stage=STAGE_PLANNING_REVIEW,
@@ -1561,6 +1521,42 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
                             },
                         ),
                     )
+                    raise ValueError(f"❌ ERROR: planning review failed: {exc}") from exc
+
+                _log_planning_lifecycle_event(
+                    session,
+                    stage=STAGE_PLANNING_REVIEW,
+                    phase=PLANNING_PHASE_REVIEW,
+                    event_type="issues_review_complete",
+                    message_id=queued.message_id,
+                    review_plan_recommendations=review_summary.get(
+                        "plan_recommendations_count",
+                    ),
+                    review_issue_recommendations=review_summary.get(
+                        "issue_recommendations_count",
+                    ),
+                    review_overall_feedback=str(
+                        review_summary.get("overall_feedback", ""),
+                    ).strip(),
+                    review_elapsed_seconds=review_summary.get(
+                        "elapsed_seconds",
+                    ),
+                )
+                review_artifact_content = json.dumps(review_summary, indent=2)
+                artifact_store = _resolve_artifact_store()
+                review_url = await artifact_store.write_artifact(
+                    session_id=session.id,
+                    filename="REVIEW.json",
+                    content=review_artifact_content,
+                    content_type="application/json",
+                )
+                review_artifact = PlanningArtifact(
+                    session_id=session.id,
+                    artifact_type=PlanningArtifactType.REVIEW_JSON,
+                    content_url=review_url,
+                )
+                await store.add_artifact(session.id, review_artifact)
+                persisted_artifacts.append(review_artifact)
             _log_planning_lifecycle_event(
                 session,
                 stage=STAGE_PLANNING_ISSUE_WRITER,

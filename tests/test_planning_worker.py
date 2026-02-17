@@ -485,7 +485,7 @@ def test_planner_worker_revises_issues_before_creation(monkeypatch) -> None:
         assert "issues_revised" in event_types
 
 
-def test_planner_worker_review_failures_are_advisory(monkeypatch) -> None:
+def test_planner_worker_review_failures_fail_loudly(monkeypatch) -> None:
     with _planning_app_client() as client:
         import ace.planning.routes as planning_routes
         from ace.config.settings import set_settings_overrides
@@ -540,18 +540,25 @@ def test_planner_worker_review_failures_are_advisory(monkeypatch) -> None:
         )
         push = _planner_push_envelope(session_id, mode="plan_and_create_issues")
         resp = client.post("/internal/pubsub/planner", json=push)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "done"
+        assert resp.status_code == 500
+        assert "❌ ERROR: planning worker failed: ❌ ERROR: planning review failed:" in (
+            resp.json()["detail"]
+        )
 
-        assert fake_github.created
-        assert fake_github.created[0][1]["title"] == "Prepare scaffold"
+        assert not fake_github.created
 
         events = client.get(f"/planning/sessions/{session_id}/events")
         assert events.status_code == 200
         event_payload = events.json()["events"]
         event_types = [event["event_type"] for event in event_payload]
         assert "issues_review_failed" in event_types
+        assert "failed" in event_types
         assert "issues_revised" not in event_types
+        assert "issues_written" not in event_types
+
+        session = client.get(f"/planning/sessions/{session_id}")
+        assert session.status_code == 200
+        assert session.json()["status"] == "failed"
 
 
 def test_planner_worker_failed_upload_marks_failed_event() -> None:
