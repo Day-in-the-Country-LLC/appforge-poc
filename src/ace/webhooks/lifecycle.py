@@ -24,6 +24,17 @@ STAGE_PLANNING_DONE = "planning_done"
 STAGE_PLANNING_FAILED = "planning_failed"
 STAGE_PLANNING_ISSUE_WRITER = "planning_issue_writer"
 
+# PR review stages
+STAGE_PR_REVIEW_STARTED = "pr_review_started"
+STAGE_PR_REVIEW_CODEX_INITIAL = "pr_review_codex_initial"
+STAGE_PR_REVIEW_CLAUDE_INITIAL = "pr_review_claude_initial"
+STAGE_PR_REVIEW_CROSS_FEEDBACK = "pr_review_cross_feedback"
+STAGE_PR_REVIEW_CONSENSUS = "pr_review_consensus"
+STAGE_PR_REVIEW_APPROVAL_SUBMITTED = "pr_review_approval_submitted"
+STAGE_PR_REVIEW_MERGED = "pr_review_merged"
+STAGE_PR_REVIEW_REJECTED = "pr_review_rejected"
+STAGE_PR_REVIEW_ERROR = "pr_review_error"
+
 RESOLUTION_SUCCESS = "success"
 RESOLUTION_BLOCKED = "blocked"
 RESOLUTION_FAILURE = "failure"

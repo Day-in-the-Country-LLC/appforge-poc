@@ -63,6 +63,25 @@ class Settings(BaseSettings):
         "high",
     ).strip().lower()
 
+    # PR review gate
+    pr_review_enabled: bool = os.getenv("PR_REVIEW_ENABLED", "true").lower() == "true"
+    pr_review_codex_model: str = os.getenv("PR_REVIEW_CODEX_MODEL", "gpt-5.2-codex")
+    pr_review_claude_model: str = os.getenv("PR_REVIEW_CLAUDE_MODEL", "claude-opus-4-6")
+    pr_review_codex_max_tokens: int = int(os.getenv("PR_REVIEW_CODEX_MAX_TOKENS", "4000"))
+    pr_review_claude_max_tokens: int = int(os.getenv("PR_REVIEW_CLAUDE_MAX_TOKENS", "4000"))
+    pr_review_codex_reasoning_effort: str = os.getenv(
+        "PR_REVIEW_CODEX_REASONING_EFFORT",
+        "high",
+    ).strip().lower()
+    pr_review_max_rounds: int = int(os.getenv("PR_REVIEW_MAX_ROUNDS", "2"))
+    pr_review_consensus_mode: str = os.getenv("PR_REVIEW_CONSENSUS_MODE", "both_approve")
+    pr_review_target_branch: str = os.getenv("PR_REVIEW_TARGET_BRANCH", "qa")
+    pr_review_require_checks: bool = (
+        os.getenv("PR_REVIEW_REQUIRE_CHECKS", "true").lower() == "true"
+    )
+    pr_review_diff_max_chars: int = int(os.getenv("PR_REVIEW_DIFF_MAX_CHARS", "100000"))
+    pr_review_allowed_repos: str = os.getenv("PR_REVIEW_ALLOWED_REPOS", "")
+
     # GCP
     gcp_project_id: str = os.getenv("GCP_PROJECT_ID", "")
     gcp_credentials_path: str = os.getenv(
