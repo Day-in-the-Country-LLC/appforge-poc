@@ -208,6 +208,12 @@ def _planning_session_ready(
         assert created.status_code == 201
         session_id = created.json()["id"]
 
+        first = client.post(
+            f"/planning/sessions/{session_id}/messages",
+            json={"content": "start planning", "source": "user"},
+        )
+        assert first.status_code == 200
+
         session = client.get(f"/planning/sessions/{session_id}")
         assert session.status_code == 200
         assert session.json()["status"] == "running"

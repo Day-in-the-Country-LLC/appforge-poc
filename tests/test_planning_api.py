@@ -132,7 +132,11 @@ def test_planning_session_intake_and_state_machine(monkeypatch) -> None:
                 {
                     "action": "ready_to_plan",
                     "assistant_message": "Intake complete. Click Start planning when ready.",
-                }
+                },
+                {
+                    "action": "ready_to_plan",
+                    "assistant_message": "Approved. Starting planning now.",
+                },
             ],
         )
 
@@ -159,6 +163,16 @@ def test_planning_session_intake_and_state_machine(monkeypatch) -> None:
             },
         )
         assert response.status_code == 200
+        assert "start planning" in response.json()["content"].lower()
+
+        confirm = client.post(
+            f"/planning/sessions/{session_id}/messages",
+            json={
+                "content": "start planning",
+                "source": "user",
+            },
+        )
+        assert confirm.status_code == 200
 
         session = client.get(f"/planning/sessions/{session_id}")
         assert session.status_code == 200
@@ -269,7 +283,11 @@ def test_start_planning_failure_emits_failed_event(monkeypatch) -> None:
                 {
                     "action": "ready_to_plan",
                     "assistant_message": "Intake complete. Click Start planning when ready.",
-                }
+                },
+                {
+                    "action": "ready_to_plan",
+                    "assistant_message": "Starting planning.",
+                },
             ],
         )
 
@@ -286,13 +304,18 @@ def test_start_planning_failure_emits_failed_event(monkeypatch) -> None:
         payload = created.json()
         session_id = payload["id"]
 
-        assert (
-            client.post(
-                f"/planning/sessions/{session_id}/messages",
-                json={"content": "Feature planning with smoke test success criteria"},
-            ).status_code
-            == 500
+        first = client.post(
+            f"/planning/sessions/{session_id}/messages",
+            json={"content": "Feature planning with smoke test success criteria"},
         )
+        assert first.status_code == 200
+        assert "start planning" in first.json()["content"].lower()
+
+        second = client.post(
+            f"/planning/sessions/{session_id}/messages",
+            json={"content": "start planning"},
+        )
+        assert second.status_code == 500
 
         events = client.get(f"/planning/sessions/{session_id}/events")
         assert events.status_code == 200
@@ -348,6 +371,10 @@ def test_conversational_intake_flow_and_messages_endpoint(monkeypatch) -> None:
                     "action": "ready_to_plan",
                     "assistant_message": "Intake complete. Click Start planning when ready.",
                 },
+                {
+                    "action": "ready_to_plan",
+                    "assistant_message": "Great, starting planning.",
+                },
             ],
         )
 
@@ -380,7 +407,14 @@ def test_conversational_intake_flow_and_messages_endpoint(monkeypatch) -> None:
         )
         assert second.status_code == 200
         assert second.json()["source"] == "assistant"
-        assert "Intake complete" in second.json()["content"]
+        assert "start planning" in second.json()["content"].lower()
+
+        third = client.post(
+            f"/planning/sessions/{session_id}/messages",
+            json={"content": "start planning", "source": "user"},
+        )
+        assert third.status_code == 200
+        assert third.json()["source"] == "assistant"
 
         session = client.get(f"/planning/sessions/{session_id}")
         assert session.status_code == 200
@@ -409,6 +443,10 @@ def test_agent_intake_can_query_repo_agents_and_finish(monkeypatch) -> None:
                 {
                     "action": "ready_to_plan",
                     "assistant_message": "Intake complete. Click Start planning when ready.",
+                },
+                {
+                    "action": "ready_to_plan",
+                    "assistant_message": "Great, starting planning now.",
                 },
             ]
         )
@@ -505,7 +543,14 @@ def test_agent_intake_can_query_repo_agents_and_finish(monkeypatch) -> None:
         )
         assert first_turn.status_code == 200
         assert first_turn.json()["source"] == "assistant"
-        assert "Intake complete" in first_turn.json()["content"]
+        assert "start planning" in first_turn.json()["content"].lower()
+
+        second_turn = client.post(
+            f"/planning/sessions/{session_id}/messages",
+            json={"content": "start planning", "source": "user"},
+        )
+        assert second_turn.status_code == 200
+        assert second_turn.json()["source"] == "assistant"
 
         session = client.get(f"/planning/sessions/{session_id}")
         assert session.status_code == 200
@@ -638,8 +683,19 @@ def test_agent_intake_limits_repo_scouts_per_user_turn(monkeypatch) -> None:
             f"/planning/sessions/{session_id}/messages",
             json={"content": "Please gather all code context before planning.", "source": "user"},
         )
-        assert response.status_code == 500
-        assert "exceeded max repo scouts for this user turn (2)" in response.json()["detail"]
+        assert response.status_code == 200
+        assert response.json()["source"] == "assistant"
+        assert "maximum repo scout calls for this turn" in response.json()["content"]
+
+        session = client.get(f"/planning/sessions/{session_id}")
+        assert session.status_code == 200
+        assert session.json()["status"] == "intake_pending"
+
+        events = client.get(f"/planning/sessions/{session_id}/events")
+        assert events.status_code == 200
+        event_types = [event["event_type"] for event in events.json()["events"]]
+        assert "intake_repo_scout_limit_reached" in event_types
+        assert "failed" not in event_types
 
 
 def test_repo_scout_agent_uses_configured_openai_reasoning(monkeypatch) -> None:

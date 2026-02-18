@@ -40,6 +40,46 @@ class IntakeAgentDecision:
     repo_question: str | None = None
 
 
+def _latest_user_message(messages: list[PlanningMessage]) -> str:
+    for message in reversed(messages):
+        source = (message.source or "").strip().lower()
+        if source != "user":
+            continue
+        content = (message.content or "").strip()
+        if content:
+            return content
+    return ""
+
+
+def _is_explicit_start_planning_confirmation(user_text: str) -> bool:
+    normalized = (user_text or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in {
+        "yes",
+        "y",
+        "approved",
+        "approve",
+        "go ahead",
+        "proceed",
+        "sounds good",
+        "looks good",
+        "start",
+    }:
+        return True
+    approval_phrases = (
+        "start planning",
+        "begin planning",
+        "proceed to planning",
+        "go ahead and plan",
+        "go ahead with planning",
+        "you can start planning",
+        "please start planning",
+        "start the planner",
+    )
+    return any(phrase in normalized for phrase in approval_phrases)
+
+
 class IntakeRuntime:
     """Stateful runtime for one intake turn."""
 
@@ -86,9 +126,17 @@ class IntakeRuntime:
 
         state = self._normalized_intake_state(session)
         repo_scout_calls_this_turn = 0
+        state["repo_scout_calls_this_turn"] = 0
+        state["repo_scout_budget_remaining"] = settings.planning_intake_max_repo_scouts_per_turn
+        state["repo_scout_budget_exhausted"] = False
 
         for _ in range(self._max_internal_actions):
             state["agent_turn"] = int(state.get("agent_turn", 0)) + 1
+            state["repo_scout_calls_this_turn"] = repo_scout_calls_this_turn
+            state["repo_scout_budget_remaining"] = max(
+                0,
+                settings.planning_intake_max_repo_scouts_per_turn - repo_scout_calls_this_turn,
+            )
             messages = await store.get_messages(session.id)
             decision = await self._request_decision(
                 session=session,
@@ -98,12 +146,41 @@ class IntakeRuntime:
             )
 
             if decision.action == self._ask_repo_agents_action:
+                state["awaiting_start_approval"] = False
                 if repo_scout_calls_this_turn >= settings.planning_intake_max_repo_scouts_per_turn:
-                    raise ValueError(
-                        "❌ ERROR: intake agent exceeded max repo scouts for this user turn "
-                        f"({settings.planning_intake_max_repo_scouts_per_turn})"
+                    state["repo_scout_budget_exhausted"] = True
+                    state["repo_scout_budget_remaining"] = 0
+                    session.intake_state = state
+                    session.updated_at = self._utc_now()
+                    await store.update_session(session)
+                    await store.append_event(
+                        session.id,
+                        PlanningEvent(
+                            session_id=session.id,
+                            event_type="intake_repo_scout_limit_reached",
+                            payload={
+                                "status": session.status,
+                                "max_repo_scouts_per_turn": settings.planning_intake_max_repo_scouts_per_turn,
+                                "repo_scout_calls_this_turn": repo_scout_calls_this_turn,
+                            },
+                        ),
+                    )
+                    return await self._append_assistant_message(
+                        store=store,
+                        session=session,
+                        content=(
+                            "I already used the maximum repo scout calls for this turn, so I will "
+                            "continue without additional scout queries. Share any missing details, "
+                            'or reply "start planning" if you want to proceed.'
+                        ),
+                        event_type="intake_repo_scout_limit_reached",
                     )
                 repo_scout_calls_this_turn += 1
+                state["repo_scout_calls_this_turn"] = repo_scout_calls_this_turn
+                state["repo_scout_budget_remaining"] = max(
+                    0,
+                    settings.planning_intake_max_repo_scouts_per_turn - repo_scout_calls_this_turn,
+                )
                 await self._run_repo_agents(
                     store=store,
                     session=session,
@@ -114,7 +191,39 @@ class IntakeRuntime:
                 continue
 
             if decision.action == self._ready_to_plan_action:
+                awaiting_start_approval = bool(state.get("awaiting_start_approval"))
+                if not awaiting_start_approval:
+                    state["awaiting_start_approval"] = True
+                    session.intake_state = state
+                    session.updated_at = self._utc_now()
+                    await store.update_session(session)
+                    confirmation_message = decision.assistant_message.strip()
+                    if "start planning" not in confirmation_message.lower():
+                        confirmation_message = (
+                            f"{confirmation_message}\n\n"
+                            'If this is correct, reply "start planning" and I will begin.'
+                        )
+                    return await self._append_assistant_message(
+                        store=store,
+                        session=session,
+                        content=confirmation_message,
+                        event_type="intake_plan_confirmation_requested",
+                    )
+
+                latest_user_text = _latest_user_message(messages)
+                if not _is_explicit_start_planning_confirmation(latest_user_text):
+                    session.intake_state = state
+                    session.updated_at = self._utc_now()
+                    await store.update_session(session)
+                    return await self._append_assistant_message(
+                        store=store,
+                        session=session,
+                        content='Please confirm by replying "start planning" when you want me to proceed.',
+                        event_type="intake_plan_confirmation_required",
+                    )
+
                 state["ready_to_plan"] = True
+                state["awaiting_start_approval"] = False
                 state["planning_context"] = self._build_planning_context(
                     messages=messages,
                     state=state,
@@ -136,6 +245,7 @@ class IntakeRuntime:
             if decision.action != self._ask_user_action:
                 raise ValueError(f"❌ ERROR: intake runtime received unknown action '{decision.action}'")
 
+            state["awaiting_start_approval"] = False
             session.intake_state = state
             session.updated_at = self._utc_now()
             session = await self._refresh_session_state(session)

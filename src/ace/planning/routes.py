@@ -590,6 +590,7 @@ async def _refresh_session_state(session: PlanningSession) -> PlanningSession:
 def _build_initial_intake_state() -> dict[str, Any]:
     return {
         "ready_to_plan": False,
+        "awaiting_start_approval": False,
         "agent_turn": 0,
         "repo_reports": [],
     }
@@ -599,6 +600,9 @@ def _normalized_intake_state(session: PlanningSession) -> dict[str, Any]:
     base = _build_initial_intake_state()
     raw = session.intake_state if isinstance(session.intake_state, dict) else {}
     base["ready_to_plan"] = bool(raw.get("ready_to_plan", base["ready_to_plan"]))
+    base["awaiting_start_approval"] = bool(
+        raw.get("awaiting_start_approval", base["awaiting_start_approval"])
+    )
     try:
         base["agent_turn"] = max(0, int(raw.get("agent_turn", base["agent_turn"])))
     except (TypeError, ValueError):
@@ -813,13 +817,18 @@ def _format_intake_agent_prompt(
         "project_slug": session.project_slug,
         "request_text": session.request_text,
         "repo_reports": repo_reports[-settings.planning_intake_max_repo_reports :],
+        "repo_scout_budget_per_turn": settings.planning_intake_max_repo_scouts_per_turn,
+        "repo_scout_calls_this_turn": int(state.get("repo_scout_calls_this_turn", 0) or 0),
+        "repo_scout_budget_remaining": int(state.get("repo_scout_budget_remaining", 0) or 0),
+        "repo_scout_budget_exhausted": bool(state.get("repo_scout_budget_exhausted", False)),
         "conversation": transcript,
     }
     return (
         "You are the Planning Intake Orchestrator.\n"
         "Decide the next best action to gather enough input before plan generation.\n"
         "You can ask the user clarifying questions and ask repo agents for codebase context.\n"
-        "When enough information exists, mark intake ready.\n\n"
+        "When enough information exists, first ask for explicit user approval to start planning,\n"
+        'then mark intake ready only after the user confirms.\n\n'
         "Return ONLY JSON with this exact schema:\n"
         "{\n"
         '  "action": "ask_user" | "ask_repo_agents" | "ready_to_plan",\n'
@@ -828,6 +837,10 @@ def _format_intake_agent_prompt(
         "}\n\n"
         "Rules:\n"
         "- Ask repo agents only when codebase/project facts are missing.\n"
+        "- You can call repo agents at most the remaining repo_scout_budget_remaining for this turn.\n"
+        "- If repo_scout_budget_remaining is 0, do not ask repo agents; use ask_user or ready_to_plan.\n"
+        "- Do not return ready_to_plan unless the latest user message explicitly approves starting planning.\n"
+        '- Before ready_to_plan, use ask_user to summarize intake and ask the user to reply "start planning".\n'
         "- Keep assistant_message concise and specific.\n"
         "- Do not include keys outside this schema.\n\n"
         "Context JSON:\n"
