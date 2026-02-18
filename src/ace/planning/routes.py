@@ -840,6 +840,7 @@ def _format_intake_agent_prompt(
         "- You can call repo agents at most the remaining repo_scout_budget_remaining for this turn.\n"
         "- If repo_scout_budget_remaining is 0, do not ask repo agents; use ask_user or ready_to_plan.\n"
         "- Do not return ready_to_plan unless the latest user message explicitly approves starting planning.\n"
+        '- If awaiting_start_approval is true and the latest user message says "start planning", you MUST return ready_to_plan.\n'
         '- Before ready_to_plan, use ask_user to summarize intake and ask the user to reply "start planning".\n'
         "- Keep assistant_message concise and specific.\n"
         "- Do not include keys outside this schema.\n\n"

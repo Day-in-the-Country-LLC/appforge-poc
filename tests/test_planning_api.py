@@ -196,6 +196,55 @@ def test_planning_session_intake_and_state_machine(monkeypatch) -> None:
         assert artifacts.json()["artifacts"] == []
 
 
+def test_explicit_start_planning_confirmation_forces_handoff(monkeypatch) -> None:
+    with _planning_app_client() as client:
+        import ace.planning.routes as planning_routes
+
+        _stub_intake_agent_decisions(
+            monkeypatch,
+            [
+                {
+                    "action": "ready_to_plan",
+                    "assistant_message": 'Summary looks good. Reply "start planning" to proceed.',
+                },
+                {
+                    "action": "ask_user",
+                    "assistant_message": "Great—I'll start planning the requested flow now.",
+                },
+            ],
+        )
+
+        stub_queue = _StubPlannerQueue()
+        planning_routes._planner_queue = stub_queue
+
+        created = client.post(
+            "/planning/sessions",
+            json={
+                "project_slug": "example-project",
+                "request_text": "Plan the next release",
+            },
+        )
+        assert created.status_code == 201
+        session_id = created.json()["id"]
+
+        confirm = client.post(
+            f"/planning/sessions/{session_id}/messages",
+            json={"content": "start planning", "source": "user"},
+        )
+        assert confirm.status_code == 200
+
+        session = client.get(f"/planning/sessions/{session_id}")
+        assert session.status_code == 200
+        assert session.json()["status"] == "running"
+        assert len(stub_queue.published) == 1
+
+        events = client.get(f"/planning/sessions/{session_id}/events")
+        assert events.status_code == 200
+        event_types = [event["event_type"] for event in events.json()["events"]]
+        assert "intake_decision_overridden_to_ready_to_plan" in event_types
+        assert "queued" in event_types
+
+
 def test_planning_models_and_enums() -> None:
     artifact = PlanningArtifact(
         session_id="plan-session-01",

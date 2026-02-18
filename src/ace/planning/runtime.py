@@ -138,12 +138,38 @@ class IntakeRuntime:
                 settings.planning_intake_max_repo_scouts_per_turn - repo_scout_calls_this_turn,
             )
             messages = await store.get_messages(session.id)
+            latest_user_text = _latest_user_message(messages)
+            awaiting_start_approval = bool(state.get("awaiting_start_approval"))
+            explicit_start_confirmation = _is_explicit_start_planning_confirmation(latest_user_text)
             decision = await self._request_decision(
                 session=session,
                 messages=messages,
                 state=state,
                 settings=settings,
             )
+            if (
+                awaiting_start_approval
+                and explicit_start_confirmation
+                and decision.action != self._ready_to_plan_action
+            ):
+                # Enforce the intake approval handshake: once user explicitly approves,
+                # this turn must transition into planning.
+                await store.append_event(
+                    session.id,
+                    PlanningEvent(
+                        session_id=session.id,
+                        event_type="intake_decision_overridden_to_ready_to_plan",
+                        payload={
+                            "status": session.status,
+                            "original_action": decision.action,
+                        },
+                    ),
+                )
+                decision = IntakeAgentDecision(
+                    action=self._ready_to_plan_action,
+                    assistant_message=decision.assistant_message.strip() or "Starting planning now.",
+                    repo_question=None,
+                )
 
             if decision.action == self._ask_repo_agents_action:
                 state["awaiting_start_approval"] = False
@@ -191,7 +217,6 @@ class IntakeRuntime:
                 continue
 
             if decision.action == self._ready_to_plan_action:
-                awaiting_start_approval = bool(state.get("awaiting_start_approval"))
                 if not awaiting_start_approval:
                     state["awaiting_start_approval"] = True
                     session.intake_state = state
@@ -210,7 +235,6 @@ class IntakeRuntime:
                         event_type="intake_plan_confirmation_requested",
                     )
 
-                latest_user_text = _latest_user_message(messages)
                 if not _is_explicit_start_planning_confirmation(latest_user_text):
                     session.intake_state = state
                     session.updated_at = self._utc_now()
