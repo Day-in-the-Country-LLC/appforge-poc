@@ -891,6 +891,189 @@ def _parse_controller_payload(payload: Any) -> tuple[str, str]:
     return decision, feedback
 
 
+class PlanningSynthesisRuntime:
+    """Cooperative runtime for strategist/issues/dependencies/controller agents."""
+
+    def __init__(
+        self,
+        *,
+        session: PlanningSession,
+        project: PlanningProjectRegistry,
+        scout_reports: list[ScoutReport],
+        openai_api_key: str,
+        model: str,
+        plan_max_tokens: int,
+        issue_max_tokens: int,
+        dependencies_max_tokens: int,
+        controller_max_tokens: int,
+        reasoning_effort: str,
+        max_turns_per_agent: int,
+    ) -> None:
+        self._session = session
+        self._project = project
+        self._scout_reports = scout_reports
+        self._openai_api_key = openai_api_key
+        self._model = model
+        self._plan_max_tokens = plan_max_tokens
+        self._issue_max_tokens = issue_max_tokens
+        self._dependencies_max_tokens = dependencies_max_tokens
+        self._controller_max_tokens = controller_max_tokens
+        self._reasoning_effort = reasoning_effort
+        self._max_turns_per_agent = max_turns_per_agent
+
+    async def run(self) -> PlanningArtifacts:
+        if self._max_turns_per_agent < 1:
+            raise ValueError("❌ ERROR: planning synthesis max turns per agent must be >= 1")
+
+        context_payload = _build_scout_context_payload(
+            session=self._session,
+            project_slug=self._project.project_slug,
+            scout_reports=self._scout_reports,
+        )
+
+        plan_markdown_raw = await call_openai(
+            prompt=_format_plan_agent_prompt(context_payload),
+            model=self._model,
+            api_key=self._openai_api_key,
+            max_tokens=self._plan_max_tokens,
+            trace_name="planning_synthesis_plan_agent",
+            metadata={"session_id": self._session.id, "project_slug": self._project.project_slug},
+            reasoning_effort=self._reasoning_effort,
+        )
+        plan_markdown = _strip_markdown_fences(plan_markdown_raw).strip()
+        if not plan_markdown:
+            raise ValueError("❌ ERROR: planning strategist agent returned empty markdown")
+
+        issues_response = await call_openai(
+            prompt=_format_issue_agent_prompt(
+                context_payload=context_payload,
+                plan_markdown=plan_markdown,
+            ),
+            model=self._model,
+            api_key=self._openai_api_key,
+            max_tokens=self._issue_max_tokens,
+            trace_name="planning_synthesis_issue_agent",
+            metadata={"session_id": self._session.id, "project_slug": self._project.project_slug},
+            reasoning_effort=self._reasoning_effort,
+        )
+        issues_payload = _extract_json_payload(issues_response, context="issue")
+        issues_json = _normalize_issues_payload(
+            session=self._session,
+            project_slug=self._project.project_slug,
+            payload=issues_payload,
+        )
+
+        dependencies_response = await call_openai(
+            prompt=_format_dependencies_agent_prompt(
+                context_payload=context_payload,
+                issues_json=issues_json,
+            ),
+            model=self._model,
+            api_key=self._openai_api_key,
+            max_tokens=self._dependencies_max_tokens,
+            trace_name="planning_synthesis_dependency_agent",
+            metadata={"session_id": self._session.id, "project_slug": self._project.project_slug},
+            reasoning_effort=self._reasoning_effort,
+        )
+        dependencies_payload = _extract_json_payload(dependencies_response, context="dependency")
+        dependencies_mmd = _parse_dependencies_payload(dependencies_payload)
+
+        for round_index in range(1, self._max_turns_per_agent):
+            controller_response = await call_openai(
+                prompt=_format_controller_agent_prompt(
+                    context_payload=context_payload,
+                    plan_markdown=plan_markdown,
+                    issues_json=issues_json,
+                    dependencies_mmd=dependencies_mmd,
+                    round_index=round_index,
+                    max_turns_per_agent=self._max_turns_per_agent,
+                ),
+                model=self._model,
+                api_key=self._openai_api_key,
+                max_tokens=self._controller_max_tokens,
+                trace_name=f"planning_synthesis_controller_agent_round_{round_index}",
+                metadata={"session_id": self._session.id, "project_slug": self._project.project_slug},
+                reasoning_effort=self._reasoning_effort,
+            )
+            controller_payload = _extract_json_payload(controller_response, context="controller")
+            controller_decision, controller_feedback = _parse_controller_payload(controller_payload)
+            if controller_decision == "finalize":
+                break
+
+            plan_collab_response = await call_openai(
+                prompt=_format_plan_collaboration_prompt(
+                    context_payload=context_payload,
+                    current_plan_markdown=plan_markdown,
+                    issues_json=issues_json,
+                    dependencies_mmd=dependencies_mmd,
+                    controller_feedback=controller_feedback,
+                    round_index=round_index,
+                ),
+                model=self._model,
+                api_key=self._openai_api_key,
+                max_tokens=self._plan_max_tokens,
+                trace_name=f"planning_synthesis_plan_agent_collab_round_{round_index}",
+                metadata={"session_id": self._session.id, "project_slug": self._project.project_slug},
+                reasoning_effort=self._reasoning_effort,
+            )
+            plan_markdown = _strip_markdown_fences(plan_collab_response).strip()
+            if not plan_markdown:
+                raise ValueError(
+                    f"❌ ERROR: planning strategist collaboration round {round_index} returned empty markdown"
+                )
+
+            issues_collab_response = await call_openai(
+                prompt=_format_issue_collaboration_prompt(
+                    context_payload=context_payload,
+                    plan_markdown=plan_markdown,
+                    current_issues_json=issues_json,
+                    dependencies_mmd=dependencies_mmd,
+                    controller_feedback=controller_feedback,
+                    round_index=round_index,
+                ),
+                model=self._model,
+                api_key=self._openai_api_key,
+                max_tokens=self._issue_max_tokens,
+                trace_name=f"planning_synthesis_issue_agent_collab_round_{round_index}",
+                metadata={"session_id": self._session.id, "project_slug": self._project.project_slug},
+                reasoning_effort=self._reasoning_effort,
+            )
+            issues_payload = _extract_json_payload(issues_collab_response, context="issue")
+            issues_json = _normalize_issues_payload(
+                session=self._session,
+                project_slug=self._project.project_slug,
+                payload=issues_payload,
+            )
+
+            dependencies_collab_response = await call_openai(
+                prompt=_format_dependencies_collaboration_prompt(
+                    context_payload=context_payload,
+                    plan_markdown=plan_markdown,
+                    issues_json=issues_json,
+                    current_dependencies_mmd=dependencies_mmd,
+                    controller_feedback=controller_feedback,
+                    round_index=round_index,
+                ),
+                model=self._model,
+                api_key=self._openai_api_key,
+                max_tokens=self._dependencies_max_tokens,
+                trace_name=f"planning_synthesis_dependency_agent_collab_round_{round_index}",
+                metadata={"session_id": self._session.id, "project_slug": self._project.project_slug},
+                reasoning_effort=self._reasoning_effort,
+            )
+            dependencies_payload = _extract_json_payload(
+                dependencies_collab_response,
+                context="dependency",
+            )
+            dependencies_mmd = _parse_dependencies_payload(dependencies_payload)
+
+        return PlanningArtifacts(
+            plan_markdown=plan_markdown,
+            issues_json=issues_json,
+            dependencies_mmd=dependencies_mmd,
+        )
+
+
 async def build_planning_artifacts(
     *,
     session: PlanningSession,
@@ -905,154 +1088,18 @@ async def build_planning_artifacts(
     reasoning_effort: str,
     max_turns_per_agent: int,
 ) -> PlanningArtifacts:
-    """Generate planning artifacts via a multi-agent OpenAI synthesis chain."""
-    if max_turns_per_agent < 1:
-        raise ValueError("❌ ERROR: planning synthesis max turns per agent must be >= 1")
-
-    context_payload = _build_scout_context_payload(
+    """Generate planning artifacts via a multi-agent OpenAI synthesis runtime."""
+    runtime = PlanningSynthesisRuntime(
         session=session,
-        project_slug=project.project_slug,
+        project=project,
         scout_reports=scout_reports,
-    )
-
-    plan_markdown_raw = await call_openai(
-        prompt=_format_plan_agent_prompt(context_payload),
+        openai_api_key=openai_api_key,
         model=model,
-        api_key=openai_api_key,
-        max_tokens=plan_max_tokens,
-        trace_name="planning_synthesis_plan_agent",
-        metadata={"session_id": session.id, "project_slug": project.project_slug},
+        plan_max_tokens=plan_max_tokens,
+        issue_max_tokens=issue_max_tokens,
+        dependencies_max_tokens=dependencies_max_tokens,
+        controller_max_tokens=controller_max_tokens,
         reasoning_effort=reasoning_effort,
+        max_turns_per_agent=max_turns_per_agent,
     )
-    plan_markdown = _strip_markdown_fences(plan_markdown_raw).strip()
-    if not plan_markdown:
-        raise ValueError("❌ ERROR: planning strategist agent returned empty markdown")
-
-    issues_response = await call_openai(
-        prompt=_format_issue_agent_prompt(
-            context_payload=context_payload,
-            plan_markdown=plan_markdown,
-        ),
-        model=model,
-        api_key=openai_api_key,
-        max_tokens=issue_max_tokens,
-        trace_name="planning_synthesis_issue_agent",
-        metadata={"session_id": session.id, "project_slug": project.project_slug},
-        reasoning_effort=reasoning_effort,
-    )
-    issues_payload = _extract_json_payload(issues_response, context="issue")
-    issues_json = _normalize_issues_payload(
-        session=session,
-        project_slug=project.project_slug,
-        payload=issues_payload,
-    )
-
-    dependencies_response = await call_openai(
-        prompt=_format_dependencies_agent_prompt(
-            context_payload=context_payload,
-            issues_json=issues_json,
-        ),
-        model=model,
-        api_key=openai_api_key,
-        max_tokens=dependencies_max_tokens,
-        trace_name="planning_synthesis_dependency_agent",
-        metadata={"session_id": session.id, "project_slug": project.project_slug},
-        reasoning_effort=reasoning_effort,
-    )
-    dependencies_payload = _extract_json_payload(dependencies_response, context="dependency")
-    dependencies_mmd = _parse_dependencies_payload(dependencies_payload)
-
-    for round_index in range(1, max_turns_per_agent):
-        controller_response = await call_openai(
-            prompt=_format_controller_agent_prompt(
-                context_payload=context_payload,
-                plan_markdown=plan_markdown,
-                issues_json=issues_json,
-                dependencies_mmd=dependencies_mmd,
-                round_index=round_index,
-                max_turns_per_agent=max_turns_per_agent,
-            ),
-            model=model,
-            api_key=openai_api_key,
-            max_tokens=controller_max_tokens,
-            trace_name=f"planning_synthesis_controller_agent_round_{round_index}",
-            metadata={"session_id": session.id, "project_slug": project.project_slug},
-            reasoning_effort=reasoning_effort,
-        )
-        controller_payload = _extract_json_payload(controller_response, context="controller")
-        controller_decision, controller_feedback = _parse_controller_payload(controller_payload)
-        if controller_decision == "finalize":
-            break
-
-        plan_collab_response = await call_openai(
-            prompt=_format_plan_collaboration_prompt(
-                context_payload=context_payload,
-                current_plan_markdown=plan_markdown,
-                issues_json=issues_json,
-                dependencies_mmd=dependencies_mmd,
-                controller_feedback=controller_feedback,
-                round_index=round_index,
-            ),
-            model=model,
-            api_key=openai_api_key,
-            max_tokens=plan_max_tokens,
-            trace_name=f"planning_synthesis_plan_agent_collab_round_{round_index}",
-            metadata={"session_id": session.id, "project_slug": project.project_slug},
-            reasoning_effort=reasoning_effort,
-        )
-        plan_markdown = _strip_markdown_fences(plan_collab_response).strip()
-        if not plan_markdown:
-            raise ValueError(
-                f"❌ ERROR: planning strategist collaboration round {round_index} returned empty markdown"
-            )
-
-        issues_collab_response = await call_openai(
-            prompt=_format_issue_collaboration_prompt(
-                context_payload=context_payload,
-                plan_markdown=plan_markdown,
-                current_issues_json=issues_json,
-                dependencies_mmd=dependencies_mmd,
-                controller_feedback=controller_feedback,
-                round_index=round_index,
-            ),
-            model=model,
-            api_key=openai_api_key,
-            max_tokens=issue_max_tokens,
-            trace_name=f"planning_synthesis_issue_agent_collab_round_{round_index}",
-            metadata={"session_id": session.id, "project_slug": project.project_slug},
-            reasoning_effort=reasoning_effort,
-        )
-        issues_payload = _extract_json_payload(issues_collab_response, context="issue")
-        issues_json = _normalize_issues_payload(
-            session=session,
-            project_slug=project.project_slug,
-            payload=issues_payload,
-        )
-
-        dependencies_collab_response = await call_openai(
-            prompt=_format_dependencies_collaboration_prompt(
-                context_payload=context_payload,
-                plan_markdown=plan_markdown,
-                issues_json=issues_json,
-                current_dependencies_mmd=dependencies_mmd,
-                controller_feedback=controller_feedback,
-                round_index=round_index,
-            ),
-            model=model,
-            api_key=openai_api_key,
-            max_tokens=dependencies_max_tokens,
-            trace_name=f"planning_synthesis_dependency_agent_collab_round_{round_index}",
-            metadata={"session_id": session.id, "project_slug": project.project_slug},
-            reasoning_effort=reasoning_effort,
-        )
-        dependencies_payload = _extract_json_payload(
-            dependencies_collab_response,
-            context="dependency",
-        )
-        dependencies_mmd = _parse_dependencies_payload(dependencies_payload)
-
-    return PlanningArtifacts(
-        plan_markdown=plan_markdown,
-        issues_json=issues_json,
-        dependencies_mmd=dependencies_mmd,
-    )
+    return await runtime.run()

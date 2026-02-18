@@ -10,13 +10,6 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class PlanningMode(str, Enum):
-    """Planning execution mode."""
-
-    PLAN_ONLY = "plan_only"
-    PLAN_AND_CREATE_ISSUES = "plan_and_create_issues"
-
-
 class PlanningArtifactType(str, Enum):
     """Artifact kinds produced by planning sessions."""
 
@@ -55,7 +48,6 @@ class PlanningSession(BaseModel):
                 {
                     "id": "plan-session-01",
                     "project_slug": "example-project",
-                    "mode": "plan_only",
                     "request_text": "Prepare a release plan for checkout.",
                     "status": "intake_pending",
                     "created_at": "2026-02-15T00:00:00Z",
@@ -67,7 +59,6 @@ class PlanningSession(BaseModel):
 
     id: str = Field(default_factory=_uuid)
     project_slug: str
-    mode: PlanningMode = PlanningMode.PLAN_ONLY
     request_text: str
     status: str = "intake_pending"
     intake_state: dict[str, Any] = Field(default_factory=dict)
@@ -83,7 +74,6 @@ class PlanningSessionCreateRequest(BaseModel):
             "examples": [
                 {
                     "project_slug": "example-project",
-                    "mode": "plan_only",
                     "request_text": "Create a rollout plan for checkout checkout feature.",
                 }
             ]
@@ -91,7 +81,6 @@ class PlanningSessionCreateRequest(BaseModel):
     )
 
     project_slug: str
-    mode: PlanningMode = PlanningMode.PLAN_ONLY
     request_text: str
 
 

@@ -63,6 +63,8 @@ class PlannerApiClient:
     def __init__(self, base_url: str, token: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
+        # Intake and planning calls can legitimately take longer than the default.
+        self._timeout = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=30.0)
 
     def _headers(self) -> dict[str, str]:
         if not self.token:
@@ -77,7 +79,7 @@ class PlannerApiClient:
         params: dict[str, str] | None = None,
         body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+        with httpx.Client(base_url=self.base_url, timeout=self._timeout) as client:
             response = client.request(
                 method,
                 path,
@@ -99,13 +101,12 @@ class PlannerApiClient:
         except ValueError as exc:  # pragma: no cover - response contract test path
             raise PlannerApiError("❌ ERROR: planner API returned non-JSON response") from exc
 
-    def create_session(self, *, project_slug: str, mode: str, request_text: str) -> dict[str, Any]:
+    def create_session(self, *, project_slug: str, request_text: str) -> dict[str, Any]:
         return self._request_json(
             "POST",
             "/planning/sessions",
             body={
                 "project_slug": project_slug,
-                "mode": mode,
                 "request_text": request_text,
             },
         )
@@ -549,15 +550,6 @@ def create_session_form(api: PlannerApiClient) -> None:
                 value="",
                 help="No projects found. Check docs/repo-gcp-mapping.json.",
             )
-        mode = st.selectbox(
-            "Mode",
-            options=["plan_only", "plan_and_create_issues"],
-            index=0,
-            help=(
-                "Choose `plan_only` for artifacts only or "
-                "`plan_and_create_issues` to open GitHub issues."
-            ),
-        )
         request_text = st.text_area(
             "What should the planner work on?",
             value="",
@@ -572,14 +564,21 @@ def create_session_form(api: PlannerApiClient) -> None:
             st.rerun()
         else:
             try:
-                session = api.create_session(
-                    project_slug=project_slug.strip(),
-                    mode=mode,
-                    request_text=request_text.strip(),
-                )
+                with st.spinner("Creating session and waiting for intake agent..."):
+                    session = api.create_session(
+                        project_slug=project_slug.strip(),
+                        request_text=request_text.strip(),
+                    )
             except httpx.ConnectError:
                 set_flash(
                     f"Cannot reach the planner API at {api.base_url}.",
+                    kind="error",
+                )
+                st.rerun()
+            except httpx.ReadTimeout:
+                set_flash(
+                    "Planner API timed out waiting for intake agent response. "
+                    "Please retry; if this persists, check Cloud Run logs.",
                     kind="error",
                 )
                 st.rerun()
@@ -611,8 +610,7 @@ def render_session_header(session: dict[str, Any]) -> None:
         f"""
 <div class="session-card">
   <div class="page-title">Session {session.get("id", "—")}</div>
-  <div class="subtle">Project: {session.get("project_slug", "—")}
-   • Mode: {session.get("mode", "plan_only")}</div>
+  <div class="subtle">Project: {session.get("project_slug", "—")}</div>
   <p><span class="status-pill">Status: {status}</span></p>
   <p class="subtle mono">{session.get("request_text", "")}</p>
 </div>
@@ -621,7 +619,7 @@ def render_session_header(session: dict[str, Any]) -> None:
     )
 
 
-def render_conversation(session: dict[str, Any]) -> None:
+def render_conversation() -> None:
     st.subheader("Intake conversation")
     messages = st.session_state.get("messages") or []
     if not messages:
@@ -665,14 +663,22 @@ def render_intake_chat_input(api: PlannerApiClient, session: dict[str, Any]) -> 
         set_flash("Message cannot be empty.", kind="error")
         return
     try:
-        api.send_message(
-            session_id=session_id,
-            content=str(content).strip(),
-            source="user",
-        )
+        with st.spinner("Waiting for intake agent response..."):
+            api.send_message(
+                session_id=session_id,
+                content=str(content).strip(),
+                source="user",
+            )
     except httpx.ConnectError:
         set_flash(
             f"Cannot reach the planner API at {api.base_url}.",
+            kind="error",
+        )
+        return
+    except httpx.ReadTimeout:
+        set_flash(
+            "Planner API timed out waiting for intake agent response. "
+            "Please retry; if this persists, check Cloud Run logs.",
             kind="error",
         )
         return
@@ -695,11 +701,18 @@ def render_intake_chat_input(api: PlannerApiClient, session: dict[str, Any]) -> 
 
 def render_planning_status(session: dict[str, Any]) -> None:
     status = str(session.get("status", "unknown")).strip().lower()
+    intake_state = session.get("intake_state") or {}
+    intake_in_progress = bool(
+        intake_state.get("turn_in_progress") if isinstance(intake_state, dict) else False
+    )
     if status.startswith("running"):
         st.info("⏳ Planning is in progress…")
         st.progress(100, text=f"Status: {status}")
         return
     if status == "intake_pending":
+        if intake_in_progress:
+            st.info("⏳ Intake agent is processing your latest message…")
+            return
         st.info("Intake is in progress. Planning starts automatically when intake completes.")
         return
     if status == "ready_to_run":
@@ -715,6 +728,10 @@ def render_events(
     session = st.session_state.get("active_session") or {}
     status = session.get("status", "unknown")
     is_running = status.startswith("running")
+    intake_state = session.get("intake_state") or {}
+    intake_in_progress = bool(
+        intake_state.get("turn_in_progress") if isinstance(intake_state, dict) else False
+    )
 
     st.subheader("Events")
     if st.button("Refresh events now"):
@@ -725,6 +742,8 @@ def render_events(
     if not st.session_state["events"]:
         if is_running:
             st.info("Waiting for planning events…")
+        elif intake_in_progress:
+            st.info("Waiting for intake progress events…")
         else:
             st.info("No events yet.")
 
@@ -745,15 +764,16 @@ def render_events(
             unsafe_allow_html=True,
         )
 
-    should_poll = auto_refresh or is_running
+    should_poll = auto_refresh or is_running or intake_in_progress
     if should_poll:
         now = time.time()
         last = st.session_state.get("last_event_refresh", 0.0)
-        interval = min(poll_interval, 5) if is_running else poll_interval
+        interval = min(poll_interval, 3) if (is_running or intake_in_progress) else poll_interval
         if now - last >= interval:
             st.session_state["last_event_refresh"] = now
             load_events(api, force=False)
             load_session(api)
+            load_messages(api)
             st.rerun()
         remaining = max(0.0, interval - (now - last))
         st.caption(f"Auto-refresh in {remaining:.0f}s." if remaining else "Auto-refreshing...")
@@ -924,13 +944,12 @@ def render_planning_page(api: PlannerApiClient, config: AppConfig) -> None:
         if not session:
             clear_session()
             st.rerun()
-            return
     elif not st.session_state.get("messages"):
         load_messages(api)
 
     col_left, col_right = st.columns([2, 1])
     with col_left:
-        render_conversation(session)
+        render_conversation()
         render_intake_chat_input(api, session)
         render_planning_status(session)
     with col_right:

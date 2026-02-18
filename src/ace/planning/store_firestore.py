@@ -186,7 +186,7 @@ class InMemoryPlanningStore(PlanningStore):
                         )
                     )
                     changed += 1
-            elif session.status.startswith("running"):
+            elif session.status == PLANNING_STATUS_RUNNING:
                 age = now - _utc_aware(session.updated_at)
                 if age > timedelta(hours=running_ttl_hours):
                     session.status = PLANNING_STATUS_TIMED_OUT
@@ -353,8 +353,7 @@ class FirestorePlanningStore(PlanningStore):
         )
         running_docs = await asyncio.to_thread(
             lambda: list(
-                collection.where("status", ">=", "running")
-                .where("status", "<", "runninh")
+                collection.where("status", "==", PLANNING_STATUS_RUNNING)
                 .where("updated_at", "<", running_cutoff.isoformat())
                 .stream()
             )
@@ -376,7 +375,7 @@ class FirestorePlanningStore(PlanningStore):
         for doc in running_docs:
             payload = doc.to_dict() or {}
             session = _session_from_payload(doc.id, payload)
-            if not session.status.startswith("running"):
+            if session.status != PLANNING_STATUS_RUNNING:
                 continue
             session.status = PLANNING_STATUS_TIMED_OUT
             session.updated_at = now

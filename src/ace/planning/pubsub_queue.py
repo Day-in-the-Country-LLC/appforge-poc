@@ -10,8 +10,6 @@ from typing import Any
 
 from google.cloud import pubsub_v1
 
-from ace.planning.models import PlanningMode
-
 
 @dataclass(frozen=True)
 class PlanningJob:
@@ -19,7 +17,6 @@ class PlanningJob:
 
     session_id: str
     project_slug: str
-    mode: PlanningMode
     created_at: str
     message_id: str | None = None
 
@@ -58,7 +55,6 @@ class PubSubPlannerQueue:
         *,
         session_id: str,
         project_slug: str,
-        mode: str,
         created_at: str,
     ) -> str:
         envelope = {
@@ -67,14 +63,12 @@ class PubSubPlannerQueue:
             "payload": {
                 "session_id": session_id,
                 "project_slug": project_slug,
-                "mode": mode,
                 "created_at": created_at,
             },
             "queued_at": created_at,
             "correlation": {
                 "session_id": session_id,
                 "project_slug": project_slug,
-                "mode": mode,
             },
         }
         body = json.dumps(envelope, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
@@ -82,7 +76,6 @@ class PubSubPlannerQueue:
             "event": "planner.start",
             "session_id": session_id,
             "project_slug": project_slug,
-            "mode": mode,
         }
         publish_future = self._publisher.publish(self._topic_path, body, **attrs)
         return await asyncio.to_thread(lambda: str(publish_future.result(timeout=30)))
@@ -135,11 +128,6 @@ def decode_pubsub_push(body: dict[str, Any]) -> QueuedPlanningJob:
         correlation.get("project_slug"),
         attrs.get("project_slug"),
     )
-    mode = _first_string(
-        payload.get("mode"),
-        correlation.get("mode"),
-        attrs.get("mode"),
-    )
     created_at = _first_string(
         payload.get("created_at"),
         envelope.get("queued_at"),
@@ -151,24 +139,18 @@ def decode_pubsub_push(body: dict[str, Any]) -> QueuedPlanningJob:
         raise ValueError("❌ ERROR: invalid_pubsub_push: missing session_id")
     if project_slug is None:
         raise ValueError("❌ ERROR: invalid_pubsub_push: missing project_slug")
-    if mode is None:
-        raise ValueError("❌ ERROR: invalid_pubsub_push: missing mode")
     if created_at is None:
         raise ValueError("❌ ERROR: invalid_pubsub_push: missing created_at")
     message_id = message.get("messageId")
     if message_id is not None and not isinstance(message_id, str):
         raise ValueError("❌ ERROR: invalid_pubsub_push: messageId must be string")
 
-    try:
-        job = PlanningJob(
-            session_id=session_id,
-            project_slug=project_slug,
-            mode=PlanningMode(mode),
-            created_at=created_at,
-            message_id=message_id,
-        )
-    except ValueError as exc:
-        raise ValueError(f"❌ ERROR: invalid_pubsub_push: invalid planning mode ({exc})") from exc
+    job = PlanningJob(
+        session_id=session_id,
+        project_slug=project_slug,
+        created_at=created_at,
+        message_id=message_id,
+    )
 
     return QueuedPlanningJob(event=event, payload=job, message_id=message_id)
 

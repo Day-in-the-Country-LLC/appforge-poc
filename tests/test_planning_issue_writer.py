@@ -11,7 +11,7 @@ from ace.planning.issue_writer import (
     parse_issues_payload,
     write_issues_from_payload,
 )
-from ace.planning.models import PlanningMode, PlanningSession
+from ace.planning.models import PlanningSession
 
 
 class _FakeGitHubClient:
@@ -116,7 +116,6 @@ async def test_write_issues_from_payload_enforces_dependency_order(monkeypatch) 
     session = PlanningSession(
         project_slug="example-project",
         request_text="Enable migration plan",
-        mode=PlanningMode.PLAN_ONLY,
     )
     result = await write_issues_from_payload(
         session=session,

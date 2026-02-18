@@ -50,7 +50,6 @@ class Settings(BaseSettings):
     claude_secret_name: str = os.getenv("CLAUDE_SECRET_NAME", "appforge-anthropic-api-key")
     claude_secret_version: str = os.getenv("CLAUDE_SECRET_VERSION", "latest")
     claude_model: str = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
-    planning_review_enabled: bool = os.getenv("PLANNING_REVIEW_ENABLED", "false").lower() == "true"
     planning_review_claude_model: str = os.getenv("PLANNING_REVIEW_CLAUDE_MODEL", "claude-opus-4-6")
     planning_review_claude_max_tokens: int = int(
         os.getenv("PLANNING_REVIEW_CLAUDE_MAX_TOKENS", "1800")

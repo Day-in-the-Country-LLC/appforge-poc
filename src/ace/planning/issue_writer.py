@@ -149,7 +149,6 @@ def _build_issue_body(
         "# Planning Issue",
         "",
         f"Session: `{session.id}`",
-        f"Mode: `{session.mode.value}`",
         f"Project: `{project_slug}`",
         "",
         "## Context",

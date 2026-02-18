@@ -8,7 +8,6 @@ from ace.planning.models import (
     PlanningArtifact,
     PlanningArtifactType,
     PlanningEvent,
-    PlanningMode,
     PlanningSession,
 )
 from ace.planning.store_firestore import (
@@ -29,7 +28,6 @@ async def test_in_memory_store_persists_session_and_events() -> None:
     store = InMemoryPlanningStore()
     session = PlanningSession(
         project_slug="example-project",
-        mode=PlanningMode.PLAN_ONLY,
         request_text="Prepare rollout plan",
         status=PLANNING_STATUS_INTAKE_PENDING,
     )
@@ -57,14 +55,12 @@ async def test_in_memory_store_sweep_marks_intake_and_running_sessions() -> None
     intake_session = PlanningSession(
         project_slug="example-project",
         request_text="Old intake session",
-        mode=PlanningMode.PLAN_ONLY,
         status=PLANNING_STATUS_INTAKE_PENDING,
         created_at=now - timedelta(hours=26),
     )
     running_session = PlanningSession(
         project_slug="example-project",
         request_text="Old running session",
-        mode=PlanningMode.PLAN_ONLY,
         status=PLANNING_STATUS_RUNNING,
         created_at=now - timedelta(minutes=90),
         updated_at=now - timedelta(hours=2),
@@ -98,7 +94,6 @@ async def test_in_memory_store_artifacts_default_to_empty() -> None:
     session = PlanningSession(
         project_slug="example-project",
         request_text="Session for artifacts",
-        mode=PlanningMode.PLAN_ONLY,
     )
     await store.create_session(session)
     assert await store.get_artifacts(session.id) == []
@@ -110,7 +105,6 @@ async def test_in_memory_store_add_artifact() -> None:
     session = PlanningSession(
         project_slug="example-project",
         request_text="Session for artifact writes",
-        mode=PlanningMode.PLAN_ONLY,
     )
     await store.create_session(session)
     artifact = PlanningArtifact(
@@ -130,7 +124,6 @@ async def test_in_memory_store_cursor_behavior() -> None:
     session = PlanningSession(
         project_slug="example-project",
         request_text="Session for cursor behavior",
-        mode=PlanningMode.PLAN_ONLY,
     )
     await store.create_session(session)
     for index in range(3):

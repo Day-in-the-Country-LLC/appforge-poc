@@ -10,7 +10,6 @@ from ace.config.settings import set_settings_overrides
 from ace.planning.models import (
     PlanningArtifact,
     PlanningArtifactType,
-    PlanningMode,
     PlanningSession,
 )
 from ace.webhooks.app import app
@@ -28,14 +27,12 @@ class _StubPlannerQueue:
         *,
         session_id: str,
         project_slug: str,
-        mode: str,
         created_at: str,
     ) -> str:
         self.published.append(
             {
                 "session_id": session_id,
                 "project_slug": project_slug,
-                "mode": mode,
                 "created_at": created_at,
             }
         )
@@ -48,10 +45,9 @@ class _FailingPlannerQueue:
         *,
         session_id: str,
         project_slug: str,
-        mode: str,
         created_at: str,
     ) -> str:
-        del session_id, project_slug, mode, created_at
+        del session_id, project_slug, created_at
         raise RuntimeError("queue unavailable")
 
 
@@ -60,6 +56,8 @@ def _planning_app_client() -> TestClient:
         planner_api_token=_PLANNER_TOKEN,
         webhook_service_role="planner",
         repo_gcp_mapping_path="docs/repo-gcp-mapping.example.json",
+        secrets_backend="env",
+        github_token="test-planning-github-token",
         slack_bot_token="",
         slack_channel_id="",
         planning_store_backend="memory",
@@ -145,7 +143,6 @@ def test_planning_session_intake_and_state_machine(monkeypatch) -> None:
             "/planning/sessions",
             json={
                 "project_slug": "example-project",
-                "mode": "plan_only",
                 "request_text": "Plan the next release",
             },
         )
@@ -170,7 +167,6 @@ def test_planning_session_intake_and_state_machine(monkeypatch) -> None:
         assert len(stub_queue.published) == 1
         assert stub_queue.published[0]["session_id"] == session_id
         assert stub_queue.published[0]["project_slug"] == "example-project"
-        assert stub_queue.published[0]["mode"] == "plan_only"
 
         events = client.get(f"/planning/sessions/{session_id}/events")
         assert events.status_code == 200
@@ -198,9 +194,8 @@ def test_planning_models_and_enums() -> None:
     session = PlanningSession(
         project_slug="example-project",
         request_text="Plan checkout rollout.",
-        mode=PlanningMode.PLAN_ONLY,
     )
-    assert session.mode == PlanningMode.PLAN_ONLY
+    assert session.project_slug == "example-project"
 
 
 def test_planning_endpoints_require_bearer_token() -> None:
@@ -208,6 +203,8 @@ def test_planning_endpoints_require_bearer_token() -> None:
         planner_api_token=_PLANNER_TOKEN,
         webhook_service_role="planner",
         repo_gcp_mapping_path="docs/repo-gcp-mapping.example.json",
+        secrets_backend="env",
+        github_token="test-planning-github-token",
         slack_bot_token="",
         slack_channel_id="",
         planning_store_backend="memory",
@@ -216,7 +213,6 @@ def test_planning_endpoints_require_bearer_token() -> None:
     endpoint = "/planning/sessions"
     payload = {
         "project_slug": "example-project",
-        "mode": "plan_only",
         "request_text": "Plan auth checks",
     }
 
@@ -233,6 +229,30 @@ def test_planning_endpoints_require_bearer_token() -> None:
     with TestClient(app, headers=_PLANNER_AUTH_HEADER) as client:
         auth = client.post(endpoint, json=payload)
         assert auth.status_code == 201
+
+
+def test_create_session_fails_loudly_when_github_token_unavailable() -> None:
+    set_settings_overrides(
+        planner_api_token=_PLANNER_TOKEN,
+        webhook_service_role="planner",
+        repo_gcp_mapping_path="docs/repo-gcp-mapping.example.json",
+        secrets_backend="env",
+        github_token="",
+        slack_bot_token="",
+        slack_channel_id="",
+        planning_store_backend="memory",
+        planning_intake_agent_enabled=True,
+    )
+    with TestClient(app, headers=_PLANNER_AUTH_HEADER) as client:
+        created = client.post(
+            "/planning/sessions",
+            json={
+                "project_slug": "example-project",
+                "request_text": "Plan auth checks",
+            },
+        )
+        assert created.status_code == 500
+        assert created.json()["detail"] == "❌ ERROR: GitHub token missing from environment"
 
 
 def test_start_planning_failure_emits_failed_event(monkeypatch) -> None:
@@ -259,7 +279,6 @@ def test_start_planning_failure_emits_failed_event(monkeypatch) -> None:
             "/planning/sessions",
             json={
                 "project_slug": "example-project",
-                "mode": "plan_only",
                 "request_text": "Handle the start failure path",
             },
         )
@@ -286,6 +305,8 @@ def test_listener_role_serves_planning_but_not_worker_endpoint() -> None:
         planner_api_token=_PLANNER_TOKEN,
         webhook_service_role="listener",
         repo_gcp_mapping_path="docs/repo-gcp-mapping.example.json",
+        secrets_backend="env",
+        github_token="test-planning-github-token",
         slack_bot_token="",
         slack_channel_id="",
         planning_store_backend="memory",
@@ -297,7 +318,6 @@ def test_listener_role_serves_planning_but_not_worker_endpoint() -> None:
             "/planning/sessions",
             json={
                 "project_slug": "example-project",
-                "mode": "plan_only",
                 "request_text": "Listener role planning access",
             },
         )
@@ -335,7 +355,6 @@ def test_conversational_intake_flow_and_messages_endpoint(monkeypatch) -> None:
             "/planning/sessions",
             json={
                 "project_slug": "example-project",
-                "mode": "plan_only",
                 "request_text": "Plan the next release using a conversation",
             },
         )
@@ -474,7 +493,6 @@ def test_agent_intake_can_query_repo_agents_and_finish(monkeypatch) -> None:
             "/planning/sessions",
             json={
                 "project_slug": "example-project",
-                "mode": "plan_only",
                 "request_text": "Plan intake orchestration updates",
             },
         )
@@ -610,7 +628,6 @@ def test_agent_intake_limits_repo_scouts_per_user_turn(monkeypatch) -> None:
             "/planning/sessions",
             json={
                 "project_slug": "example-project",
-                "mode": "plan_only",
                 "request_text": "Plan with strict repo scout limits",
             },
         )
@@ -661,7 +678,6 @@ def test_repo_scout_agent_uses_configured_openai_reasoning(monkeypatch) -> None:
     session = PlanningSession(
         project_slug="example-project",
         request_text="Plan intake updates",
-        mode=PlanningMode.PLAN_ONLY,
     )
     answer = asyncio.run(
         planning_routes._request_repo_scout_answer(
@@ -709,7 +725,6 @@ def test_user_cannot_start_planning_while_intake_pending(monkeypatch) -> None:
             "/planning/sessions",
             json={
                 "project_slug": "example-project",
-                "mode": "plan_only",
                 "request_text": "Quick plan without intake conversation",
             },
         )

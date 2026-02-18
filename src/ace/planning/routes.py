@@ -5,7 +5,6 @@ from __future__ import annotations
 import hmac as _hmac
 import json
 import time
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -28,7 +27,6 @@ from ace.planning.issue_writer import (
     write_issues_from_payload,
 )
 from ace.planning.models import (
-    PlanningArtifact,
     PlanningArtifactList,
     PlanningArtifactType,
     PlanningEvent,
@@ -40,11 +38,11 @@ from ace.planning.models import (
     PlanningMessage,
     PlanningMessageCreate,
     PlanningMessageList,
-    PlanningMode,
     PlanningSession,
     PlanningSessionCreateRequest,
 )
 from ace.planning.pubsub_queue import PubSubPlannerQueue, decode_pubsub_push
+from ace.planning.runtime import IntakeAgentDecision, IntakeRuntime, PlannerWorkerRuntime
 from ace.planning.scouts import (
     PlanningArtifacts,
     PlanningScoutError,
@@ -66,11 +64,9 @@ from ace.planning.store_firestore import (
     build_planning_store,
 )
 from ace.webhooks.lifecycle import (
-    STAGE_PLANNING_DONE,
     STAGE_PLANNING_FAILED,
     STAGE_PLANNING_INTAKE,
     STAGE_PLANNING_ISSUE_WRITER,
-    STAGE_PLANNING_REVIEW,
     STAGE_PLANNING_SCOUTING,
     STAGE_PLANNING_SYNTHESIS,
     build_planning_lifecycle_context,
@@ -116,7 +112,6 @@ PLANNING_PHASE_SCOUTING = "scouting"
 PLANNING_PHASE_SYNTHESIS = "synthesis"
 PLANNING_PHASE_REVIEW = "review"
 PLANNING_PHASE_ISSUES = "issues"
-PLANNING_PHASE_DONE = "done"
 _INTAKE_AGENT_ACTION_ASK_USER = "ask_user"
 _INTAKE_AGENT_ACTION_ASK_REPO_AGENTS = "ask_repo_agents"
 _INTAKE_AGENT_ACTION_READY_TO_PLAN = "ready_to_plan"
@@ -126,13 +121,7 @@ _INTAKE_AGENT_ACTIONS = {
     _INTAKE_AGENT_ACTION_READY_TO_PLAN,
 }
 _INTAKE_AGENT_MAX_INTERNAL_ACTIONS = 4
-
-
-@dataclass(frozen=True)
-class _IntakeAgentDecision:
-    action: str
-    assistant_message: str
-    repo_question: str | None = None
+_IntakeAgentDecision = IntakeAgentDecision
 
 
 def _planner_enabled() -> bool:
@@ -219,10 +208,18 @@ def _compose_request_with_intake_context(session: PlanningSession) -> str:
     return f"{base_request}\n\nIntake context:\n{context_text}"
 
 
+def _resolve_required_planner_github_token(settings: Settings) -> str:
+    token = resolve_github_token(settings)
+    if not token.strip():
+        raise ValueError("❌ ERROR: GitHub token missing from Secret Manager")
+    return token
+
+
 async def _default_plan_pipeline(
     session: PlanningSession,
 ) -> tuple[list[tuple[PlanningArtifactType, str]], dict[PlanningArtifactType, str]]:
     settings = get_settings()
+    github_token = _resolve_required_planner_github_token(settings)
     project = await load_project_registry(session.project_slug, settings=settings)
     if not project.repos:
         raise PlanningScoutError(
@@ -230,7 +227,7 @@ async def _default_plan_pipeline(
         )
     scout_reports = await run_repositories_scout(
         project.repos,
-        github_token=(settings.github_token or ""),
+        github_token=github_token,
     )
     synthesis_session = session.model_copy(deep=True)
     synthesis_session.request_text = _compose_request_with_intake_context(session)
@@ -368,8 +365,7 @@ def _format_review_prompt(
     return (
         "You are the Planning Quality Reviewer.\n\n"
         f"Session ID: {session.id}\n"
-        f"Project: {session.project_slug}\n"
-        f"Mode: {session.mode.value}\n\n"
+        f"Project: {session.project_slug}\n\n"
         "Review this planning result holistically and return JSON with:\n"
         "- plan_recommendations (array of strings)\n"
         "- issue_recommendations (array of objects: issue_id,\n"
@@ -399,8 +395,7 @@ def _format_revision_prompt(
     return (
         "You are the Planning Issue Editor.\n\n"
         f"Session ID: {session.id}\n"
-        f"Project: {session.project_slug}\n"
-        f"Mode: {session.mode.value}\n\n"
+        f"Project: {session.project_slug}\n\n"
         "Use the recommendations below to revise the planning issues.\n"
         'Return only valid JSON with this exact shape: {"issues": [...]}.\n'
         "The issues array must keep issue ids stable and remain dependency-valid.\n"
@@ -509,10 +504,6 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _running_status_for_mode(mode_value: str) -> str:
-    return f"{PLANNING_STATUS_RUNNING}_{mode_value}"
-
-
 def _parse_issue_repo(repo: str) -> tuple[str, str]:
     """Split an `owner/name` issue repository reference."""
     owner, sep, name = repo.partition("/")
@@ -559,7 +550,6 @@ def _log_planning_lifecycle_event(
             session_id=session.id,
             project_slug=session.project_slug,
             phase=phase,
-            mode=session.mode.value,
         )
     except Exception:
         return
@@ -821,7 +811,6 @@ def _format_intake_agent_prompt(
     context = {
         "session_id": session.id,
         "project_slug": session.project_slug,
-        "mode": session.mode.value,
         "request_text": session.request_text,
         "repo_reports": repo_reports[-settings.planning_intake_max_repo_reports :],
         "conversation": transcript,
@@ -912,71 +901,22 @@ async def _run_agent_intake_turn(
     session: PlanningSession,
     settings: Settings,
 ) -> PlanningMessage:
-    if settings.planning_intake_max_repo_scouts_per_turn < 1:
-        raise ValueError(
-            "❌ ERROR: PLANNING_INTAKE_MAX_REPO_SCOUTS_PER_TURN must be >= 1"
-        )
-    state = _normalized_intake_state(session)
-    repo_scout_calls_this_turn = 0
-
-    for _ in range(_INTAKE_AGENT_MAX_INTERNAL_ACTIONS):
-        state["agent_turn"] = int(state.get("agent_turn", 0)) + 1
-        messages = await store.get_messages(session.id)
-        decision = await _request_intake_agent_decision(
-            session=session,
-            messages=messages,
-            state=state,
-            settings=settings,
-        )
-        if decision.action == _INTAKE_AGENT_ACTION_ASK_REPO_AGENTS:
-            if repo_scout_calls_this_turn >= settings.planning_intake_max_repo_scouts_per_turn:
-                raise ValueError(
-                    "❌ ERROR: intake agent exceeded max repo scouts for this user turn "
-                    f"({settings.planning_intake_max_repo_scouts_per_turn})"
-                )
-            repo_scout_calls_this_turn += 1
-            await _run_intake_repo_agents(
-                store=store,
-                session=session,
-                state=state,
-                repo_question=decision.repo_question or "",
-                settings=settings,
-            )
-            continue
-
-        if decision.action == _INTAKE_AGENT_ACTION_READY_TO_PLAN:
-            state["ready_to_plan"] = True
-            state["planning_context"] = _build_planning_context_from_intake(
-                messages=messages,
-                state=state,
-                settings=settings,
-            )
-            session.intake_state = state
-            session.updated_at = _utc_now()
-            session = await _refresh_session_state(session)
-            await store.update_session(session)
-            # Intake completion always triggers planning start immediately.
-            await start_planning(session.id)
-            session = await _ensure_session(session.id)
-            return await _append_intake_assistant_message(
-                store=store,
-                session=session,
-                content=decision.assistant_message,
-                event_type="intake_agent_complete",
-            )
-
-        session.intake_state = state
-        session.updated_at = _utc_now()
-        session = await _refresh_session_state(session)
-        await store.update_session(session)
-        return await _append_intake_assistant_message(
-            store=store,
-            session=session,
-            content=decision.assistant_message,
-            event_type="intake_agent_prompt",
-        )
-
-    raise ValueError("❌ ERROR: intake agent exceeded maximum internal actions for one user turn")
+    runtime = IntakeRuntime(
+        max_internal_actions=_INTAKE_AGENT_MAX_INTERNAL_ACTIONS,
+        ask_user_action=_INTAKE_AGENT_ACTION_ASK_USER,
+        ask_repo_agents_action=_INTAKE_AGENT_ACTION_ASK_REPO_AGENTS,
+        ready_to_plan_action=_INTAKE_AGENT_ACTION_READY_TO_PLAN,
+        normalized_intake_state=_normalized_intake_state,
+        request_decision=_request_intake_agent_decision,
+        run_repo_agents=_run_intake_repo_agents,
+        build_planning_context=_build_planning_context_from_intake,
+        refresh_session_state=_refresh_session_state,
+        append_assistant_message=_append_intake_assistant_message,
+        start_planning=start_planning,
+        ensure_session=_ensure_session,
+        utc_now=_utc_now,
+    )
+    return await runtime.run_turn(store=store, session=session, settings=settings)
 
 
 async def _append_intake_assistant_message(
@@ -1057,9 +997,13 @@ async def create_planning_session(payload: PlanningSessionCreateRequest) -> Plan
                 "deterministic intake fallback has been removed"
             ),
         )
+    try:
+        _resolve_required_planner_github_token(settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     session = PlanningSession(
         project_slug=payload.project_slug,
-        mode=payload.mode,
         request_text=payload.request_text,
         status=PLANNING_STATUS_INTAKE_PENDING,
         intake_state=_build_initial_intake_state(),
@@ -1092,8 +1036,24 @@ async def create_planning_session(payload: PlanningSessionCreateRequest) -> Plan
     except HTTPException:
         raise
     except (PlanningScoutError, ValueError) as exc:
+        await store.append_event(
+            session.id,
+            PlanningEvent(
+                session_id=session.id,
+                event_type="intake_failed",
+                payload={"error": str(exc)},
+            ),
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
+        await store.append_event(
+            session.id,
+            PlanningEvent(
+                session_id=session.id,
+                event_type="intake_failed",
+                payload={"error": str(exc)},
+            ),
+        )
         raise HTTPException(
             status_code=500,
             detail=f"❌ ERROR: intake agent turn failed: {exc}",
@@ -1121,7 +1081,7 @@ async def add_planning_message(
         PLANNING_STATUS_FAILED,
         PLANNING_STATUS_TIMED_OUT,
     )
-    if session.status.startswith(PLANNING_STATUS_RUNNING):
+    if session.status == PLANNING_STATUS_RUNNING:
         raise HTTPException(
             status_code=409,
             detail="❌ ERROR: session is already running and does not accept messages",
@@ -1210,7 +1170,6 @@ async def start_planning(session_id: str) -> PlanningSession:
         message_id = await planner_queue.publish(
             session_id=session_id,
             project_slug=session.project_slug,
-            mode=session.mode.value,
             created_at=queued_at,
         )
     except Exception as exc:
@@ -1247,7 +1206,6 @@ async def start_planning(session_id: str) -> PlanningSession:
         event_type="queued",
         status=PLANNING_STATUS_RUNNING,
         message_id=message_id,
-        mode=session.mode.value,
     )
     await store.append_event(
         session_id,
@@ -1274,7 +1232,6 @@ async def start_planning(session_id: str) -> PlanningSession:
         phase=PLANNING_PHASE_SCOUTING,
         event_type="running",
         status=PLANNING_STATUS_RUNNING,
-        mode=session.mode.value,
     )
     await store.update_session(session)
     return session
@@ -1417,244 +1374,29 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
 
     store = _resolve_store()
     session = await _ensure_session(queued.payload.session_id)
-    running_status = _running_status_for_mode(queued.payload.mode.value)
-    session.status = running_status
-    session.updated_at = _utc_now()
+    settings = get_settings()
+    try:
+        github_token = _resolve_required_planner_github_token(settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     try:
-        planner_pipeline = _resolve_planner_pipeline()
-        _log_planning_lifecycle_event(
-            session,
-            stage=STAGE_PLANNING_SCOUTING,
-            phase=PLANNING_PHASE_SCOUTING,
-            event_type="running",
-            status=running_status,
-            message_id=queued.message_id,
-            mode=queued.payload.mode.value,
+        runtime = PlannerWorkerRuntime(
+            coerce_pipeline_output=_coerce_pipeline_output,
+            review_and_update_issues=_review_and_update_issues,
+            write_issues_from_payload=write_issues_from_payload,
+            resolve_artifact_store=_resolve_artifact_store,
+            log_planning_lifecycle_event=_log_planning_lifecycle_event,
+            utc_now=_utc_now,
         )
-        await store.append_event(
-            session.id,
-            PlanningEvent(
-                session_id=session.id,
-                event_type="running",
-                payload={
-                    "status": running_status,
-                    "message_id": queued.message_id,
-                    "mode": queued.payload.mode.value,
-                },
-            ),
+        response = await runtime.run(
+            store=store,
+            session=session,
+            queued=queued,
+            planner_pipeline=_resolve_planner_pipeline(),
+            settings=settings,
+            github_token=github_token,
         )
-        await store.update_session(session)
-        pipeline_output = await planner_pipeline(session)
-        artifact_rows, artifact_payloads = _coerce_pipeline_output(pipeline_output)
-        persisted_artifacts: list[PlanningArtifact] = []
-        issues_created: list[dict[str, Any]] = []
-        for artifact_type, content_url in artifact_rows:
-            _log_planning_lifecycle_event(
-                session,
-                stage=STAGE_PLANNING_SYNTHESIS,
-                phase=PLANNING_PHASE_SYNTHESIS,
-                event_type="artifact_writing",
-                artifact_type=artifact_type.value,
-            )
-            artifact = PlanningArtifact(
-                session_id=session.id,
-                artifact_type=artifact_type,
-                content_url=content_url,
-            )
-            await store.add_artifact(session.id, artifact)
-            persisted_artifacts.append(artifact)
-            _log_planning_lifecycle_event(
-                session,
-                stage=STAGE_PLANNING_SYNTHESIS,
-                phase=PLANNING_PHASE_SYNTHESIS,
-                event_type="artifact_written",
-                artifact_type=artifact_type.value,
-                artifact_id=artifact.id,
-                artifact_url=content_url,
-            )
-        if session.mode == PlanningMode.PLAN_AND_CREATE_ISSUES:
-            issues_json = artifact_payloads.get(
-                PlanningArtifactType.ISSUES_JSON,
-                '{"issues": []}',
-            )
-            plan_markdown = artifact_payloads.get(
-                PlanningArtifactType.PLAN_MARKDOWN,
-                "",
-            )
-            settings = get_settings()
-            reviewed_issues_json = issues_json
-            review_summary: dict[str, Any] = {"review_enabled": False}
-            if settings.planning_review_enabled:
-                _log_planning_lifecycle_event(
-                    session,
-                    stage=STAGE_PLANNING_REVIEW,
-                    phase=PLANNING_PHASE_REVIEW,
-                    event_type="issues_review_started",
-                    message_id=queued.message_id,
-                )
-                try:
-                    reviewed_issues_json, review_summary = await _review_and_update_issues(
-                        session=session,
-                        plan_markdown=plan_markdown,
-                        issues_json=issues_json,
-                        settings=settings,
-                    )
-                except Exception as exc:
-                    _log_planning_lifecycle_event(
-                        session,
-                        stage=STAGE_PLANNING_REVIEW,
-                        phase=PLANNING_PHASE_REVIEW,
-                        event_type="issues_review_failed",
-                        message_id=queued.message_id,
-                        error=str(exc),
-                    )
-                    await store.append_event(
-                        session.id,
-                        PlanningEvent(
-                            session_id=session.id,
-                            event_type="issues_review_failed",
-                            payload={
-                                "status": "failed",
-                                "error": str(exc),
-                                "mode": session.mode.value,
-                            },
-                        ),
-                    )
-                    raise ValueError(f"❌ ERROR: planning review failed: {exc}") from exc
-
-                _log_planning_lifecycle_event(
-                    session,
-                    stage=STAGE_PLANNING_REVIEW,
-                    phase=PLANNING_PHASE_REVIEW,
-                    event_type="issues_review_complete",
-                    message_id=queued.message_id,
-                    review_plan_recommendations=review_summary.get(
-                        "plan_recommendations_count",
-                    ),
-                    review_issue_recommendations=review_summary.get(
-                        "issue_recommendations_count",
-                    ),
-                    review_overall_feedback=str(
-                        review_summary.get("overall_feedback", ""),
-                    ).strip(),
-                    review_elapsed_seconds=review_summary.get(
-                        "elapsed_seconds",
-                    ),
-                )
-                review_artifact_content = json.dumps(review_summary, indent=2)
-                artifact_store = _resolve_artifact_store()
-                review_url = await artifact_store.write_artifact(
-                    session_id=session.id,
-                    filename="REVIEW.json",
-                    content=review_artifact_content,
-                    content_type="application/json",
-                )
-                review_artifact = PlanningArtifact(
-                    session_id=session.id,
-                    artifact_type=PlanningArtifactType.REVIEW_JSON,
-                    content_url=review_url,
-                )
-                await store.add_artifact(session.id, review_artifact)
-                persisted_artifacts.append(review_artifact)
-            _log_planning_lifecycle_event(
-                session,
-                stage=STAGE_PLANNING_ISSUE_WRITER,
-                phase=PLANNING_PHASE_ISSUES,
-                event_type="issue_writer_started",
-                message_id=queued.message_id,
-            )
-            if reviewed_issues_json != issues_json:
-                await store.append_event(
-                    session.id,
-                    PlanningEvent(
-                        session_id=session.id,
-                        event_type="issues_revised",
-                        payload={
-                            "plan_recommendations_count": review_summary.get(
-                                "plan_recommendations_count",
-                                0,
-                            ),
-                            "issue_recommendations_count": review_summary.get(
-                                "issue_recommendations_count",
-                                0,
-                            ),
-                            "reviewer_model": review_summary.get("reviewer_model"),
-                            "revision_model": review_summary.get("revision_model"),
-                        },
-                    ),
-                )
-            created_issues = await write_issues_from_payload(
-                session=session,
-                issues_json=reviewed_issues_json,
-                project_slug=session.project_slug,
-                github_token=(get_settings().github_token or ""),
-            )
-            for issue in created_issues:
-                issue_payload = {
-                    "issue_id": issue.issue_id,
-                    "title": issue.title,
-                    "url": issue.url,
-                    "repo": issue.repo,
-                    "number": issue.number,
-                }
-                issues_created.append(issue_payload)
-                _log_planning_lifecycle_event(
-                    session,
-                    stage=STAGE_PLANNING_ISSUE_WRITER,
-                    phase=PLANNING_PHASE_ISSUES,
-                    event_type="issue_created",
-                    created_issue_id=issue.issue_id,
-                    created_issue_url=issue.url,
-                    created_issue_number=issue.number,
-                    created_issue_repo=issue.repo,
-                )
-            _log_planning_lifecycle_event(
-                session,
-                stage=STAGE_PLANNING_ISSUE_WRITER,
-                phase=PLANNING_PHASE_ISSUES,
-                event_type="issue_writer_done",
-                requested_count=len(issues_created),
-                created_count=len(issues_created),
-                message_id=queued.message_id,
-            )
-            await store.append_event(
-                session.id,
-                PlanningEvent(
-                    session_id=session.id,
-                    event_type="issues_written",
-                    payload={
-                        "requested_count": len(issues_created),
-                        "created": issues_created,
-                    },
-                ),
-            )
-        session.status = PLANNING_STATUS_DONE
-        session.updated_at = _utc_now()
-        _log_planning_lifecycle_event(
-            session,
-            stage=STAGE_PLANNING_DONE,
-            phase=PLANNING_PHASE_DONE,
-            event_type="done",
-            status=PLANNING_STATUS_DONE,
-            artifact_count=len(persisted_artifacts),
-            issue_created_count=len(issues_created),
-            message_id=queued.message_id,
-        )
-        await store.append_event(
-            session.id,
-            PlanningEvent(
-                session_id=session.id,
-                event_type="done",
-                payload={
-                    "status": PLANNING_STATUS_DONE,
-                    "artifacts": [artifact.id for artifact in persisted_artifacts],
-                    "issue_created_count": len(issues_created),
-                },
-            ),
-        )
-        await store.update_session(session)
-        response_artifacts = [artifact.content_url for artifact in persisted_artifacts]
     except Exception as exc:
         session.status = PLANNING_STATUS_FAILED
         session.updated_at = _utc_now()
@@ -1667,7 +1409,6 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
                 status=session.status,
                 error=str(exc),
                 message_id=queued.message_id,
-                mode=queued.payload.mode.value,
             )
             await store.append_event(
                 session.id,
@@ -1694,14 +1435,7 @@ async def run_planner_worker(request: Request) -> dict[str, Any]:
             detail=f"❌ ERROR: planning worker failed: {exc}",
         ) from exc
 
-    first_artifact = response_artifacts[0] if response_artifacts else ""
-    return {
-        "status": PLANNING_STATUS_DONE,
-        "session_id": session.id,
-        "artifact_urls": response_artifacts,
-        "artifact_url": first_artifact,
-        "message_id": queued.message_id,
-    }
+    return response
 
 
 @planning_router.get(

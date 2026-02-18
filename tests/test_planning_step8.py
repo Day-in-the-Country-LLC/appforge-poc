@@ -262,6 +262,7 @@ async def test_default_planner_pipeline_uses_scout_reports(monkeypatch) -> None:
 
     set_settings_overrides(
         secrets_backend="env",
+        github_token="test-planning-github-token",
         openai_api_key="test-openai-key",
         planning_synthesis_model="gpt-5.2-codex",
         planning_synthesis_plan_max_tokens=4000,

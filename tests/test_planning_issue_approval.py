@@ -18,6 +18,7 @@ def _planning_app_client() -> TestClient:
         planner_api_token=_PLANNER_TOKEN,
         webhook_service_role="planner",
         repo_gcp_mapping_path="docs/repo-gcp-mapping.example.json",
+        secrets_backend="env",
         slack_bot_token="",
         slack_channel_id="",
         planning_store_backend="memory",
@@ -88,7 +89,6 @@ def test_approve_planning_issues_bulk_move_to_ready(monkeypatch) -> None:
             "/planning/sessions",
             json={
                 "project_slug": "example-project",
-                "mode": "plan_only",
                 "request_text": "Need approval helper test",
             },
         )

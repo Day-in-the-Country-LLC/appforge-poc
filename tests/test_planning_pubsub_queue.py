@@ -8,7 +8,6 @@ import json
 import pytest
 
 from ace.config.settings import Settings
-from ace.planning.models import PlanningMode
 from ace.planning.pubsub_queue import PlanningJob, PubSubPlannerQueue, decode_pubsub_push
 
 
@@ -40,7 +39,6 @@ async def test_planner_queue_publish_uses_expected_schema(monkeypatch) -> None:
     message_id = await queue.publish(
         session_id="sess-1",
         project_slug="example-project",
-        mode="plan_only",
         created_at="2026-02-15T00:00:00Z",
     )
     assert message_id == "msg-123"
@@ -51,12 +49,10 @@ async def test_planner_queue_publish_uses_expected_schema(monkeypatch) -> None:
     envelope = json.loads(payload.decode("utf-8"))
     assert envelope["event"] == "planner.start"
     assert envelope["payload"]["session_id"] == "sess-1"
-    assert envelope["payload"]["mode"] == "plan_only"
     assert attrs == {
         "event": "planner.start",
         "session_id": "sess-1",
         "project_slug": "example-project",
-        "mode": "plan_only",
     }
 
 
@@ -67,7 +63,6 @@ def test_decode_planner_pubsub_push() -> None:
         "payload": {
             "session_id": "sess-2",
             "project_slug": "example-project",
-            "mode": "plan_only",
             "created_at": "2026-02-15T00:00:00Z",
         },
         "queued_at": "2026-02-15T00:00:01Z",
@@ -81,7 +76,6 @@ def test_decode_planner_pubsub_push() -> None:
                 "event": "planner.start",
                 "session_id": "sess-2",
                 "project_slug": "example-project",
-                "mode": "plan_only",
             },
         }
     }
@@ -89,7 +83,6 @@ def test_decode_planner_pubsub_push() -> None:
     assert queued.event == "planner.start"
     assert isinstance(queued.payload, PlanningJob)
     assert queued.payload.session_id == "sess-2"
-    assert queued.payload.mode == PlanningMode.PLAN_ONLY
     assert queued.message_id == "message-id-456"
 
 

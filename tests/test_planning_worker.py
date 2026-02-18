@@ -144,10 +144,9 @@ class _StubPlannerQueue:
         *,
         session_id: str,
         project_slug: str,
-        mode: str,
         created_at: str,
     ) -> str:
-        del session_id, project_slug, mode, created_at
+        del session_id, project_slug, created_at
         return "message-id-123"
 
 
@@ -163,11 +162,11 @@ def _planning_app_client() -> TestClient:
         planner_api_token=_PLANNER_TOKEN,
         webhook_service_role="all",
         repo_gcp_mapping_path="docs/repo-gcp-mapping.example.json",
+        secrets_backend="env",
         github_token="test-planning-github-token",
         slack_bot_token="",
         slack_channel_id="",
         planning_store_backend="memory",
-        planning_review_enabled=False,
         planning_intake_agent_enabled=True,
     )
     return TestClient(app, headers=_PLANNER_AUTH_HEADER)
@@ -176,7 +175,6 @@ def _planning_app_client() -> TestClient:
 def _planning_session_ready(
     client: TestClient,
     project_slug: str = "example-project",
-    mode: str = "plan_only",
 ) -> str:
     import ace.planning.routes as planning_routes
 
@@ -204,7 +202,6 @@ def _planning_session_ready(
             "/planning/sessions",
             json={
                 "project_slug": project_slug,
-                "mode": mode,
                 "request_text": "Build a migration plan",
             },
         )
@@ -222,7 +219,6 @@ def _planning_session_ready(
 
 def _planner_push_envelope(
     session_id: str,
-    mode: str = "plan_only",
 ) -> dict[str, object]:
     raw = {
         "schema_version": "1",
@@ -230,7 +226,6 @@ def _planner_push_envelope(
         "payload": {
             "session_id": session_id,
             "project_slug": "example-project",
-            "mode": mode,
             "created_at": "2026-02-15T00:00:00Z",
         },
         "queued_at": "2026-02-15T00:00:01Z",
@@ -244,19 +239,41 @@ def _planner_push_envelope(
                 "event": "planner.start",
                 "session_id": session_id,
                 "project_slug": "example-project",
-                "mode": mode,
             },
         }
     }
 
 
-def test_planner_worker_stores_stub_plan() -> None:
+def test_planner_worker_stores_stub_plan(monkeypatch) -> None:
     with _planning_app_client() as client:
         import ace.planning.routes as planning_routes
 
         artifact_store = _StubArtifactStore()
         planning_routes._artifact_store = artifact_store
         _prepare_stub_pipeline(planning_routes, artifact_store)
+
+        async def fake_review_and_update_issues(
+            *,
+            session: Any,
+            plan_markdown: str,
+            issues_json: str,
+            settings: Any,
+        ) -> tuple[str, dict[str, Any]]:
+            del session, plan_markdown, settings
+            return issues_json, {
+                "plan_recommendations_count": 0,
+                "issue_recommendations_count": 0,
+                "reviewer_model": "claude-opus-4-6",
+                "revision_model": "gpt-5.2-codex",
+                "overall_feedback": "",
+                "elapsed_seconds": 0.1,
+            }
+
+        monkeypatch.setattr(
+            planning_routes,
+            "_review_and_update_issues",
+            fake_review_and_update_issues,
+        )
 
         session_id = _planning_session_ready(client)
         push = _planner_push_envelope(session_id)
@@ -265,12 +282,13 @@ def test_planner_worker_stores_stub_plan() -> None:
         assert resp.json()["status"] == "done"
         assert resp.json()["session_id"] == session_id
 
-        assert len(artifact_store.writes) == 3
-        assert artifact_store.writes == [
-            (session_id, "PLAN.md", "plan-markdown"),
-            (session_id, "ISSUES.json", '{"issues": []}'),
-            (session_id, "DEPENDENCIES.mmd", "flowchart TD"),
-        ]
+        # Now includes REVIEW.json artifact from the review step
+        assert len(artifact_store.writes) == 4
+        assert artifact_store.writes[0] == (session_id, "PLAN.md", "plan-markdown")
+        assert artifact_store.writes[1] == (session_id, "ISSUES.json", '{"issues": []}')
+        assert artifact_store.writes[2] == (session_id, "DEPENDENCIES.mmd", "flowchart TD")
+        assert artifact_store.writes[3][0] == session_id
+        assert artifact_store.writes[3][1] == "REVIEW.json"
 
         session = client.get(f"/planning/sessions/{session_id}")
         assert session.status_code == 200
@@ -279,17 +297,20 @@ def test_planner_worker_stores_stub_plan() -> None:
         events = client.get(f"/planning/sessions/{session_id}/events")
         assert events.status_code == 200
         event_payload = events.json()["events"]
-        assert event_payload[-2]["event_type"] == "running"
-        assert event_payload[-2]["payload"]["status"].startswith("running")
+        event_types = [e["event_type"] for e in event_payload]
+        assert "running" in event_types
+        assert "issues_written" in event_types
         assert event_payload[-1]["event_type"] == "done"
 
         artifacts = client.get(f"/planning/sessions/{session_id}/artifacts")
         assert artifacts.status_code == 200
         artifact_rows = artifacts.json()["artifacts"]
-        assert len(artifact_rows) == 3
+        # Now includes REVIEW.json artifact too
+        assert len(artifact_rows) == 4
         assert artifact_rows[0]["artifact_type"] == "plan_md"
         assert artifact_rows[1]["artifact_type"] == "issues_json"
         assert artifact_rows[2]["artifact_type"] == "dependencies_mmd"
+        assert artifact_rows[3]["artifact_type"] == "review_json"
 
 
 def test_planner_worker_creates_github_issues_when_requested(monkeypatch) -> None:
@@ -321,6 +342,31 @@ def test_planner_worker_creates_github_issues_when_requested(monkeypatch) -> Non
             artifact_store=artifact_store,
             issue_payload=issues_payload,
         )
+        review_calls: dict[str, int] = {"count": 0}
+
+        async def fake_review_and_update_issues(
+            *,
+            session: Any,
+            plan_markdown: str,
+            issues_json: str,
+            settings: Any,
+        ) -> tuple[str, dict[str, Any]]:
+            del session, plan_markdown, settings
+            review_calls["count"] += 1
+            return issues_json, {
+                "plan_recommendations_count": 0,
+                "issue_recommendations_count": 0,
+                "reviewer_model": "claude-opus-4-6",
+                "revision_model": "gpt-5.2-codex",
+                "overall_feedback": "",
+                "elapsed_seconds": 0.1,
+            }
+
+        monkeypatch.setattr(
+            planning_routes,
+            "_review_and_update_issues",
+            fake_review_and_update_issues,
+        )
 
         fake_github = _FakeIssueGitHubClient(token="secret-token")
         monkeypatch.setattr(
@@ -328,16 +374,14 @@ def test_planner_worker_creates_github_issues_when_requested(monkeypatch) -> Non
             lambda _token: fake_github,
         )
 
-        session_id = _planning_session_ready(
-            client,
-            mode="plan_and_create_issues",
-        )
-        push = _planner_push_envelope(session_id, mode="plan_and_create_issues")
+        session_id = _planning_session_ready(client)
+        push = _planner_push_envelope(session_id)
         resp = client.post("/internal/pubsub/planner", json=push)
         assert resp.status_code == 200
         assert resp.json()["status"] == "done"
 
         assert len(fake_github.created) == 2
+        assert review_calls["count"] == 1
         assert fake_github.created[0][0] == "/repos/owner-one/repo-one/issues"
         assert fake_github.created[1][0] == "/repos/owner-two/repo-two/issues"
 
@@ -360,7 +404,6 @@ def test_planner_worker_revises_issues_before_creation(monkeypatch) -> None:
         from ace.config.settings import set_settings_overrides
 
         set_settings_overrides(
-            planning_review_enabled=True,
             planning_review_claude_model="claude-opus-4-6",
             planning_review_openai_model="gpt-5.2-codex",
             planning_review_claude_max_tokens=1800,
@@ -455,11 +498,8 @@ def test_planner_worker_revises_issues_before_creation(monkeypatch) -> None:
             lambda _token: fake_github,
         )
 
-        session_id = _planning_session_ready(
-            client,
-            mode="plan_and_create_issues",
-        )
-        push = _planner_push_envelope(session_id, mode="plan_and_create_issues")
+        session_id = _planning_session_ready(client)
+        push = _planner_push_envelope(session_id)
         resp = client.post("/internal/pubsub/planner", json=push)
         assert resp.status_code == 200
         assert resp.json()["status"] == "done"
@@ -482,7 +522,6 @@ def test_planner_worker_review_failures_fail_loudly(monkeypatch) -> None:
         from ace.config.settings import set_settings_overrides
 
         set_settings_overrides(
-            planning_review_enabled=True,
             planning_review_claude_model="claude-opus-4-6",
             planning_review_openai_model="gpt-5.2-codex",
             planning_review_openai_reasoning_effort="high",
@@ -525,11 +564,8 @@ def test_planner_worker_review_failures_fail_loudly(monkeypatch) -> None:
             lambda _token: fake_github,
         )
 
-        session_id = _planning_session_ready(
-            client,
-            mode="plan_and_create_issues",
-        )
-        push = _planner_push_envelope(session_id, mode="plan_and_create_issues")
+        session_id = _planning_session_ready(client)
+        push = _planner_push_envelope(session_id)
         resp = client.post("/internal/pubsub/planner", json=push)
         assert resp.status_code == 500
         assert "❌ ERROR: planning worker failed: ❌ ERROR: planning review failed:" in (
