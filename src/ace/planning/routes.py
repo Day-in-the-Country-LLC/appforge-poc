@@ -906,15 +906,6 @@ async def _request_intake_agent_decision(
     return _parse_intake_agent_decision(response_text)
 
 
-def _intake_agent_intro(session: PlanningSession) -> str:
-    return (
-        "I am your planning intake agent. I will ask follow-up questions and can query repo "
-        "agents for code context before planning starts. "
-        f"Request noted: {session.request_text} "
-        "What outcome should this planning run achieve?"
-    )
-
-
 async def _run_agent_intake_turn(
     *,
     store: PlanningStore,
@@ -1092,13 +1083,22 @@ async def create_planning_session(payload: PlanningSessionCreateRequest) -> Plan
             },
         ),
     )
-    await _append_intake_assistant_message(
-        store=store,
-        session=session,
-        content=_intake_agent_intro(session),
-        event_type="intake_agent_prompt",
-    )
-    return session
+    try:
+        await _run_agent_intake_turn(
+            store=store,
+            session=session,
+            settings=settings,
+        )
+    except HTTPException:
+        raise
+    except (PlanningScoutError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"❌ ERROR: intake agent turn failed: {exc}",
+        ) from exc
+    return await _ensure_session(session.id)
 
 
 @planning_router.post(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi.testclient import TestClient
 
 from ace.config.settings import set_settings_overrides
@@ -60,6 +62,27 @@ def test_approve_planning_issues_bulk_move_to_ready(monkeypatch) -> None:
             lambda _token: _FakeGitHubAPIClient(),
         )
         monkeypatch.setattr("ace.planning.routes.IssueQueue", _FakeIssueQueue)
+        import ace.planning.routes as planning_routes
+
+        async def fake_request_intake_agent_decision(
+            *,
+            session: Any,
+            messages: Any,
+            state: Any,
+            settings: Any,
+        ) -> Any:
+            del session, messages, state, settings
+            return planning_routes._IntakeAgentDecision(
+                action="ask_user",
+                assistant_message="What should this plan optimize for first?",
+                repo_question=None,
+            )
+
+        monkeypatch.setattr(
+            planning_routes,
+            "_request_intake_agent_decision",
+            fake_request_intake_agent_decision,
+        )
 
         created = client.post(
             "/planning/sessions",

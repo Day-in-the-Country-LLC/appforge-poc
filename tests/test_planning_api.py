@@ -3,6 +3,7 @@
 import asyncio
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ace.config.settings import set_settings_overrides
@@ -67,6 +68,31 @@ def _planning_app_client() -> TestClient:
     return TestClient(app, headers=_PLANNER_AUTH_HEADER)
 
 
+@pytest.fixture(autouse=True)
+def _stub_default_intake_decision(monkeypatch: Any) -> None:
+    import ace.planning.routes as planning_routes
+
+    async def fake_request_intake_agent_decision(
+        *,
+        session: Any,
+        messages: Any,
+        state: Any,
+        settings: Any,
+    ) -> Any:
+        del session, messages, state, settings
+        return planning_routes._IntakeAgentDecision(
+            action="ask_user",
+            assistant_message="What specific outcome should this planning run achieve?",
+            repo_question=None,
+        )
+
+    monkeypatch.setattr(
+        planning_routes,
+        "_request_intake_agent_decision",
+        fake_request_intake_agent_decision,
+    )
+
+
 def _stub_intake_agent_decisions(monkeypatch: Any, decisions: list[dict[str, Any]]) -> None:
     import ace.planning.routes as planning_routes
 
@@ -101,6 +127,10 @@ def test_planning_session_intake_and_state_machine(monkeypatch) -> None:
         _stub_intake_agent_decisions(
             monkeypatch,
             [
+                {
+                    "action": "ask_user",
+                    "assistant_message": "What are your success criteria?",
+                },
                 {
                     "action": "ready_to_plan",
                     "assistant_message": "Intake complete. Click Start planning when ready.",
@@ -212,6 +242,10 @@ def test_start_planning_failure_emits_failed_event(monkeypatch) -> None:
         _stub_intake_agent_decisions(
             monkeypatch,
             [
+                {
+                    "action": "ask_user",
+                    "assistant_message": "What should success look like?",
+                },
                 {
                     "action": "ready_to_plan",
                     "assistant_message": "Intake complete. Click Start planning when ready.",
@@ -327,14 +361,7 @@ def test_conversational_intake_flow_and_messages_endpoint(monkeypatch) -> None:
         )
         assert second.status_code == 200
         assert second.json()["source"] == "assistant"
-
-        third = client.post(
-            f"/planning/sessions/{session_id}/messages",
-            json={"content": "example-project/appforge-poc", "source": "user"},
-        )
-        assert third.status_code == 200
-        assert third.json()["source"] == "assistant"
-        assert "Intake complete" in third.json()["content"]
+        assert "Intake complete" in second.json()["content"]
 
         session = client.get(f"/planning/sessions/{session_id}")
         assert session.status_code == 200
@@ -460,14 +487,7 @@ def test_agent_intake_can_query_repo_agents_and_finish(monkeypatch) -> None:
         )
         assert first_turn.status_code == 200
         assert first_turn.json()["source"] == "assistant"
-        assert "success look like" in first_turn.json()["content"]
-
-        second_turn = client.post(
-            f"/planning/sessions/{session_id}/messages",
-            json={"content": "Ship to staging with CI green", "source": "user"},
-        )
-        assert second_turn.status_code == 200
-        assert "Intake complete" in second_turn.json()["content"]
+        assert "Intake complete" in first_turn.json()["content"]
 
         session = client.get(f"/planning/sessions/{session_id}")
         assert session.status_code == 200
@@ -491,6 +511,10 @@ def test_agent_intake_limits_repo_scouts_per_user_turn(monkeypatch) -> None:
 
         decisions = iter(
             [
+                {
+                    "action": "ask_user",
+                    "assistant_message": "What outcome should we optimize for?",
+                },
                 {
                     "action": "ask_repo_agents",
                     "assistant_message": "",
@@ -663,10 +687,20 @@ def test_repo_scout_agent_uses_configured_openai_reasoning(monkeypatch) -> None:
     assert calls["trace_name"] == "planning_repo_scout_agent"
 
 
-def test_user_cannot_start_planning_while_intake_pending() -> None:
+def test_user_cannot_start_planning_while_intake_pending(monkeypatch) -> None:
     """Start must be blocked until intake agent marks the session ready."""
     with _planning_app_client() as client:
         import ace.planning.routes as planning_routes
+
+        _stub_intake_agent_decisions(
+            monkeypatch,
+            [
+                {
+                    "action": "ask_user",
+                    "assistant_message": "What should success look like?",
+                },
+            ],
+        )
 
         stub_queue = _StubPlannerQueue()
         planning_routes._planner_queue = stub_queue
