@@ -6,13 +6,25 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
+from datetime import UTC, datetime
 
 from ace.config.settings import get_settings
 from ace.github.api_client import GitHubAPIClient
-from ace.github.issue_queue import Issue, IssueQueue
-from ace.github.projects_v2 import ProjectItem, ProjectsV2Client
+from ace.github.issue_queue import Issue
+from ace.github.work_items import WorkItemTracker, WorkBoardItem, build_github_work_item_tracker
 from ace.github.status_manager import IssueStatus
+from ace.pr_review.job_store import (
+    build_pr_review_job_record,
+    build_pr_review_job_store,
+)
+from ace.pr_review.pubsub_queue import PRReviewJob, PRReviewPubSubQueue
 from ace.runners.agent_pool import AgentTarget, get_pool
+from ace.webhooks.lifecycle import (
+    STAGE_PR_REVIEW_ENQUEUED,
+    STAGE_PR_REVIEW_ERROR,
+    STAGE_PR_REVIEW_SKIPPED,
+    STAGE_PR_REVIEW_STARTED,
+)
 from ace.webhooks.github_app import GitHubAppAuth
 
 logger = structlog.get_logger(__name__)
@@ -27,12 +39,24 @@ class StatusTransition:
 class WebhookHandler:
     """Dispatch and handle GitHub webhook events."""
 
-    def __init__(self) -> None:
-        self.settings = get_settings()
-        self.app_auth = GitHubAppAuth.from_env()
+    def __init__(
+        self,
+        settings: Any | None = None,
+        app_auth: GitHubAppAuth | object | None = None,
+        pr_review_queue: PRReviewPubSubQueue | None = None,
+        pr_review_store: Any | None = None,
+    ) -> None:
+        self.settings = settings or get_settings()
+        self.app_auth = app_auth or GitHubAppAuth.from_env()
+        self.pr_review_queue = pr_review_queue
+        self.pr_review_store = pr_review_store
 
     async def handle(
-        self, event: str, payload: dict[str, Any], delivery: str | None
+        self,
+        event: str,
+        payload: dict[str, Any],
+        delivery: str | None,
+        workflow_id: str | None = None,
     ) -> dict[str, Any]:
         if event == "projects_v2_item":
             return await self._handle_projects_v2_item(payload, delivery)
@@ -40,9 +64,15 @@ class WebhookHandler:
             return await self._handle_issue_comment(payload, delivery)
         if event == "issues":
             return await self._handle_issue_event(payload, delivery)
+        if event == "pull_request":
+            return await self._handle_pull_request_event(
+                payload,
+                delivery,
+                workflow_id=workflow_id,
+            )
 
-        logger.info("webhook_ignored", event=event, delivery=delivery)
-        return {"status": "ignored", "event": event}
+        logger.info("webhook_ignored", webhook_event=event, delivery=delivery)
+        return {"status": "ignored", "reason": "unsupported_event"}
 
     async def _handle_projects_v2_item(
         self, payload: dict[str, Any], delivery: str | None
@@ -51,8 +81,8 @@ class WebhookHandler:
         token = await self.app_auth.get_installation_token(installation_id)
 
         async with GitHubAPIClient(token.token) as api_client:
-            projects_client = ProjectsV2Client(api_client)
-            project_id = await _resolve_project_id(payload, projects_client, self.settings)
+            tracker = build_github_work_item_tracker(api_client, self.settings.github_org, "")
+            project_id = await _resolve_project_id(payload, tracker, self.settings)
             event_project_id = _extract_project_node_id(payload)
             if event_project_id and event_project_id != project_id:
                 logger.info(
@@ -65,9 +95,9 @@ class WebhookHandler:
             item = _extract_projects_item(payload)
             item_node_id = _extract_item_node_id(item)
 
-            project_item: ProjectItem | None = None
+            project_item: WorkBoardItem | None = None
             if item_node_id:
-                project_item = await projects_client.get_project_item_by_id(item_node_id)
+                project_item = await tracker.get_project_item_by_id(item_node_id)
 
             if project_item is None:
                 content_node_id = _extract_content_node_id(item)
@@ -76,7 +106,7 @@ class WebhookHandler:
                 issue_info = await _fetch_issue_info(api_client, content_node_id)
                 if issue_info is None:
                     raise ValueError("❌ ERROR: unable to resolve issue from project item")
-                item_id = await projects_client.get_item_id_for_issue(
+                item_id = await tracker.get_item_id_for_issue(
                     project_id,
                     issue_info.number,
                     issue_info.repo_owner,
@@ -84,12 +114,11 @@ class WebhookHandler:
                 )
                 if not item_id:
                     raise ValueError("❌ ERROR: project item not found for issue")
-                project_item = await projects_client.get_project_item_by_id(item_id)
+                project_item = await tracker.get_project_item_by_id(item_id)
 
             if project_item is None:
                 raise ValueError("❌ ERROR: project item lookup failed")
 
-            issue_queue = IssueQueue(api_client, self.settings.github_org, "", projects_client)
             transition = _extract_status_transition(payload)
             if not transition:
                 logger.info(
@@ -102,22 +131,20 @@ class WebhookHandler:
             if _is_ready_transition(transition):
                 return await _trigger_project_issue(
                     project_item,
-                    issue_queue,
-                    projects_client,
-                    project_id,
+                    tracker,
                     IssueStatus.READY,
                     check_blockers=True,
+                    project_name=self.settings.github_project_name,
                     delivery=delivery,
                 )
 
             if _is_in_progress_transition(transition):
                 return await _trigger_project_issue(
                     project_item,
-                    issue_queue,
-                    projects_client,
-                    project_id,
+                    tracker,
                     IssueStatus.IN_PROGRESS,
                     check_blockers=True,
+                    project_name=self.settings.github_project_name,
                     delivery=delivery,
                 )
 
@@ -150,8 +177,8 @@ class WebhookHandler:
         token = await self.app_auth.get_installation_token(installation_id)
 
         async with GitHubAPIClient(token.token) as api_client:
-            issue_queue = IssueQueue(api_client, self.settings.github_org, "")
-            full_issue = await issue_queue.get_issue(
+            tracker = build_github_work_item_tracker(api_client, self.settings.github_org, "")
+            full_issue = await tracker.get_issue(
                 issue.number,
                 repo_owner=issue.repo_owner,
                 repo_name=issue.repo_name,
@@ -181,16 +208,8 @@ class WebhookHandler:
         token = await self.app_auth.get_installation_token(installation_id)
 
         async with GitHubAPIClient(token.token) as api_client:
-            projects_client = ProjectsV2Client(api_client)
-            issue_queue = IssueQueue(api_client, self.settings.github_org, "", projects_client)
-            project_id = await projects_client.get_org_project_id(
-                self.settings.github_org,
-                self.settings.github_project_name,
-            )
-            if not project_id:
-                raise ValueError("❌ ERROR: GitHub Project not found")
-
-            ready_issues = await issue_queue.list_issues_by_project_status(
+            tracker = build_github_work_item_tracker(api_client, self.settings.github_org, "")
+            ready_issues = await tracker.list_issues_by_project_status(
                 self.settings.github_project_name,
                 IssueStatus.READY.value,
             )
@@ -207,7 +226,7 @@ class WebhookHandler:
                     logger.info("issue_missing_repo", issue=issue.number)
                     continue
 
-                blockers = await projects_client.get_issue_blockers(
+                blockers = await tracker.get_issue_blockers(
                     issue.repo_owner,
                     issue.repo_name,
                     issue.number,
@@ -215,7 +234,11 @@ class WebhookHandler:
                 if not _blockers_include_issue(blockers, closed_issue):
                     continue
 
-                not_done = await _blockers_not_done(projects_client, project_id, blockers)
+                not_done = await _blockers_not_done(
+                    tracker,
+                    blockers,
+                    self.settings.github_project_name,
+                )
                 if not_done:
                     logger.info(
                         "issue_still_blocked",
@@ -243,12 +266,213 @@ class WebhookHandler:
                 "results": triggered,
             }
 
+    async def _handle_pull_request_event(
+        self,
+        payload: dict[str, Any],
+        delivery: str | None,
+        *,
+        workflow_id: str | None,
+    ) -> dict[str, Any]:
+        action = (payload.get("action") or "").strip()
+        if action == "closed":
+            logger.info("webhook_ignored", event="pull_request", reason="action_not_reviewable")
+            return {"status": "ignored", "reason": "action_not_reviewable"}
+
+        pr = _extract_pull_request_from_payload(payload)
+        if pr is None:
+            raise ValueError("❌ ERROR: pull_request payload missing metadata")
+
+        if not self._pr_review_enabled():
+            logger.info(
+                "webhook_lifecycle",
+                stage=STAGE_PR_REVIEW_SKIPPED,
+                reason="pr_review_disabled",
+                action="pr_review",
+                pr_number=pr.number,
+                repo=f"{pr.repo_owner}/{pr.repo_name}",
+            )
+            return {"status": "ignored", "reason": "pr_review_disabled"}
+
+        if not self._is_pull_request_repo_allowed(pr.repo_owner, pr.repo_name):
+            logger.info(
+                "webhook_lifecycle",
+                stage=STAGE_PR_REVIEW_SKIPPED,
+                reason="repo_not_allowed",
+                action="pr_review",
+                pr_number=pr.number,
+                repo=f"{pr.repo_owner}/{pr.repo_name}",
+            )
+            return {"status": "ignored", "reason": "repo_not_allowed"}
+
+        if pr.is_draft:
+            logger.info(
+                "webhook_lifecycle",
+                stage=STAGE_PR_REVIEW_SKIPPED,
+                reason="draft_pr",
+                action="pr_review",
+                pr_number=pr.number,
+                repo=f"{pr.repo_owner}/{pr.repo_name}",
+            )
+            return {"status": "ignored", "reason": "draft_pr"}
+
+        if not self._is_pull_request_reviewable_action(action):
+            logger.info("webhook_ignored", event="pull_request", reason="action_not_reviewable")
+            return {"status": "ignored", "reason": "action_not_reviewable"}
+
+        resolved_workflow_id = workflow_id or _generate_workflow_id()
+        logger.info(
+            "webhook_lifecycle",
+            stage=STAGE_PR_REVIEW_STARTED,
+            action=action,
+            pr_number=pr.number,
+            repo=f"{pr.repo_owner}/{pr.repo_name}",
+            workflow_id=resolved_workflow_id,
+            delivery_id=delivery,
+        )
+
+        store = self._get_pr_review_store()
+        installation_id = _extract_installation_id(payload)
+        idempotency_key = _build_pr_review_idempotency_key(
+            pr.repo_owner,
+            pr.repo_name,
+            pr.number,
+            pr.head_sha,
+        )
+        record = build_pr_review_job_record(
+            idempotency_key=idempotency_key,
+            repo_owner=pr.repo_owner,
+            repo_name=pr.repo_name,
+            pr_number=pr.number,
+            head_sha=pr.head_sha,
+            base_ref=pr.base_ref,
+            action=action,
+            workflow_id=resolved_workflow_id,
+            installation_id=installation_id,
+            delivery_id=delivery,
+            project=self.settings.github_project_name,
+            target_gcp_project=None,
+        )
+
+        claim = await store.claim_job(record)
+        if not claim.claimed:
+            if claim.reason == "review_in_progress":
+                logger.info(
+                    "webhook_lifecycle",
+                    stage=STAGE_PR_REVIEW_SKIPPED,
+                    reason=claim.reason,
+                    action="pr_review",
+                    pr_number=pr.number,
+                    repo=f"{pr.repo_owner}/{pr.repo_name}",
+                    head_sha=pr.head_sha,
+                    idempotency_key=idempotency_key,
+                )
+                return {
+                    "status": "skipped",
+                    "reason": claim.reason,
+                    "action": "pr_review",
+                    "pr_number": pr.number,
+                    "repo": f"{pr.repo_owner}/{pr.repo_name}",
+                    "head_sha": pr.head_sha,
+                    "idempotency_key": idempotency_key,
+                }
+            raise ValueError(f"❌ ERROR: failed to claim PR review job ({claim.reason})")
+
+        job = PRReviewJob(
+            repo_owner=pr.repo_owner,
+            repo_name=pr.repo_name,
+            pr_number=pr.number,
+            head_sha=pr.head_sha,
+            base_ref=pr.base_ref,
+            action=action,
+            workflow_id=resolved_workflow_id,
+            idempotency_key=idempotency_key,
+            installation_id=installation_id,
+            delivery_id=delivery,
+            project=self.settings.github_project_name,
+            target_gcp_project=None,
+        )
+        try:
+            queue = await self._get_pr_review_queue()
+            message_id = await queue.publish(job)
+            queued_at = _utc_now_iso()
+            await store.mark_enqueued(
+                idempotency_key=idempotency_key,
+                pubsub_message_id=message_id,
+                queued_at=queued_at,
+            )
+            logger.info(
+                "webhook_lifecycle",
+                stage=STAGE_PR_REVIEW_ENQUEUED,
+                action="pr_review",
+                pubsub_message_id=message_id,
+                pr_number=pr.number,
+                repo=f"{pr.repo_owner}/{pr.repo_name}",
+                head_sha=pr.head_sha,
+                idempotency_key=idempotency_key,
+            )
+            return {
+                "status": "enqueued",
+                "action": "pr_review",
+                "pr_number": pr.number,
+                "repo": f"{pr.repo_owner}/{pr.repo_name}",
+                "head_sha": pr.head_sha,
+                "idempotency_key": idempotency_key,
+                "message_id": message_id,
+            }
+        except Exception as exc:
+            logger.info(
+                "webhook_lifecycle",
+                stage=STAGE_PR_REVIEW_ERROR,
+                action="pr_review",
+                reason="pr_review_publish_failed",
+                error=str(exc),
+                pr_number=pr.number,
+                repo=f"{pr.repo_owner}/{pr.repo_name}",
+                head_sha=pr.head_sha,
+            )
+            await store.release_claim(idempotency_key)
+            raise
+
+    def _pr_review_enabled(self) -> bool:
+        return bool(getattr(self.settings, "pr_review_enabled", False))
+
+    def _is_pull_request_reviewable_action(self, action: str) -> bool:
+        return action in {"opened", "synchronize", "ready_for_review", "reopened"}
+
+    def _is_pull_request_repo_allowed(self, repo_owner: str, repo_name: str) -> bool:
+        allowlist = (getattr(self.settings, "pr_review_allowed_repos", "") or "").strip()
+        if not allowlist:
+            return True
+        normalized_allowlist = [entry.strip().lower() for entry in allowlist.split(",") if entry.strip()]
+        return f"{repo_owner}/{repo_name}".lower() in normalized_allowlist
+
+    async def _get_pr_review_queue(self) -> PRReviewPubSubQueue:
+        if self.pr_review_queue is None:
+            self.pr_review_queue = PRReviewPubSubQueue.from_settings(self.settings)
+        return self.pr_review_queue
+
+    def _get_pr_review_store(self):
+        if self.pr_review_store is None:
+            self.pr_review_store = build_pr_review_job_store(self.settings)
+        return self.pr_review_store
+
+
 
 @dataclass(frozen=True)
 class IssueInfo:
     number: int
     repo_owner: str
     repo_name: str
+
+
+@dataclass(frozen=True)
+class PullRequestInfo:
+    number: int
+    repo_owner: str
+    repo_name: str
+    head_sha: str
+    base_ref: str
+    is_draft: bool
 
 
 def _extract_projects_item(payload: dict[str, Any]) -> dict[str, Any]:
@@ -337,18 +561,15 @@ async def _fetch_issue_info(api_client: GitHubAPIClient, node_id: str) -> IssueI
 
 async def _resolve_project_id(
     payload: dict[str, Any],
-    projects_client: ProjectsV2Client,
+    tracker: WorkItemTracker,
     settings,
 ) -> str:
-    item = payload.get("projects_v2_item") or {}
+    item = payload.get("projects_v2_item") or payload.get("project_v2_item") or {}
     for key in ("project_node_id", "projectNodeId", "project_id", "projectId"):
         value = item.get(key)
         if isinstance(value, str) and value:
             return value
-    project_id = await projects_client.get_org_project_id(
-        settings.github_org,
-        settings.github_project_name,
-    )
+    project_id = await tracker.get_project_id(settings.github_project_name)
     if not project_id:
         raise ValueError("❌ ERROR: GitHub Project not found")
     return project_id
@@ -407,14 +628,53 @@ def _extract_issue_from_payload(payload: dict[str, Any]) -> IssueInfo | None:
     return IssueInfo(number=int(number), repo_owner=owner, repo_name=name)
 
 
+def _extract_pull_request_from_payload(payload: dict[str, Any]) -> PullRequestInfo | None:
+    pr = payload.get("pull_request") or {}
+    repo = payload.get("repository") or {}
+    number = pr.get("number")
+    owner = (repo.get("owner") or {}).get("login")
+    name = repo.get("name")
+    head = pr.get("head") or {}
+    head_sha = head.get("sha")
+    base = pr.get("base") or {}
+    base_ref = base.get("ref")
+    if not number or not owner or not name or not head_sha or not base_ref:
+        return None
+    draft = bool(pr.get("draft", False))
+    return PullRequestInfo(
+        number=int(number),
+        repo_owner=owner,
+        repo_name=name,
+        head_sha=str(head_sha),
+        base_ref=str(base_ref),
+        is_draft=draft,
+    )
+
+
+def _build_pr_review_idempotency_key(
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int,
+    head_sha: str,
+) -> str:
+    return f"{repo_owner}/{repo_name}:{pr_number}:{head_sha}"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _generate_workflow_id() -> str:
+    return f"wf-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{int(datetime.now(UTC).timestamp())}"
+
+
 async def _trigger_project_issue(
-    project_item: ProjectItem,
-    issue_queue: IssueQueue,
-    projects_client: ProjectsV2Client,
-    project_id: str,
+    project_item: WorkBoardItem,
+    tracker: WorkItemTracker,
     expected_status: IssueStatus,
     *,
     check_blockers: bool,
+    project_name: str,
     delivery: str | None,
 ) -> dict[str, Any]:
     if project_item.content_type != "Issue":
@@ -440,12 +700,12 @@ async def _trigger_project_issue(
         raise ValueError("❌ ERROR: project item missing repository metadata")
 
     if check_blockers:
-        blockers = await projects_client.get_issue_blockers(
+        blockers = await tracker.get_issue_blockers(
             project_item.repo_owner,
             project_item.repo_name,
             project_item.number,
         )
-        not_done = await _blockers_not_done(projects_client, project_id, blockers)
+        not_done = await _blockers_not_done(tracker, blockers, project_name)
         if not_done:
             logger.info(
                 "issue_blocked_by_dependencies",
@@ -460,7 +720,7 @@ async def _trigger_project_issue(
                 "repo": f"{project_item.repo_owner}/{project_item.repo_name}",
             }
 
-    issue = await issue_queue.get_issue(
+    issue = await tracker.get_issue(
         project_item.number,
         repo_owner=project_item.repo_owner,
         repo_name=project_item.repo_name,
@@ -492,17 +752,17 @@ def _blockers_include_issue(blockers, target: IssueInfo) -> bool:
 
 
 async def _blockers_not_done(
-    projects_client: ProjectsV2Client,
-    project_id: str,
+    tracker: WorkItemTracker,
     blockers,
+    project_name: str,
 ) -> list[tuple[int, str | None]]:
     not_done = []
     for blocker in blockers:
-        status = await projects_client.get_issue_project_status(
-            project_id,
+        status = await tracker.get_issue_project_status(
             blocker.number,
             blocker.repo_owner,
             blocker.repo_name,
+            project_name,
         )
         if status != IssueStatus.DONE.value:
             not_done.append((blocker.number, status))
