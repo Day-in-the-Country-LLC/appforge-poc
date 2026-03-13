@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,159 +12,31 @@ from urllib.parse import quote
 import structlog
 from langgraph.graph import StateGraph
 
-from ace.agents.llm_client import call_openai
 from ace.agents.model_selector import ModelSelector
 from ace.agents.types import AgentResult, AgentStatus
-from ace.config.secrets import resolve_github_token, resolve_openai_api_key
+from ace.config.secrets import resolve_github_token
 from ace.config.settings import get_settings
 from ace.github.api_client import GitHubAPIClient
-from ace.github.issue_queue import IssueQueue
-from ace.github.projects_v2 import ProjectsV2Client
 from ace.github.status_manager import StatusManager
+from ace.github.work_items import (
+    build_github_work_item_enricher,
+    build_github_work_item_tracker,
+)
 from ace.logging_utils import log_key_event
 from ace.notifications.slack_client import SlackNotifier, format_completion_message
+from ace.orchestration.session_runtime import (
+    SessionContext,
+    SessionInstructionBuilder,
+    SessionTurnType,
+    build_session_runner,
+    done_filename_for_run,
+    normalize_session_run_id,
+)
 from ace.orchestration.state import WorkerState
 from ace.workspaces.git_ops import GitOps
 from ace.workspaces.tmux_ops import TmuxOps
 
 logger = structlog.get_logger(__name__)
-
-
-class InstructionBuilder:
-    """Creates detailed instructions for the entire issue."""
-
-    def __init__(self) -> None:
-        self.settings = get_settings()
-        self._openai_key = resolve_openai_api_key(self.settings)
-        self.instruction_backend = self.settings.instruction_backend.lower()
-        self.instruction_model = self.settings.instruction_model or self.settings.codex_model
-
-    async def build(
-        self,
-        issue,
-        *,
-        agents_md: str | None = None,
-    ) -> str:
-        prompt = self._build_prompt(
-            issue,
-            agents_md=agents_md,
-        )
-        instructions = await self._call_model(
-            prompt,
-            trace_name="issue_instructions",
-            metadata={
-                "issue_number": issue.number,
-                "issue_title": issue.title,
-            },
-        )
-        cleaned = (instructions or "").strip()
-        if not cleaned or "type': 'reasoning" in cleaned or cleaned.startswith("{'id':"):
-            preview = cleaned[:400]
-            logger.error(
-                "instruction_generation_failed",
-                issue_number=issue.number,
-                issue_title=issue.title,
-                issue_body=issue.body or "",
-                prompt=prompt,
-                response=instructions or "",
-                preview=preview,
-            )
-            raise ValueError(
-                f"❌ ERROR: Instruction agent returned no usable instructions. Preview: {preview}"
-            )
-
-        normalized = cleaned.lower()
-        normalized = (
-            normalized.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
-        )
-        normalized = " ".join(normalized.split())
-
-        refusal_markers = [
-            "i'm sorry",
-            "i am sorry",
-            "i cannot help",
-            "i can't help",
-            "cannot assist",
-            "can't assist",
-            "can't help with that",
-            "cannot help with that",
-            "i can't help with that",
-            "i cannot help with that",
-            "i’m sorry",
-        ]
-        if any(marker in normalized for marker in refusal_markers):
-            preview = cleaned[:400]
-            logger.error(
-                "instruction_generation_refused",
-                issue_number=issue.number,
-                issue_title=issue.title,
-                issue_body=issue.body or "",
-                prompt=prompt,
-                response=instructions or "",
-                preview=preview,
-            )
-            raise ValueError(
-                f"❌ ERROR: Instruction agent refused to provide steps. Preview: {preview}"
-            )
-        return instructions
-
-    def _build_prompt(
-        self,
-        issue,
-        *,
-        agents_md: str | None = None,
-    ) -> str:
-        agents_section = ""
-        if agents_md:
-            agents_section = f"\n\nAGENTS.md (follow these repo practices):\n{agents_md}\n"
-        body = f"""
-You are an instruction agent. Write detailed, step-by-step *programmatic* coding instructions
-for the issue below. Output Markdown only. Do not include UI/manual steps.
-Assume the repository is available; do not claim you cannot access files.
-Do not refuse or apologize; if information is missing, make reasonable assumptions
-and proceed with best-effort coding steps.
-If schema changes are needed, generate a timestamped Supabase migration
-(e.g., supabase/migrations/<YYYYMMDDHHMMSS>__desc.sql) using the current system
-time; do not place schema DDL in docs.
-
-Issue Title: {issue.title}
-Issue Body:
-{issue.body}
-{agents_section}
-
-Include:
-- Key files/areas to inspect
-- Concrete steps to implement
-- Validation/tests to run
-"""
-        completion = """
-
-When finished:
-- Create a file ACE_TASK_DONE.json in the repo root with fields: task_id
-  (use "task-1"), summary, files_changed (array), commands_run (array).
-- Exit the session only after writing this file.
-"""
-        return body + completion
-
-    async def _call_model(
-        self,
-        prompt: str,
-        *,
-        trace_name: str,
-        metadata: dict[str, Any] | None,
-    ) -> str:
-        if self.instruction_backend != "openai":
-            raise ValueError(
-                f"❌ ERROR: Unsupported instruction backend: {self.instruction_backend}"
-            )
-        return await call_openai(
-            prompt,
-            self.instruction_model,
-            self._openai_key,
-            max_tokens=1200,
-            trace_name=trace_name,
-            metadata=metadata,
-        )
 
 
 def _slugify_title(title: str, max_length: int = 40) -> str:
@@ -203,10 +74,17 @@ async def claim_issue(state: WorkerState) -> WorkerState:
         try:
             settings = get_settings()
             api_client = _get_api_client(settings)
-            projects_client = ProjectsV2Client(api_client)
-            issue_queue = IssueQueue(api_client, settings.github_org, "", projects_client)
-            status_manager = StatusManager(issue_queue)
-
+            tracker = build_github_work_item_tracker(
+                api_client,
+                settings.github_org,
+                "",
+            )
+            enricher = build_github_work_item_enricher(
+                api_client,
+                settings.github_org,
+                "",
+            )
+            status_manager = StatusManager(tracker=tracker, enricher=enricher)
             repo_owner = state.metadata.get("repo_owner") or state.issue.repo_owner
             repo_name = state.metadata.get("repo_name") or state.issue.repo_name
             await status_manager.claim_issue(
@@ -271,7 +149,7 @@ async def run_agent(state: WorkerState) -> WorkerState:
 
     settings = get_settings()
     github_token = resolve_github_token(settings)
-    context = {
+    run_context: dict[str, Any] = {
         "repo_name": state.metadata.get("repo_name", "unknown"),
         "repo_owner": state.metadata.get("repo_owner", "unknown"),
         "issue_number": state.issue_number,
@@ -296,10 +174,10 @@ async def run_agent(state: WorkerState) -> WorkerState:
     state.workspace_path = str(worktree_path)
     state.branch_name = branch_name
     workspace_path = state.workspace_path
-    context["repo_name"] = repo_name
-    context["repo_owner"] = repo_owner
-    context["branch_name"] = branch_name
-    context["workspace_path"] = workspace_path
+    run_context["repo_name"] = repo_name
+    run_context["repo_owner"] = repo_owner
+    run_context["branch_name"] = branch_name
+    run_context["workspace_path"] = workspace_path
 
     agents_md = ""
     agents_path = worktree_path / "AGENTS.md"
@@ -309,14 +187,52 @@ async def run_agent(state: WorkerState) -> WorkerState:
         except Exception:
             agents_md = ""
 
-    instruction_builder = InstructionBuilder()
+    run_id_seed = f"issue-{state.issue_number}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    state.session_id = normalize_session_run_id(state.session_id or run_id_seed)
+    done_filename = done_filename_for_run(state.session_id)
+    state.metadata["run_id"] = state.session_id
+    state.metadata["done_filename"] = done_filename
+    state.metadata["session_turn"] = state.session_turn
+    state.metadata["retry_count"] = state.retry_count
+    run_context["run_id"] = state.session_id
+    run_context["done_filename"] = done_filename
+    run_context["session_turn"] = state.session_turn
+    run_context["retry_count"] = state.retry_count
+    previous_output = state.previous_output or None
+    if state.retry_count:
+        turn_type = SessionTurnType.RETRY
+    elif state.session_turn > 1:
+        turn_type = SessionTurnType.CONTINUATION
+    else:
+        turn_type = None
+
+    session_context = SessionContext(
+        issue_number=state.issue_number,
+        issue_title=state.issue.title,
+        issue_body=state.issue.body,
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        run_id=state.session_id,
+        workspace_path=workspace_path,
+        branch_name=branch_name,
+        done_filename=done_filename,
+        backend=state.backend,
+        model=state.metadata.get("model"),
+        turn_type=turn_type,
+        turn_number=state.session_turn,
+        previous_output=previous_output,
+        metadata=run_context,
+    )
+
+    instruction_builder = SessionInstructionBuilder()
     instructions = await instruction_builder.build(
         state.issue,
         agents_md=agents_md or None,
+        context=session_context,
     )
     instructions_path = Path(worktree_path) / "ACE_TASK.md"
     instructions_path.write_text(instructions, encoding="utf-8")
-    context["instructions_path"] = str(instructions_path)
+    run_context["instructions_path"] = str(instructions_path)
     logger.info(
         "instructions_generated",
         issue=state.issue_number,
@@ -330,125 +246,55 @@ async def run_agent(state: WorkerState) -> WorkerState:
         path=str(instructions_path),
     )
 
-    if settings.agent_execution_mode.lower() in {"tmux", "cli"}:
-        from ace.agents.cli_agent import CliAgent
-
-        model = state.metadata.get("model")
-        agent = CliAgent(backend=state.backend, model=model)
-    else:
+    if settings.agent_execution_mode.lower() not in {"tmux", "cli"}:
         raise ValueError("❌ ERROR: Non-tmux execution modes are not supported. Use tmux/cli.")
+
+    runner = build_session_runner(state.backend, model=state.metadata.get("model"))
+
+    previous_result = None
+    if state.session_turn > 1 and previous_output:
+        previous_result = AgentResult(
+            status=AgentStatus.FAILED,
+            output=previous_output,
+            files_changed=[],
+            commands_run=[],
+            error=previous_output,
+        )
 
     logger.info(
         "executing_agent",
         issue=state.issue_number,
         backend=state.backend,
         model=state.metadata.get("model"),
+        run_id=state.session_id,
+        run_turn=state.session_turn,
+        done_filename=done_filename,
     )
 
-    result = await agent.run(instructions, context, workspace_path)
+    await runner.start(session_context)
+    result = await runner.run_turn(session_context, instructions, previous_result=previous_result)
     state.agent_result = result
 
-    session_name = None
-    if result.metadata and isinstance(result.metadata, dict):
-        session_name = result.metadata.get("session_name")
-
-    # If running in tmux/cli, wait for ACE_TASK_DONE.json to appear before success.
-    if settings.agent_execution_mode.lower() in {"tmux", "cli"} and session_name:
-        tmux = TmuxOps()
-        timeout = (
-            settings.task_wait_timeout_seconds if settings.task_wait_timeout_seconds > 0 else None
-        )
-        done_path = Path(workspace_path) / "ACE_TASK_DONE.json"
-        start = time.monotonic()
-        while True:
-            if done_path.exists():
-                marker: dict[str, Any] = {}
-                try:
-                    marker = json.loads(done_path.read_text(encoding="utf-8"))
-                except Exception:
-                    marker = {}
-                summary = marker.get("summary", "")
-                files_changed = (
-                    marker.get("files_changed")
-                    if isinstance(marker.get("files_changed"), list)
-                    else []
-                )
-                commands_run = (
-                    marker.get("commands_run")
-                    if isinstance(marker.get("commands_run"), list)
-                    else []
-                )
-                normalized_summary = " ".join(str(summary).lower().split())
-                refusal_markers = [
-                    "no actionable instructions",
-                    "refusal",
-                    "refused",
-                    "can't help",
-                    "cannot help",
-                    "i'm sorry",
-                    "i am sorry",
-                ]
-                if any(marker_text in normalized_summary for marker_text in refusal_markers):
-                    error_message = summary or "Instruction refusal detected in ACE_TASK_DONE.json."
-                    log_key_event(
-                        logger,
-                        f"❌ ERROR: {error_message}",
-                        issue=state.issue_number,
-                        path=str(done_path),
-                    )
-                    state.agent_result = AgentResult(
-                        status=AgentStatus.FAILED,
-                        output=error_message,
-                        files_changed=files_changed,
-                        commands_run=commands_run,
-                        error="instruction_refusal",
-                    )
-                    state.error = state.agent_result.error
-                    break
-                log_key_event(
-                    logger,
-                    "✅ ACE_TASK_DONE.json found",
-                    issue=state.issue_number,
-                    task_id=marker.get("task_id"),
-                    summary=summary,
-                    files_changed_count=len(files_changed),
-                    commands_run_count=len(commands_run),
-                    path=str(done_path),
-                )
-                state.agent_result = AgentResult(
-                    status=AgentStatus.SUCCESS,
-                    output=summary or "Completed via CLI (ACE_TASK_DONE.json found).",
-                    files_changed=files_changed,
-                    commands_run=commands_run,
-                )
-                break
-            if not tmux.session_exists(session_name):
-                state.agent_result = AgentResult(
-                    status=AgentStatus.FAILED,
-                    output="tmux session ended without ACE_TASK_DONE.json.",
-                    files_changed=[],
-                    commands_run=[],
-                    error="missing_done_file",
-                )
-                state.error = state.agent_result.error
-                break
-            if timeout is not None and (time.monotonic() - start) > timeout:
-                state.agent_result = AgentResult(
-                    status=AgentStatus.FAILED,
-                    output="Timed out waiting for ACE_TASK_DONE.json.",
-                    files_changed=[],
-                    commands_run=[],
-                    error="task_wait_timeout",
-                )
-                state.error = state.agent_result.error
-                break
-            time.sleep(5)
+    if result.status == AgentStatus.FAILED:
+        state.error = result.error or result.output or "agent_failed"
+        if await runner.request_input(result):
+            state.previous_output = state.previous_output or result.output or result.error or ""
+            state.session_turn += 1
+            state.retry_count += 1
+        if result.error == "task_wait_timeout":
+            await runner.timeout(session_context, reason="task_wait_timeout")
+        else:
+            await runner.stop(session_context, reason=state.error)
+    else:
+        await runner.stop(session_context, reason="completed")
 
     logger.info(
         "agent_execution_complete",
         issue=state.issue_number,
         status=result.status.value,
         output_length=len(result.output),
+        session_id=session_context.run_id,
+        done_filename=done_filename,
     )
 
     state.last_update = datetime.now()
@@ -484,7 +330,17 @@ async def manager_cleanup(state: WorkerState) -> WorkerState:
     state.current_step = "manager_cleanup"
 
     workdir = Path(state.workspace_path) if state.workspace_path else None
-    done_path = workdir / "ACE_TASK_DONE.json" if workdir else None
+    done_filename = (
+        str(state.metadata.get("done_filename"))
+        if isinstance(state.metadata, dict)
+        else None
+    )
+    done_filename = done_filename if done_filename and done_filename.strip() else "ACE_TASK_DONE.json"
+    done_path = workdir / done_filename if workdir else None
+    if done_path and not done_path.exists() and done_path.name != "ACE_TASK_DONE.json":
+        legacy_done_path = workdir / "ACE_TASK_DONE.json"
+        if legacy_done_path.exists():
+            done_path = legacy_done_path
     task_path = workdir / "ACE_TASK.md" if workdir else None
 
     status = "unknown"
