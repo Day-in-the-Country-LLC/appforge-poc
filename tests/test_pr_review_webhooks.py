@@ -9,6 +9,7 @@ from ace.pr_review import InMemoryPRReviewSessionStore, PRReviewStatus
 from ace.pr_review.job_store import InMemoryPRReviewJobStore
 from ace.pr_review.pubsub_queue import PRReviewJob
 from ace.webhooks.handlers import WebhookHandler
+from ace.webhooks.event_router import WorkEvent
 
 from ace.pr_review.context import PRContext
 
@@ -539,6 +540,44 @@ async def test_pull_request_event_routed_via_work_event(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_work_event_input_routes_issue_comment(monkeypatch):
+    from ace.webhooks import handlers as handlers_module
+
+    called = {"kind": None}
+
+    async def _fake_issue_comment(
+        self,
+        payload: dict,
+        delivery: str | None,
+    ) -> dict[str, Any]:
+        called["kind"] = "issue_comment"
+        return {"status": "patched", "action": "issue_comment"}
+
+    monkeypatch.setattr(
+        handlers_module.WebhookHandler,
+        "_handle_issue_comment",
+        _fake_issue_comment,
+    )
+    handler = WebhookHandler(
+        settings=_DispatchSettingsStub(),
+        app_auth=object(),
+    )
+    work_event = WorkEvent(
+        source="github",
+        event_type="issue_comment",
+        action="created",
+    )
+    result = await handler.handle(
+        work_event,
+        {"action": "created", "issue": {"number": 77}},
+        "delivery-work-event",
+        workflow_id="wf-work-event",
+    )
+    assert result == {"status": "patched", "action": "issue_comment"}
+    assert called["kind"] == "issue_comment"
+
+
+@pytest.mark.asyncio
 async def test_projects_v2_item_event_routed_via_work_event(monkeypatch):
     from ace.webhooks import handlers as handlers_module
 
@@ -565,6 +604,21 @@ async def test_projects_v2_item_event_routed_via_work_event(monkeypatch):
     )
     assert result == {"status": "patched", "action": "projects_v2_item"}
     assert called["kind"] == "projects_v2_item"
+
+
+@pytest.mark.asyncio
+async def test_non_github_work_event_is_ignored_by_handler():
+    handler = WebhookHandler(settings=_DispatchSettingsStub(), app_auth=object())
+    work_event = WorkEvent(
+        source="linear",
+        event_type="issue_comment",
+    )
+    result = await handler.handle(
+        work_event,
+        {"action": "created", "issue": {"number": 88}},
+        "delivery-linear",
+    )
+    assert result == {"status": "ignored", "reason": "unsupported_event"}
 
 
 @pytest.mark.asyncio

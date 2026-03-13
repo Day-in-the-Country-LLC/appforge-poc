@@ -26,6 +26,7 @@ from ace.webhooks.lifecycle import (
     STAGE_PR_REVIEW_STARTED,
 )
 from ace.webhooks.github_app import GitHubAppAuth
+from ace.webhooks.event_router import WorkEvent, WorkEventRouter
 
 logger = structlog.get_logger(__name__)
 
@@ -45,34 +46,52 @@ class WebhookHandler:
         app_auth: GitHubAppAuth | object | None = None,
         pr_review_queue: PRReviewPubSubQueue | None = None,
         pr_review_store: Any | None = None,
+        event_router: WorkEventRouter | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.app_auth = app_auth or GitHubAppAuth.from_env()
         self.pr_review_queue = pr_review_queue
         self.pr_review_store = pr_review_store
+        self.event_router = event_router or WorkEventRouter()
 
     async def handle(
         self,
-        event: str,
+        event: str | WorkEvent,
         payload: dict[str, Any],
         delivery: str | None,
         workflow_id: str | None = None,
     ) -> dict[str, Any]:
-        if event == "projects_v2_item":
-            return await self._handle_projects_v2_item(payload, delivery)
-        if event == "issue_comment":
-            return await self._handle_issue_comment(payload, delivery)
-        if event == "issues":
-            return await self._handle_issue_event(payload, delivery)
-        if event == "pull_request":
+        work_event = event if isinstance(event, WorkEvent) else self.event_router.route(
+            source="github",
+            event=event,
+            payload=payload,
+            delivery=delivery,
+        )
+
+        handler = {
+            "projects_v2_item": self._handle_projects_v2_item,
+            "issue_comment": self._handle_issue_comment,
+            "issues": self._handle_issue_event,
+            "pull_request": self._handle_pull_request_event,
+        }.get(work_event.event_type)
+        if handler is None or not work_event.is_supported:
+            logger.info(
+                "webhook_ignored",
+                webhook_event=work_event.event_type,
+                webhook_source=work_event.source,
+                action=work_event.action,
+                delivery=delivery,
+            )
+            return {"status": "ignored", "reason": "unsupported_event"}
+
+        if work_event.event_type == "pull_request":
             return await self._handle_pull_request_event(
                 payload,
                 delivery,
                 workflow_id=workflow_id,
             )
 
-        logger.info("webhook_ignored", webhook_event=event, delivery=delivery)
-        return {"status": "ignored", "reason": "unsupported_event"}
+        return await handler(payload, delivery)  # type: ignore[misc]
 
     async def _handle_projects_v2_item(
         self, payload: dict[str, Any], delivery: str | None
