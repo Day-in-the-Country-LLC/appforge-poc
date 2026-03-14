@@ -166,3 +166,30 @@ def resolve_claude_api_key(settings: Settings) -> str:
         raise ValueError("❌ ERROR: Claude API key missing from Secret Manager")
 
     return api_key
+
+
+def resolve_linear_api_key(settings: Settings) -> str:
+    """Resolve the Linear API key."""
+    _validate_backend(settings)
+    if settings.secrets_backend == "env":
+        api_key = settings.linear_api_key
+        if not api_key:
+            raise ValueError("❌ ERROR: Linear API key missing from environment")
+        return api_key
+    if not _should_use_secret_manager(settings, settings.linear_api_key_secret_name):
+        raise ValueError("❌ ERROR: Linear API key secret not configured")
+
+    try:
+        api_key = load_secret(
+            settings.gcp_project_id,
+            settings.linear_api_key_secret_name,
+            settings.linear_api_key_secret_version,
+            settings.gcp_credentials_path,
+        )
+    except Exception as e:
+        raise ValueError(f"❌ ERROR: Linear secret fetch failed: {e}") from e
+
+    if not api_key:
+        raise ValueError("❌ ERROR: Linear API key missing from Secret Manager")
+
+    return api_key

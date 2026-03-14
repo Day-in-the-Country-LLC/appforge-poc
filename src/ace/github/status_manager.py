@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING
 
 import structlog
 
+from ace.github.work_items import WorkItemEnricher, WorkItemTracker
 from ace.config.settings import get_settings
-
-if TYPE_CHECKING:
-    from .issue_queue import IssueQueue
 
 logger = structlog.get_logger(__name__)
 
@@ -27,15 +24,48 @@ class IssueStatus(str, Enum):
 class StatusManager:
     """Manages issue status and agent label transitions."""
 
-    def __init__(self, issue_queue: IssueQueue) -> None:
+    def __init__(self, tracker: WorkItemTracker, enricher: WorkItemEnricher) -> None:
         """Initialize status manager.
 
         Args:
-            issue_queue: IssueQueue instance for API calls
+            tracker: Tracker backend for status updates
+            enricher: Enricher backend for comments/labels/assignee updates
         """
-        self.issue_queue = issue_queue
+        self.tracker = tracker
+        self.enricher = enricher
         self.settings = get_settings()
         self.status_disabled = self.settings.disable_issue_status
+        self.backend = (self.settings.issue_tracker_backend or "github").lower()
+
+    @property
+    def project_name(self) -> str:
+        if self.backend == "linear":
+            return self.settings.linear_default_project_name
+        return self.settings.github_project_name
+
+    @property
+    def status_ready(self) -> str:
+        if self.backend == "linear" and self.settings.linear_ready_status:
+            return self.settings.linear_ready_status
+        return IssueStatus.READY.value
+
+    @property
+    def status_in_progress(self) -> str:
+        if self.backend == "linear" and self.settings.linear_in_progress_status:
+            return self.settings.linear_in_progress_status
+        return IssueStatus.IN_PROGRESS.value
+
+    @property
+    def status_blocked(self) -> str:
+        if self.backend == "linear" and self.settings.linear_blocked_status:
+            return self.settings.linear_blocked_status
+        return IssueStatus.BLOCKED.value
+
+    @property
+    def status_done(self) -> str:
+        if self.backend == "linear" and self.settings.linear_done_status:
+            return self.settings.linear_done_status
+        return IssueStatus.DONE.value
 
     async def claim_issue(
         self,
@@ -70,16 +100,16 @@ class StatusManager:
 - Started: {self._get_timestamp()}
 - Heartbeat: Updates posted at major milestones
 """
-        await self.issue_queue.post_comment(
+        await self.enricher.post_comment(
             issue_number,
             claim_comment,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
-        await self.issue_queue.set_project_status(
+        await self.tracker.set_issue_project_status(
             issue_number,
-            IssueStatus.IN_PROGRESS.value,
-            self.settings.github_project_name,
+            self.status_in_progress,
+            self.project_name,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
@@ -116,29 +146,29 @@ class StatusManager:
             "\nPlease reply with your answers and re-add the `agent` label when ready to resume."
         )
 
-        await self.issue_queue.remove_labels(
+        await self.enricher.remove_labels(
             issue_number,
             [self.settings.github_agent_label],
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
         target_assignee = assignee or self.settings.blocked_assignee
-        await self.issue_queue.assign_issue(
+        await self.enricher.assign_issue(
             issue_number,
             target_assignee,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
-        await self.issue_queue.post_comment(
+        await self.enricher.post_comment(
             issue_number,
             blocked_comment,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
-        await self.issue_queue.set_project_status(
+        await self.tracker.set_issue_project_status(
             issue_number,
-            IssueStatus.BLOCKED.value,
-            self.settings.github_project_name,
+            self.status_blocked,
+            self.project_name,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
@@ -159,10 +189,10 @@ class StatusManager:
             return
 
         logger.info("marking_blocked_from_comment", issue=issue_number)
-        await self.issue_queue.set_project_status(
+        await self.tracker.set_issue_project_status(
             issue_number,
-            IssueStatus.BLOCKED.value,
-            self.settings.github_project_name,
+            self.status_blocked,
+            self.project_name,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
@@ -198,22 +228,22 @@ URL: {pr_url}
 
 Status: Done
 """
-        await self.issue_queue.remove_labels(
+        await self.enricher.remove_labels(
             issue_number,
             [self.settings.github_agent_label],
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
-        await self.issue_queue.post_comment(
+        await self.enricher.post_comment(
             issue_number,
             done_comment,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
-        await self.issue_queue.set_project_status(
+        await self.tracker.set_issue_project_status(
             issue_number,
-            IssueStatus.DONE.value,
-            self.settings.github_project_name,
+            self.status_done,
+            self.project_name,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
@@ -250,22 +280,22 @@ Error:
 
 Status: Blocked - Please review and re-add the `agent` label to retry.
 """
-        await self.issue_queue.remove_labels(
+        await self.enricher.remove_labels(
             issue_number,
             [self.settings.github_agent_label],
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
-        await self.issue_queue.post_comment(
+        await self.enricher.post_comment(
             issue_number,
             failed_comment,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
-        await self.issue_queue.set_project_status(
+        await self.tracker.set_issue_project_status(
             issue_number,
-            IssueStatus.BLOCKED.value,
-            self.settings.github_project_name,
+            self.status_blocked,
+            self.project_name,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
@@ -291,22 +321,22 @@ Status: Blocked - Please review and re-add the `agent` label to retry.
         logger.info("resuming_from_blocked", issue=issue_number)
 
         resume_comment = "**Agent Resuming**\n\nContinuing with provided answers."
-        await self.issue_queue.add_labels(
+        await self.enricher.add_labels(
             issue_number,
             [self.settings.github_agent_label],
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
-        await self.issue_queue.post_comment(
+        await self.enricher.post_comment(
             issue_number,
             resume_comment,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
-        await self.issue_queue.set_project_status(
+        await self.tracker.set_issue_project_status(
             issue_number,
-            IssueStatus.IN_PROGRESS.value,
-            self.settings.github_project_name,
+            self.status_in_progress,
+            self.project_name,
             repo_owner=repo_owner,
             repo_name=repo_name,
         )
