@@ -41,6 +41,9 @@ class WorkerState:
     # Error tracking
     error: str | None = None
     retry_count: int = 0
+    session_id: str = ""
+    session_turn: int = 1
+    previous_output: str = ""
 
     # Metadata
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -57,4 +60,7 @@ class WorkerState:
             "pr_number": self.pr_number,
             "error": self.error,
             "retry_count": self.retry_count,
+            "session_id": self.session_id,
+            "session_turn": self.session_turn,
+            "previous_output": self.previous_output,
         }
