@@ -446,25 +446,28 @@ class AgentPool:
         if not manager:
             return ordered, counts
 
-        items = []
-        for issue in in_progress:
-            items.append({"category": "in_progress", "issue": issue, "key": self._issue_key(issue)})
-        for issue in ready:
-            items.append({"category": "ready", "issue": issue, "key": self._issue_key(issue)})
-
-        ordered_keys = await manager.order_work_items(items)
-        if not ordered_keys:
+        try:
+            ordered, work_meta_by_key = await manager.build_project_plan(
+                in_progress,
+                ready,
+                project_slug=self.settings.github_project_name,
+            )
+        except Exception as exc:
+            logger.warning("coordinator_build_project_plan_failed", error=str(exc))
             return ordered, counts
 
-        by_key = {key: issue for issue, key in ordered}
-        queue = []
-        for key in ordered_keys:
-            issue = by_key.get(key)
-            if issue:
-                queue.append((issue, key))
-        for issue, key in ordered:
-            if key not in ordered_keys:
-                queue.append((issue, key))
+        self._work_meta_by_key = {}
+        queue: list[tuple[Issue, str]] = []
+        for issue, _ in ordered:
+            work_key = self._issue_key(issue)
+            queue.append((issue, work_key))
+            self._work_meta_by_key[work_key] = work_meta_by_key.get(
+                self._issue_key(issue),
+                {},
+            )
+
+        if not queue:
+            return ordered, counts
         return queue, counts
 
     async def fetch_ready_issues(self) -> list[Issue]:
@@ -879,6 +882,16 @@ class AgentPool:
             }
 
         hydrated = await self._hydrate_issue(issue)
+        manager = self._get_manager_agent()
+        if manager:
+            try:
+                self._work_meta_by_key[self._issue_key(hydrated)] = await manager.build_issue_context_pack(
+                    hydrated,
+                    project_slug=self.settings.github_project_name,
+                )
+            except Exception as exc:
+                logger.warning("coordinator_issue_context_build_failed", issue=issue.number, error=str(exc))
+
         spawned = await self.spawn_agent(hydrated, self._issue_key(hydrated))
         logger.info(
             "process_single_issue_complete",

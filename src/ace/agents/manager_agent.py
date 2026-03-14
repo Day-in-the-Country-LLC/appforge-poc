@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -14,16 +15,67 @@ from ace.config.settings import get_settings
 from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import Issue, IssueQueue
 from ace.github.projects_v2 import ProjectsV2Client
+from ace.planning.models import PlanningEvent, PlanningSession
+from ace.planning.store_firestore import PlanningStore, build_planning_store
+from ace.workspaces.git_ops import resolve_project_session_key
 
 logger = structlog.get_logger(__name__)
 
 _DEFAULT_TOOL_LOOP_MAX_STEPS = 6
+_COORDINATOR_SESSION_PREFIX = "coordinator:"
+_COORDINATOR_ACTIVE_STATUS = "coordinator_active"
+_COORDINATOR_SESSION_REQUEST_TEXT = "project coordinator session"
+_COORDINATOR_STATE_KEY = "coordinator"
+_COORDINATOR_EVENT_NAME = "coordinator_plan_updated"
+
+
+def _issue_key(owner: str | None, repo: str | None) -> str:
+    return f"{owner or 'unknown'}/{repo or 'unknown'}"
+
+
+def _build_issue_key(owner: str | None, repo: str | None, issue_number: int) -> str:
+    return f"issue:{_issue_key(owner, repo)}#{issue_number}"
+
+
+def _format_issue_key(issue: Issue) -> str:
+    return _build_issue_key(issue.repo_owner, issue.repo_name, issue.number)
+
+
+def _build_coordinator_event(
+    session_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+) -> PlanningEvent:
+    return PlanningEvent(session_id=session_id, event_type=event_type, payload=payload)
+
+
+def _build_project_summary(context_packs: dict[str, dict[str, Any]]) -> str:
+    repos = sorted(
+        {
+            f"{pack.get('repo_owner', 'unknown')}/{pack.get('repo_name', 'unknown')}"
+            for pack in context_packs.values()
+            if isinstance(pack, dict)
+        }
+    )
+    return (
+        f"coordinator summary for {len(repos)} repos, "
+        f"{len(context_packs)} total issues"
+    )
+
+
+def _issue_number_from_key(issue_key: str) -> int | None:
+    if "#" not in issue_key:
+        return None
+    suffix = issue_key.split("#", 1)[1]
+    if not suffix.isdigit():
+        return None
+    return int(suffix)
 
 
 class ManagerAgent:
     """Selects which issues should be started or resumed."""
 
-    def __init__(self) -> None:
+    def __init__(self, planning_store: PlanningStore | None = None) -> None:
         self.settings = get_settings()
         self._openai_key = resolve_openai_api_key(self.settings)
         self.model = self.settings.manager_agent_model or self.settings.codex_model
@@ -33,6 +85,7 @@ class ManagerAgent:
             self.settings.manager_agent_tool_loop_max_steps or _DEFAULT_TOOL_LOOP_MAX_STEPS
         )
         self._project_id: str | None = None
+        self._planning_store: PlanningStore | None = planning_store
         github_token = resolve_github_token(self.settings)
         self._api_client = GitHubAPIClient(github_token)
         self._projects_client = ProjectsV2Client(self._api_client)
@@ -42,6 +95,293 @@ class ManagerAgent:
             "",
             self._projects_client,
         )
+
+    def _resolve_project_session_key(self, project_slug: str | None = None) -> str:
+        return resolve_project_session_key(
+            explicit_project_session_key=project_slug,
+            project_slug=project_slug,
+            fallback_project_session_key=self.settings.agent_project_session_key,
+            github_project_name=self.settings.github_project_name,
+            gcp_project_id=self.settings.gcp_project_id,
+        )
+
+    def _coordinator_session_id(self, project_slug: str | None = None) -> str:
+        return f"{_COORDINATOR_SESSION_PREFIX}{self._resolve_project_session_key(project_slug)}"
+
+    async def _planning_store_or_error(self) -> PlanningStore:
+        if self._planning_store is None:
+            self._planning_store = build_planning_store(self.settings)
+        return self._planning_store
+
+    async def _load_coordinator_session(self, project_slug: str | None = None) -> PlanningSession:
+        project_session_key = self._coordinator_session_id(project_slug)
+        store = await self._planning_store_or_error()
+        session = await store.get_session(project_session_key)
+        if session is not None:
+            return session
+
+        now = datetime.now(UTC)
+        session = PlanningSession(
+            id=project_session_key,
+            project_slug=project_session_key,
+            request_text=_COORDINATOR_SESSION_REQUEST_TEXT,
+            status=_COORDINATOR_ACTIVE_STATUS,
+            intake_state={
+                _COORDINATOR_STATE_KEY: {
+                    "project_session_key": project_session_key,
+                    "project_slug": self._resolve_project_session_key(project_slug),
+                    "issue_order": [],
+                    "context_packs": {},
+                    "project_summary": "uninitialized",
+                    "updated_at": now.isoformat(),
+                }
+            },
+            created_at=now,
+            updated_at=now,
+        )
+        await store.create_session(session)
+        await store.append_event(
+            session.id,
+            _build_coordinator_event(
+                session.id,
+                "coordinator_session_created",
+                {
+                    "project_session_key": session.id,
+                },
+            ),
+        )
+        return session
+
+    async def _persist_coordinator_state(
+        self,
+        session: PlanningSession,
+        *,
+        project_slug: str | None,
+        issue_order: list[str],
+        context_packs: dict[str, dict[str, Any]],
+        category_counts: dict[str, int],
+        project_repositories: list[str],
+    ) -> None:
+        store = await self._planning_store_or_error()
+        incoming = session.intake_state.get(_COORDINATOR_STATE_KEY, {})
+        if not isinstance(incoming, dict):
+            incoming = {}
+
+        incoming.update(
+            {
+                "project_session_key": session.id,
+                "project_slug": self._resolve_project_session_key(project_slug),
+                "issue_order": issue_order,
+                "context_packs": context_packs,
+                "project_summary": _build_project_summary(context_packs),
+                "category_counts": category_counts,
+                "project_repositories": project_repositories,
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        session.intake_state[_COORDINATOR_STATE_KEY] = incoming
+        session.updated_at = datetime.now(UTC)
+        await store.update_session(session)
+        await store.append_event(
+            session.id,
+            _build_coordinator_event(
+                session.id,
+                _COORDINATOR_EVENT_NAME,
+                {
+                    "project_session_key": session.id,
+                    "issue_count": len(issue_order),
+                    "category_counts": category_counts,
+                },
+            ),
+        )
+
+    async def _build_context_pack(
+        self,
+        issue: Issue,
+        *,
+        category: str,
+        position: int,
+        total: int,
+        issue_order: list[str],
+        category_counts: dict[str, int],
+        project_repositories: list[str],
+        project_slug: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "issue_key": _format_issue_key(issue),
+            "project_session_key": self._coordinator_session_id(project_slug),
+            "project_slug": self._resolve_project_session_key(project_slug),
+            "category": category,
+            "position": position,
+            "total": total,
+            "issue_count_by_category": category_counts.copy(),
+            "project_repositories": project_repositories,
+            "preceding_issues": issue_order[:position - 1],
+            "following_issues": issue_order[position:],
+            "repo_owner": issue.repo_owner,
+            "repo_name": issue.repo_name,
+            "issue_title": issue.title,
+            "labels": issue.labels,
+            "generated_at": datetime.now(UTC).isoformat(),
+        }
+
+    async def build_project_plan(
+        self,
+        in_progress: list[Issue],
+        ready: list[Issue],
+        *,
+        project_slug: str | None = None,
+    ) -> tuple[list[tuple[Issue, str]], dict[str, dict[str, Any]]]:
+        """Build a project-coordinator view of work and persist durable state."""
+        if not in_progress and not ready:
+            return [], {}
+
+        ordered_items: list[tuple[Issue, str]] = []
+        work_meta_by_key: dict[str, dict[str, Any]] = {}
+        work_items: list[dict[str, Any]] = []
+        item_map: dict[str, Issue] = {}
+        in_progress_map: dict[str, Issue] = {}
+        ready_map: dict[str, Issue] = {}
+
+        for issue in in_progress:
+            key = _format_issue_key(issue)
+            in_progress_map[key] = issue
+            item_map[key] = issue
+            work_items.append({"category": "in_progress", "issue": issue, "key": key})
+
+        for issue in ready:
+            key = _format_issue_key(issue)
+            ready_map[key] = issue
+            item_map[key] = issue
+            work_items.append({"category": "ready", "issue": issue, "key": key})
+
+        ordered_keys = await self.order_work_items(work_items)
+        if not ordered_keys:
+            ordered_keys = list(in_progress_map.keys()) + list(ready_map.keys())
+
+        number_to_keys: dict[int, list[str]] = {}
+        for key, issue in item_map.items():
+            number_to_keys.setdefault(issue.number, []).append(key)
+
+        normalized_ordered_keys: list[str] = []
+        for key in ordered_keys:
+            if key in item_map:
+                normalized_ordered_keys.append(key)
+                continue
+
+            issue_number = _issue_number_from_key(key)
+            if issue_number is None:
+                continue
+
+            candidates = [
+                candidate
+                for candidate in number_to_keys.get(issue_number, [])
+                if candidate in item_map
+            ]
+            if len(candidates) == 1:
+                normalized_ordered_keys.append(candidates[0])
+        ordered_keys = normalized_ordered_keys
+
+        for key in ordered_keys:
+            issue = item_map.get(key)
+            if issue is None:
+                continue
+            if key not in in_progress_map and key not in ready_map:
+                continue
+            ordered_items.append((issue, key))
+            item_map.pop(key, None)
+
+        for key, issue in item_map.items():
+            ordered_items.append((issue, key))
+
+        ordered_keys = [key for _, key in ordered_items]
+        category_counts = {
+            "in_progress": len(in_progress),
+            "ready": len(ready),
+            "total": len(ordered_items),
+        }
+        project_repositories = sorted(
+            {
+                _issue_key(issue.repo_owner, issue.repo_name)
+                for issue, _ in ordered_items
+                if issue.repo_owner and issue.repo_name
+            }
+        )
+
+        context_packs: dict[str, dict[str, Any]] = {}
+        for index, (issue, key) in enumerate(ordered_items, start=1):
+            category = "ready"
+            if key in in_progress_map:
+                category = "in_progress"
+            elif key in ready_map:
+                category = "ready"
+
+            pack = await self._build_context_pack(
+                issue,
+                category=category,
+                position=index,
+                total=len(ordered_items),
+                issue_order=ordered_keys,
+                category_counts=category_counts,
+                project_repositories=project_repositories,
+                project_slug=project_slug,
+            )
+            context_packs[key] = pack
+            work_meta_by_key[key] = pack
+
+        session = await self._load_coordinator_session(project_slug)
+        await self._persist_coordinator_state(
+            session,
+            project_slug=project_slug,
+            issue_order=ordered_keys,
+            context_packs=context_packs,
+            project_repositories=project_repositories,
+            category_counts=category_counts,
+        )
+        return ordered_items, work_meta_by_key
+
+    async def build_issue_context_pack(
+        self,
+        issue: Issue,
+        *,
+        project_slug: str | None = None,
+    ) -> dict[str, Any]:
+        """Build context for a single issue run (standalone trigger path)."""
+        session = await self._load_coordinator_session(project_slug)
+        raw_state = session.intake_state.get(_COORDINATOR_STATE_KEY, {})
+        if not isinstance(raw_state, dict):
+            raw_state = {}
+
+        existing_order = raw_state.get("issue_order")
+        issue_order: list[str] = []
+        if isinstance(existing_order, list):
+            issue_order = [str(item) for item in existing_order]
+
+        issue_key = _format_issue_key(issue)
+        try:
+            position = issue_order.index(issue_key)
+            position_index = position
+        except ValueError:
+            position_index = -1
+
+        context = {
+            "issue_key": issue_key,
+            "project_session_key": session.id,
+            "project_slug": self._resolve_project_session_key(project_slug),
+            "category": "single",
+            "position": position_index + 1 if position_index >= 0 else 1,
+            "total": len(issue_order),
+            "issue_count_by_category": raw_state.get("category_counts", {}),
+            "project_repositories": raw_state.get("project_repositories", []),
+            "preceding_issues": issue_order[: max(position_index, 0)],
+            "following_issues": issue_order,
+            "repo_owner": issue.repo_owner,
+            "repo_name": issue.repo_name,
+            "issue_title": issue.title,
+            "labels": issue.labels,
+            "generated_at": datetime.now(UTC).isoformat(),
+        }
+        return context
 
     def _load_skill_text(self) -> str:
         path_value = self.settings.manager_skill_path
