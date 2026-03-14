@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -15,17 +16,210 @@ CLONE_DEPTH = 1
 CLONE_FILTER = "blob:none"
 
 
+def _normalize_segment(value: str) -> str:
+    """Normalize a string so it is safe to use as a workspace directory segment."""
+    safe = value.strip().replace(os.path.sep, "-")
+    return (
+        "".join(char if char.isalnum() or char in {"_", "-", "."} else "-" for char in safe).strip(
+            "-."
+        )
+        or "default"
+    )
+
+
+class WorkspaceProvider(ABC):
+    """Interface for workspace path resolution."""
+
+    def __init__(self, workspace_root: str | Path, project_session_key: str):
+        self.workspace_root = Path(workspace_root)
+        self.project_session_key = _normalize_segment(project_session_key)
+
+    @abstractmethod
+    def get_worktree_path(self, repo_name: str, issue_number: int) -> Path:
+        """Return the path for a repository-specific issue workspace."""
+
+    @abstractmethod
+    def get_task_path(self, task_id: str | int) -> Path:
+        """Return the per-task directory path."""
+
+    @abstractmethod
+    def get_shared_path(self) -> Path:
+        """Return the shared project-level directory path."""
+
+    @abstractmethod
+    def iter_issue_workspaces(self) -> list[tuple[str, int, Path]]:
+        """List known issue workspaces as (repo_name, issue_number, path)."""
+
+    @abstractmethod
+    def prepare_workspace(self, repo_name: str, issue_number: int) -> None:
+        """Create directories required for project/task execution."""
+
+
+class LegacyWorkspaceProvider(WorkspaceProvider):
+    """Legacy layout provider: ``<root>/worktrees/<repo>/<issue>``."""
+
+    def get_worktree_path(self, repo_name: str, issue_number: int) -> Path:
+        return self.workspace_root / "worktrees" / repo_name / str(issue_number)
+
+    def get_task_path(self, task_id: str | int) -> Path:
+        return self.workspace_root / "tasks" / str(task_id)
+
+    def get_shared_path(self) -> Path:
+        return self.workspace_root / "shared"
+
+    def iter_issue_workspaces(self) -> list[tuple[str, int, Path]]:
+        worktrees_root = self.workspace_root / "worktrees"
+        if not worktrees_root.exists():
+            return []
+        entries: list[tuple[str, int, Path]] = []
+        for repo_dir in worktrees_root.iterdir():
+            if not repo_dir.is_dir():
+                continue
+            for issue_dir in repo_dir.iterdir():
+                if not issue_dir.is_dir() or not issue_dir.name.isdigit():
+                    continue
+                entries.append((repo_dir.name, int(issue_dir.name), issue_dir))
+        return entries
+
+    def prepare_workspace(self, repo_name: str, issue_number: int) -> None:  # noqa: ARG002
+        self.get_shared_path().mkdir(parents=True, exist_ok=True)
+        self.get_task_path(issue_number).mkdir(parents=True, exist_ok=True)
+        self.get_worktree_path(repo_name, issue_number).parent.mkdir(parents=True, exist_ok=True)
+
+
+class ProjectWorkspaceProvider(WorkspaceProvider):
+    """Project-root layout provider with workspace state and task directories."""
+
+    def _project_root(self) -> Path:
+        return self.workspace_root / "projects" / self.project_session_key
+
+    def _repos_root(self) -> Path:
+        return self._project_root() / "repos"
+
+    def get_worktree_path(self, repo_name: str, issue_number: int) -> Path:
+        return self._repos_root() / repo_name / str(issue_number)
+
+    def get_task_path(self, task_id: str | int) -> Path:
+        return self._project_root() / "tasks" / str(task_id)
+
+    def get_shared_path(self) -> Path:
+        return self._project_root() / "shared"
+
+    def iter_issue_workspaces(self) -> list[tuple[str, int, Path]]:
+        repos_root = self._repos_root()
+        if not repos_root.exists():
+            return []
+        entries: list[tuple[str, int, Path]] = []
+        for repo_dir in repos_root.iterdir():
+            if not repo_dir.is_dir():
+                continue
+            for issue_dir in repo_dir.iterdir():
+                if not issue_dir.is_dir() or not issue_dir.name.isdigit():
+                    continue
+                entries.append((repo_dir.name, int(issue_dir.name), issue_dir))
+        return entries
+
+    def prepare_workspace(self, repo_name: str, issue_number: int) -> None:
+        self.get_shared_path().mkdir(parents=True, exist_ok=True)
+        self.get_task_path(issue_number).mkdir(parents=True, exist_ok=True)
+        self._repos_root().mkdir(parents=True, exist_ok=True)
+        self.get_worktree_path(repo_name, issue_number).parent.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_project_session_key(
+    *,
+    explicit_project_session_key: str | None,
+    project_slug: str | None = None,
+    fallback_project_session_key: str | None = None,
+    github_project_name: str | None = None,
+    gcp_project_id: str | None = None,
+) -> str:
+    """Resolve the project session key from configured values."""
+    candidates = [
+        explicit_project_session_key,
+        fallback_project_session_key,
+        project_slug,
+        github_project_name,
+        gcp_project_id,
+    ]
+    for candidate in candidates:
+        if candidate and str(candidate).strip():
+            return _normalize_segment(str(candidate))
+    return "default"
+
+
+def build_workspace_provider(
+    workspace_root: str | Path,
+    provider_name: str = "legacy",
+    *,
+    project_session_key: str | None = None,
+    project_slug: str | None = None,
+    fallback_project_session_key: str | None = None,
+    github_project_name: str | None = None,
+    gcp_project_id: str | None = None,
+) -> WorkspaceProvider:
+    """Build the active workspace provider from configuration values."""
+    mode = (provider_name or "legacy").strip().lower()
+    key = resolve_project_session_key(
+        explicit_project_session_key=project_session_key,
+        project_slug=project_slug,
+        fallback_project_session_key=fallback_project_session_key,
+        github_project_name=github_project_name,
+        gcp_project_id=gcp_project_id,
+    )
+
+    if mode in {"legacy", "legacy-workspace", "legacy_workspace"}:
+        return LegacyWorkspaceProvider(workspace_root, key)
+    if mode in {"project", "project-root", "project_root"}:
+        return ProjectWorkspaceProvider(workspace_root, key)
+
+    raise ValueError(f"❌ ERROR: invalid workspace provider '{provider_name}'")
+
+
 class GitOps:
     """Manages git operations for agent workspaces."""
 
-    def __init__(self, workspace_root: str):
+    def __init__(
+        self,
+        workspace_root: str,
+        workspace_provider: WorkspaceProvider | None = None,
+        project_session_key: str | None = None,
+    ):
         """Initialize git operations.
 
         Args:
             workspace_root: Root directory for all workspaces
         """
-        self.workspace_root = Path(workspace_root)
+        provider = workspace_provider
+        if provider is None:
+            provider = build_workspace_provider(
+                workspace_root=workspace_root,
+                provider_name="legacy",
+                project_session_key=project_session_key,
+            )
+        self.workspace_root = provider.workspace_root
+        self.workspace_provider = provider
         self.workspace_root.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: object,
+        project_session_key: str | None = None,
+    ) -> "GitOps":
+        """Create ``GitOps`` with provider configuration from settings."""
+        return cls(
+            workspace_root=getattr(settings, "agent_workspace_root", ""),
+            workspace_provider=build_workspace_provider(
+                workspace_root=getattr(settings, "agent_workspace_root", ""),
+                provider_name=getattr(settings, "agent_workspace_provider", "legacy"),
+                project_session_key=project_session_key,
+                project_slug=getattr(settings, "project_slug", None),
+                fallback_project_session_key=getattr(settings, "agent_project_session_key", None),
+                github_project_name=getattr(settings, "github_project_name", ""),
+                gcp_project_id=getattr(settings, "gcp_project_id", ""),
+            ),
+        )
 
     def get_worktree_path(self, repo_name: str, issue_number: int) -> Path:
         """Get the worktree path for an issue.
@@ -37,7 +231,19 @@ class GitOps:
         Returns:
             Path to the worktree
         """
-        return self.workspace_root / "worktrees" / repo_name / str(issue_number)
+        return self.workspace_provider.get_worktree_path(repo_name, issue_number)
+
+    def get_task_path(self, task_id: str | int) -> Path:
+        """Get task directory for an issue/task ID."""
+        return self.workspace_provider.get_task_path(task_id)
+
+    def get_shared_path(self) -> Path:
+        """Get shared project-level path for the active workspace provider."""
+        return self.workspace_provider.get_shared_path()
+
+    def list_issue_workspaces(self) -> list[tuple[str, int, Path]]:
+        """List active issue workspaces."""
+        return self.workspace_provider.iter_issue_workspaces()
 
     def get_branch_name(self, issue_number: int, slug: str) -> str:
         """Get the branch name for an issue.

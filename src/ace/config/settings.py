@@ -34,6 +34,21 @@ class Settings(BaseSettings):
     # Appforge MCP (enabled when URL is provided)
     appforge_mcp_url: str = os.getenv("APPFORGE_MCP_URL", "")
     appforge_mcp_server_name: str = os.getenv("APPFORGE_MCP_SERVER_NAME", "appforge-mcp-server")
+    issue_tracker_backend: str = os.getenv("ISSUE_TRACKER_BACKEND", "github").lower()
+
+    # Linear tracker integration
+    linear_api_url: str = os.getenv("LINEAR_API_URL", "https://api.linear.app/graphql")
+    linear_api_key: str = os.getenv("LINEAR_API_KEY", "")
+    linear_api_key_secret_name: str = os.getenv("LINEAR_API_KEY_SECRET_NAME", "linear-api-key")
+    linear_api_key_secret_version: str = os.getenv("LINEAR_API_KEY_SECRET_VERSION", "latest")
+    linear_team_name: str = os.getenv("LINEAR_TEAM_NAME", "")
+    linear_default_project_name: str = os.getenv("LINEAR_DEFAULT_PROJECT_NAME", "")
+    linear_default_repo_owner: str = os.getenv("LINEAR_DEFAULT_REPO_OWNER", "")
+    linear_default_repo_name: str = os.getenv("LINEAR_DEFAULT_REPO_NAME", "")
+    linear_ready_status: str = os.getenv("LINEAR_READY_STATUS", "Ready")
+    linear_in_progress_status: str = os.getenv("LINEAR_IN_PROGRESS_STATUS", "In Progress")
+    linear_blocked_status: str = os.getenv("LINEAR_BLOCKED_STATUS", "Blocked")
+    linear_done_status: str = os.getenv("LINEAR_DONE_STATUS", "Done")
 
     # OpenAI / Codex
     openai_api_key: str = os.getenv("APPFORGE_OPENAI_API_KEY", "")
@@ -90,6 +105,8 @@ class Settings(BaseSettings):
 
     # Agent workspace
     agent_workspace_root: str = os.getenv("AGENT_WORKSPACE_ROOT", "/tmp/agent-hq")
+    agent_workspace_provider: str = os.getenv("AGENT_WORKSPACE_PROVIDER", "legacy")
+    agent_project_session_key: str = os.getenv("AGENT_PROJECT_SESSION_KEY", "")
     agent_id: str = os.getenv("AGENT_ID", "ace-default")
     agent_execution_mode: str = os.getenv("AGENT_EXECUTION_MODE", "tmux")
 

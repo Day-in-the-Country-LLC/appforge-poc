@@ -3,42 +3,37 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from datetime import UTC, datetime
 
 from ace.config.settings import get_settings
 from ace.github.api_client import GitHubAPIClient
 from ace.github.issue_queue import Issue
-from ace.github.work_items import WorkItemTracker, WorkBoardItem, build_github_work_item_tracker
 from ace.github.status_manager import IssueStatus
+from ace.github.work_items import WorkBoardItem, WorkItemTracker
+from ace.issue_tracking import build_work_item_tracker
 from ace.pr_review.job_store import (
     build_pr_review_job_record,
     build_pr_review_job_store,
 )
 from ace.pr_review.pubsub_queue import PRReviewJob, PRReviewPubSubQueue
 from ace.runners.agent_pool import AgentTarget, get_pool
+from ace.webhooks.event_router import WorkEvent, WorkEventRouter
+from ace.webhooks.github_app import GitHubAppAuth
 from ace.webhooks.lifecycle import (
     STAGE_PR_REVIEW_ENQUEUED,
     STAGE_PR_REVIEW_ERROR,
     STAGE_PR_REVIEW_SKIPPED,
     STAGE_PR_REVIEW_STARTED,
 )
-from ace.webhooks.github_app import GitHubAppAuth
-from ace.webhooks.event_router import WorkEvent, WorkEventRouter
 
 logger = structlog.get_logger(__name__)
 
 
-@dataclass(frozen=True)
-class StatusTransition:
-    from_status: str | None
-    to_status: str | None
-
-
 class WebhookHandler:
-    """Dispatch and handle GitHub webhook events."""
+    """Dispatch and handle webhook events."""
 
     def __init__(
         self,
@@ -67,6 +62,9 @@ class WebhookHandler:
             payload=payload,
             delivery=delivery,
         )
+        if work_event is None:
+            logger.info("webhook_ignored", event=event, delivery=delivery)
+            return {"status": "ignored", "event": event}
 
         handler = {
             "projects_v2_item": self._handle_projects_v2_item,
@@ -74,6 +72,7 @@ class WebhookHandler:
             "issues": self._handle_issue_event,
             "pull_request": self._handle_pull_request_event,
         }.get(work_event.event_type)
+
         if handler is None or not work_event.is_supported:
             logger.info(
                 "webhook_ignored",
@@ -91,7 +90,7 @@ class WebhookHandler:
                 workflow_id=workflow_id,
             )
 
-        return await handler(payload, delivery)  # type: ignore[misc]
+        return await handler(payload, delivery)
 
     async def _handle_projects_v2_item(
         self, payload: dict[str, Any], delivery: str | None
@@ -100,10 +99,27 @@ class WebhookHandler:
         token = await self.app_auth.get_installation_token(installation_id)
 
         async with GitHubAPIClient(token.token) as api_client:
-            tracker = build_github_work_item_tracker(api_client, self.settings.github_org, "")
-            project_id = await _resolve_project_id(payload, tracker, self.settings)
+            tracker = build_work_item_tracker(
+                api_client=api_client,
+                owner=self.settings.github_org,
+                repo="",
+            )
+            item = _extract_projects_item(payload)
+            item_node_id = _extract_item_node_id(item)
+            project_name = (
+                _extract_project_name(payload)
+                or self._default_project_name()
+            )
+            project_id = await tracker.get_project_id(project_name)
+            if not project_id:
+                raise ValueError("❌ ERROR: Project not found")
+
             event_project_id = _extract_project_node_id(payload)
-            if event_project_id and event_project_id != project_id:
+            if (
+                self.settings.issue_tracker_backend.lower() == "github"
+                and event_project_id
+                and event_project_id != project_id
+            ):
                 logger.info(
                     "project_item_ignored_wrong_project",
                     event_project_id=event_project_id,
@@ -111,8 +127,6 @@ class WebhookHandler:
                     delivery=delivery,
                 )
                 return {"status": "ignored", "reason": "wrong_project"}
-            item = _extract_projects_item(payload)
-            item_node_id = _extract_item_node_id(item)
 
             project_item: WorkBoardItem | None = None
             if item_node_id:
@@ -124,7 +138,9 @@ class WebhookHandler:
                     raise ValueError("❌ ERROR: project item missing content node id")
                 issue_info = await _fetch_issue_info(api_client, content_node_id)
                 if issue_info is None:
-                    raise ValueError("❌ ERROR: unable to resolve issue from project item")
+                    raise ValueError(
+                        "❌ ERROR: unable to resolve issue from project item"
+                    )
                 item_id = await tracker.get_item_id_for_issue(
                     project_id,
                     issue_info.number,
@@ -153,7 +169,7 @@ class WebhookHandler:
                     tracker,
                     IssueStatus.READY,
                     check_blockers=True,
-                    project_name=self.settings.github_project_name,
+                    project_name=project_name,
                     delivery=delivery,
                 )
 
@@ -163,7 +179,7 @@ class WebhookHandler:
                     tracker,
                     IssueStatus.IN_PROGRESS,
                     check_blockers=True,
-                    project_name=self.settings.github_project_name,
+                    project_name=project_name,
                     delivery=delivery,
                 )
 
@@ -188,27 +204,29 @@ class WebhookHandler:
             logger.info("issue_comment_not_pr", delivery=delivery)
             return {"status": "ignored", "reason": "not_pr"}
 
-        issue = _extract_issue_from_payload(payload)
-        if issue is None:
+        issue_info = _extract_issue_from_payload(payload)
+        if issue_info is None:
             raise ValueError("❌ ERROR: issue_comment payload missing issue metadata")
 
-        installation_id = _extract_installation_id(payload)
-        token = await self.app_auth.get_installation_token(installation_id)
-
-        async with GitHubAPIClient(token.token) as api_client:
-            tracker = build_github_work_item_tracker(api_client, self.settings.github_org, "")
+        api_client = await self._get_github_api_client(payload)
+        async with api_client:
+            tracker = build_work_item_tracker(
+                api_client=api_client,
+                owner=self.settings.github_org,
+                repo="",
+            )
             full_issue = await tracker.get_issue(
-                issue.number,
-                repo_owner=issue.repo_owner,
-                repo_name=issue.repo_name,
+                issue_info.number,
+                repo_owner=issue_info.repo_owner,
+                repo_name=issue_info.repo_name,
             )
             result = await _trigger_specific_issue(full_issue, check_blockers=False)
             return {
                 "status": "triggered",
                 "action": "pr_comment",
                 "result": result,
-                "issue": issue.number,
-                "repo": f"{issue.repo_owner}/{issue.repo_name}",
+                "issue": issue_info.number,
+                "repo": f"{issue_info.repo_owner}/{issue_info.repo_name}",
             }
 
     async def _handle_issue_event(
@@ -223,13 +241,16 @@ class WebhookHandler:
         if closed_issue is None:
             raise ValueError("❌ ERROR: issues payload missing issue metadata")
 
-        installation_id = _extract_installation_id(payload)
-        token = await self.app_auth.get_installation_token(installation_id)
-
-        async with GitHubAPIClient(token.token) as api_client:
-            tracker = build_github_work_item_tracker(api_client, self.settings.github_org, "")
+        api_client = await self._get_github_api_client(payload)
+        async with api_client:
+            tracker = build_work_item_tracker(
+                api_client=api_client,
+                owner=self.settings.github_org,
+                repo="",
+            )
+            project_name = self._default_project_name()
             ready_issues = await tracker.list_issues_by_project_status(
-                self.settings.github_project_name,
+                project_name,
                 IssueStatus.READY.value,
             )
 
@@ -256,7 +277,7 @@ class WebhookHandler:
                 not_done = await _blockers_not_done(
                     tracker,
                     blockers,
-                    self.settings.github_project_name,
+                    project_name,
                 )
                 if not_done:
                     logger.info(
@@ -274,6 +295,9 @@ class WebhookHandler:
                         "result": result,
                     }
                 )
+
+            if not triggered:
+                return {"status": "ignored", "reason": "no_trigger_candidates"}
 
             return {
                 "status": "triggered",
@@ -475,6 +499,15 @@ class WebhookHandler:
             self.pr_review_store = build_pr_review_job_store(self.settings)
         return self.pr_review_store
 
+    def _default_project_name(self) -> str:
+        if self.settings.issue_tracker_backend.lower() == "linear":
+            return self.settings.linear_default_project_name or self.settings.github_project_name
+        return self.settings.github_project_name
+
+    async def _get_github_api_client(self, payload: dict[str, Any]) -> GitHubAPIClient:
+        installation_id = _extract_installation_id(payload)
+        token = await self.app_auth.get_installation_token(installation_id)
+        return GitHubAPIClient(token.token)
 
 
 @dataclass(frozen=True)
@@ -494,57 +527,12 @@ class PullRequestInfo:
     is_draft: bool
 
 
-def _extract_projects_item(payload: dict[str, Any]) -> dict[str, Any]:
-    item = payload.get("projects_v2_item") or payload.get("project_v2_item")
-    if not item:
-        raise ValueError("❌ ERROR: webhook payload missing projects_v2_item")
-    return item
-
-
 def _extract_installation_id(payload: dict[str, Any]) -> int:
     installation = payload.get("installation") or {}
     installation_id = installation.get("id")
     if not installation_id:
         raise ValueError("❌ ERROR: webhook payload missing installation id")
     return int(installation_id)
-
-
-def _extract_item_node_id(item: dict[str, Any]) -> str | None:
-    for key in ("node_id", "nodeId", "item_node_id", "itemNodeId"):
-        value = item.get(key)
-        if isinstance(value, str) and value:
-            return value
-    value = item.get("id")
-    if isinstance(value, str) and value and not value.isdigit():
-        return value
-    return None
-
-
-def _extract_project_node_id(payload: dict[str, Any]) -> str | None:
-    item = payload.get("projects_v2_item") or payload.get("project_v2_item") or {}
-    for key in ("project_node_id", "projectNodeId", "project_id", "projectId"):
-        value = item.get(key)
-        if isinstance(value, str) and value:
-            return value
-    project = payload.get("project") or {}
-    for key in ("node_id", "nodeId", "id"):
-        value = project.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
-def _extract_content_node_id(item: dict[str, Any]) -> str | None:
-    for key in ("content_node_id", "contentNodeId"):
-        value = item.get(key)
-        if isinstance(value, str) and value:
-            return value
-    content = item.get("content") or {}
-    for key in ("node_id", "nodeId", "id"):
-        value = content.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
 
 
 async def _fetch_issue_info(api_client: GitHubAPIClient, node_id: str) -> IssueInfo | None:
@@ -578,29 +566,115 @@ async def _fetch_issue_info(api_client: GitHubAPIClient, node_id: str) -> IssueI
     return IssueInfo(number=int(number), repo_owner=owner["login"], repo_name=repo["name"])
 
 
-async def _resolve_project_id(
-    payload: dict[str, Any],
-    tracker: WorkItemTracker,
-    settings,
-) -> str:
+def _extract_projects_item(payload: dict[str, Any]) -> dict[str, Any]:
+    item = payload.get("projects_v2_item") or payload.get("project_v2_item")
+    if not item:
+        raise ValueError("❌ ERROR: webhook payload missing projects_v2_item")
+    if not isinstance(item, dict):
+        raise ValueError("❌ ERROR: webhook payload missing projects_v2_item")
+    return item
+
+
+def _extract_issue_from_payload(payload: dict[str, Any]) -> IssueInfo | None:
+    issue = payload.get("issue") or {}
+    number = issue.get("number")
+    repo = payload.get("repository") or {}
+    owner = (repo.get("owner") or {}).get("login")
+    name = repo.get("name")
+    if not number or not owner or not name:
+        return None
+    return IssueInfo(number=int(number), repo_owner=owner, repo_name=name)
+
+
+@dataclass(frozen=True)
+class StatusTransition:
+    from_status: str | None
+    to_status: str | None
+
+
+def _extract_project_node_id(payload: dict[str, Any]) -> str | None:
     item = payload.get("projects_v2_item") or payload.get("project_v2_item") or {}
     for key in ("project_node_id", "projectNodeId", "project_id", "projectId"):
         value = item.get(key)
         if isinstance(value, str) and value:
             return value
-    project_id = await tracker.get_project_id(settings.github_project_name)
-    if not project_id:
-        raise ValueError("❌ ERROR: GitHub Project not found")
-    return project_id
+    project = payload.get("project") or {}
+    for key in ("node_id", "nodeId", "id"):
+        value = project.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _extract_project_name(payload: dict[str, Any]) -> str | None:
+    item = payload.get("project") or {}
+    if isinstance(item, dict):
+        return _extract_project_title(item)
+    project = payload.get("projects_v2_item") or payload.get("project_v2_item") or {}
+    if isinstance(project, dict):
+        return _extract_project_title(project)
+    return None
+
+
+def _extract_project_title(project: dict[str, Any]) -> str | None:
+    for key in ("title", "name", "project_title", "projectName"):
+        value = project.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _extract_item_node_id(item: dict[str, Any]) -> str | None:
+    for key in ("node_id", "nodeId", "item_node_id", "itemNodeId", "id"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _extract_content_node_id(item: dict[str, Any]) -> str | None:
+    value = item.get("content_node_id") or item.get("contentNodeId")
+    if isinstance(value, str) and value:
+        return value
+    content = item.get("content") or {}
+    if not isinstance(content, dict):
+        return None
+    value = content.get("node_id") or content.get("nodeId") or content.get("id")
+    return value if isinstance(value, str) and value else None
+
+
+def _extract_pull_request_from_payload(payload: dict[str, Any]) -> PullRequestInfo | None:
+    pr = payload.get("pull_request") or {}
+    repo = payload.get("repository") or {}
+    number = pr.get("number")
+    owner = (repo.get("owner") or {}).get("login")
+    name = repo.get("name")
+    head = pr.get("head") or {}
+    head_sha = head.get("sha")
+    base = pr.get("base") or {}
+    base_ref = base.get("ref")
+    if not number or not owner or not name or not head_sha or not base_ref:
+        return None
+    draft = bool(pr.get("draft", False))
+    return PullRequestInfo(
+        number=int(number),
+        repo_owner=owner,
+        repo_name=name,
+        head_sha=str(head_sha),
+        base_ref=str(base_ref),
+        is_draft=draft,
+    )
 
 
 def _extract_status_transition(payload: dict[str, Any]) -> StatusTransition | None:
     changes = payload.get("changes") or {}
+    if not isinstance(changes, dict):
+        return None
     field_value = changes.get("field_value") or changes.get("fieldValue") or {}
-    if not field_value:
+    if not isinstance(field_value, dict):
         return None
     field_name = field_value.get("field_name") or field_value.get("fieldName")
-    if field_name and field_name.lower() != "status":
+    if field_name and str(field_name).lower() != "status":
         return None
     from_value = field_value.get("from") or field_value.get("from_value")
     to_value = field_value.get("to") or field_value.get("to_value")
@@ -634,40 +708,6 @@ def _is_in_progress_transition(transition: StatusTransition) -> bool:
     return (transition.from_status or "").lower() == "blocked" and (
         transition.to_status or ""
     ).lower() == "in progress"
-
-
-def _extract_issue_from_payload(payload: dict[str, Any]) -> IssueInfo | None:
-    issue = payload.get("issue") or {}
-    number = issue.get("number")
-    repo = payload.get("repository") or {}
-    owner = (repo.get("owner") or {}).get("login")
-    name = repo.get("name")
-    if not number or not owner or not name:
-        return None
-    return IssueInfo(number=int(number), repo_owner=owner, repo_name=name)
-
-
-def _extract_pull_request_from_payload(payload: dict[str, Any]) -> PullRequestInfo | None:
-    pr = payload.get("pull_request") or {}
-    repo = payload.get("repository") or {}
-    number = pr.get("number")
-    owner = (repo.get("owner") or {}).get("login")
-    name = repo.get("name")
-    head = pr.get("head") or {}
-    head_sha = head.get("sha")
-    base = pr.get("base") or {}
-    base_ref = base.get("ref")
-    if not number or not owner or not name or not head_sha or not base_ref:
-        return None
-    draft = bool(pr.get("draft", False))
-    return PullRequestInfo(
-        number=int(number),
-        repo_owner=owner,
-        repo_name=name,
-        head_sha=str(head_sha),
-        base_ref=str(base_ref),
-        is_draft=draft,
-    )
 
 
 def _build_pr_review_idempotency_key(

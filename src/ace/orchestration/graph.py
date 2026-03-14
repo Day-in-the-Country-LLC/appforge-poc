@@ -18,10 +18,7 @@ from ace.config.secrets import resolve_github_token
 from ace.config.settings import get_settings
 from ace.github.api_client import GitHubAPIClient
 from ace.github.status_manager import StatusManager
-from ace.github.work_items import (
-    build_github_work_item_enricher,
-    build_github_work_item_tracker,
-)
+from ace.issue_tracking import build_work_item_enricher, build_work_item_tracker
 from ace.logging_utils import log_key_event
 from ace.notifications.slack_client import SlackNotifier, format_completion_message
 from ace.orchestration.session_runtime import (
@@ -74,12 +71,12 @@ async def claim_issue(state: WorkerState) -> WorkerState:
         try:
             settings = get_settings()
             api_client = _get_api_client(settings)
-            tracker = build_github_work_item_tracker(
+            tracker = build_work_item_tracker(
                 api_client,
                 settings.github_org,
                 "",
             )
-            enricher = build_github_work_item_enricher(
+            enricher = build_work_item_enricher(
                 api_client,
                 settings.github_org,
                 "",
@@ -161,7 +158,11 @@ async def run_agent(state: WorkerState) -> WorkerState:
     if not repo_owner or not repo_name:
         raise ValueError("missing repo owner/name for worktree creation")
 
-    git_ops = GitOps(settings.agent_workspace_root)
+    project_session_key = state.metadata.get("project_session_key") or state.metadata.get("project_slug")
+    if hasattr(GitOps, "from_settings"):
+        git_ops = GitOps.from_settings(settings, project_session_key=project_session_key)
+    else:  # pragma: no cover - compatibility fallback
+        git_ops = GitOps(settings.agent_workspace_root)
     worktree_path = git_ops.get_worktree_path(repo_name, state.issue_number)
     if not worktree_path.exists():
         repo_url = _build_repo_url(repo_owner, repo_name, github_token)
