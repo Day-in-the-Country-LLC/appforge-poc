@@ -161,7 +161,11 @@ async def run_agent(state: WorkerState) -> WorkerState:
     if not repo_owner or not repo_name:
         raise ValueError("missing repo owner/name for worktree creation")
 
-    git_ops = GitOps(settings.agent_workspace_root)
+    project_session_key = state.metadata.get("project_session_key") or state.metadata.get("project_slug")
+    if hasattr(GitOps, "from_settings"):
+        git_ops = GitOps.from_settings(settings, project_session_key=project_session_key)
+    else:  # pragma: no cover - compatibility fallback
+        git_ops = GitOps(settings.agent_workspace_root)
     worktree_path = git_ops.get_worktree_path(repo_name, state.issue_number)
     if not worktree_path.exists():
         repo_url = _build_repo_url(repo_owner, repo_name, github_token)

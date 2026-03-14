@@ -51,6 +51,8 @@ GCP_PROJECT_ID=your-gcp-project-id
 GCP_CREDENTIALS_FILE=gcp-credentials.json
 
 AGENT_WORKSPACE_ROOT=/tmp/agent-hq
+AGENT_WORKSPACE_PROVIDER=legacy
+AGENT_PROJECT_SESSION_KEY=
 AGENT_ID=ace-dev
 AGENT_EXECUTION_MODE=subprocess
 WEBHOOK_SERVICE_ROLE=both
@@ -129,6 +131,12 @@ Inspect issue artifacts directly from the worktree:
 ```bash
 ls -la /tmp/agent-hq/worktrees/<repo>/<issue>/
 cat /tmp/agent-hq/worktrees/<repo>/<issue>/ACE_TASK_DONE.json
+```
+
+For project-root sessions, the worktree path becomes:
+
+```bash
+/tmp/agent-hq/projects/<project_session>/repos/<repo>/<issue>/
 ```
 
 Use service or local runner logs to inspect CLI stderr/stdout and timeout failures.

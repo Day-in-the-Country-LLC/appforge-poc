@@ -6,7 +6,6 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
 import structlog
@@ -1203,12 +1202,11 @@ class AgentPool:
         await self._cleanup_stale_resources()
 
     async def _cleanup_stale_resources(self) -> None:
-        worktrees_root = Path(self.settings.agent_workspace_root) / "worktrees"
-        if not worktrees_root.exists():
-            return
-
         tmux = TmuxOps()
-        git_ops = GitOps(self.settings.agent_workspace_root)
+        if hasattr(GitOps, "from_settings"):
+            git_ops = GitOps.from_settings(self.settings)
+        else:  # pragma: no cover - compatibility fallback
+            git_ops = GitOps(self.settings.agent_workspace_root)
         active_issues = {
             slot.issue.number
             for slot in self.slots
@@ -1223,40 +1221,33 @@ class AgentPool:
         retention = timedelta(hours=self.settings.cleanup_worktree_retention_hours)
         now = datetime.utcnow()
 
-        for repo_dir in worktrees_root.iterdir():
-            if not repo_dir.is_dir():
+        for repo_name, issue_number, issue_dir in git_ops.list_issue_workspaces():
+            if issue_number in active_issues:
                 continue
-            for issue_dir in repo_dir.iterdir():
-                if not issue_dir.is_dir() or not issue_dir.name.isdigit():
-                    continue
 
-                issue_number = int(issue_dir.name)
-                if issue_number in active_issues:
-                    continue
+            session_name = session_name_for_issue(repo_name, issue_number)
+            if tmux.session_exists(session_name):
+                continue
+            if self.settings.cleanup_only_done:
+                # Without task status, skip cleanup when only_done is enforced
+                continue
 
-                session_name = session_name_for_issue(repo_dir.name, issue_number)
-                if tmux.session_exists(session_name):
-                    continue
-                if self.settings.cleanup_only_done:
-                    # Without task status, skip cleanup when only_done is enforced
-                    continue
+            last_activity = issue_dir.stat().st_mtime
+            tasks_path = issue_dir / "ace_tasks.json"
+            if tasks_path.exists():
+                last_activity = max(last_activity, tasks_path.stat().st_mtime)
 
-                last_activity = issue_dir.stat().st_mtime
-                tasks_path = issue_dir / "ace_tasks.json"
-                if tasks_path.exists():
-                    last_activity = max(last_activity, tasks_path.stat().st_mtime)
+            age = now - datetime.utcfromtimestamp(last_activity)
+            if age < retention:
+                continue
 
-                age = now - datetime.utcfromtimestamp(last_activity)
-                if age < retention:
-                    continue
-
-                logger.info(
-                    "cleanup_worktree",
-                    repo=repo_dir.name,
-                    issue=issue_number,
-                    age_hours=round(age.total_seconds() / 3600, 2),
-                )
-                await git_ops.cleanup_worktree(issue_dir)
+            logger.info(
+                "cleanup_worktree",
+                repo=repo_name,
+                issue=issue_number,
+                age_hours=round(age.total_seconds() / 3600, 2),
+            )
+            await git_ops.cleanup_worktree(issue_dir)
 
         if not self.settings.cleanup_tmux_enabled:
             return
@@ -1272,7 +1263,7 @@ class AgentPool:
             parsed = parse_issue_from_session(session_name)
             if parsed:
                 repo_slug, issue_number = parsed
-                worktree_path = worktrees_root / repo_slug / str(issue_number)
+                worktree_path = git_ops.get_worktree_path(repo_slug, issue_number)
                 if worktree_path.exists() and self.settings.cleanup_only_done:
                     continue
 

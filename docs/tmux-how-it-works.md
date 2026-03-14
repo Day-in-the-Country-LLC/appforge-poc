@@ -6,7 +6,8 @@ CLI agents run as non-interactive subprocesses.
 ## 1) Where work runs
 
 - Workspace root is `AGENT_WORKSPACE_ROOT` (default: `/tmp/agent-hq`).
-- Each issue runs in `/tmp/agent-hq/worktrees/<repo>/<issue>/`.
+- Legacy layout uses `/tmp/agent-hq/worktrees/<repo>/<issue>/`.
+- Project layout uses `AGENT_WORKSPACE_PROVIDER=project`, which maps to `/tmp/agent-hq/projects/<project_session>/repos/<repo>/<issue>/`.
 - `ACE_TASK.md` is written before CLI spawn and must be present.
 
 ## 2) How the CLI is invoked

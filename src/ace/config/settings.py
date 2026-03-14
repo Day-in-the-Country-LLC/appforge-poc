@@ -90,6 +90,8 @@ class Settings(BaseSettings):
 
     # Agent workspace
     agent_workspace_root: str = os.getenv("AGENT_WORKSPACE_ROOT", "/tmp/agent-hq")
+    agent_workspace_provider: str = os.getenv("AGENT_WORKSPACE_PROVIDER", "legacy")
+    agent_project_session_key: str = os.getenv("AGENT_PROJECT_SESSION_KEY", "")
     agent_id: str = os.getenv("AGENT_ID", "ace-default")
     agent_execution_mode: str = os.getenv("AGENT_EXECUTION_MODE", "tmux")
 
