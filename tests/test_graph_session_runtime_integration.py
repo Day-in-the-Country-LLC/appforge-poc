@@ -13,6 +13,22 @@ from ace.orchestration.session_runtime import SessionTurnType
 from ace.orchestration.state import WorkerState
 
 
+class _BoundLogger:
+    def __init__(self, events: list[dict[str, object]]) -> None:
+        self._events = events
+        self._bound = {}
+
+    def bind(self, **kwargs):
+        child = _BoundLogger(self._events)
+        child._bound = {**self._bound, **kwargs}
+        return child
+
+    def info(self, event_name: str, **fields: object) -> None:
+        merged = {**self._bound}
+        merged.update(fields)
+        self._events.append({"event_name": event_name, "fields": merged})
+
+
 def _build_issue() -> SimpleNamespace:
     return SimpleNamespace(
         number=123,
@@ -213,3 +229,112 @@ async def test_run_agent_uses_retry_turn_type_for_restarts(
     _, _, previous_result = captured_runner.run_calls[0]
     assert previous_result is not None
     assert previous_result.error == "Need to continue from prior output."
+
+
+@pytest.mark.asyncio
+async def test_run_agent_emits_session_lifecycle_events(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured_builder = _BuilderProbe()
+    captured_runner = _RunnerProbe(backend="codex")
+
+    events: list[dict[str, object]] = []
+    logger = _BoundLogger(events)
+    old_logger = graph.logger
+    graph.logger = logger
+
+    def _build_runner(backend: str, model: str | None = None) -> _RunnerProbe:
+        captured_runner.backend = backend
+        captured_runner.model = model
+        return captured_runner
+
+    try:
+        monkeypatch.setattr(graph, "GitOps", _DummyGitOps)
+        monkeypatch.setattr(graph, "get_settings", lambda: _TrackingSettings(str(tmp_path)))
+        monkeypatch.setattr(graph, "resolve_github_token", lambda _settings: "token")
+        monkeypatch.setattr(graph, "SessionInstructionBuilder", lambda: captured_builder)
+        monkeypatch.setattr(graph, "build_session_runner", _build_runner)
+
+        state = WorkerState(issue=_build_issue(), issue_number=123, agent_id="agent-1")
+        state.metadata["repo_owner"] = "acme"
+        state.metadata["repo_name"] = "widget"
+        state.metadata["source"] = "github"
+
+        result_state = await graph.run_agent(state)
+
+        assert result_state.agent_result is not None
+        session_events = [
+            event for event in events if event["event_name"] == "session_lifecycle"
+        ]
+        stages = [event["fields"]["stage"] for event in session_events]
+        assert stages[:3] == [
+            "session_start",
+            "session_turn_start",
+            "session_turn_complete",
+        ]
+        first = session_events[0]["fields"]
+        assert first["source"] == "github"
+        assert first["issue_key"] == "acme/widget#123"
+        assert first["turn_number"] == 1
+    finally:
+        graph.logger = old_logger
+
+
+@pytest.mark.asyncio
+async def test_run_agent_emits_session_resume_and_stall(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured_builder = _BuilderProbe()
+    captured_runner = _RunnerProbe(backend="codex")
+    captured_runner.request_input_result = True
+
+    events: list[dict[str, object]] = []
+    logger = _BoundLogger(events)
+    old_logger = graph.logger
+    graph.logger = logger
+
+    def _build_runner(backend: str, model: str | None = None) -> _RunnerProbe:
+        captured_runner.backend = backend
+        captured_runner.model = model
+        return captured_runner
+
+    try:
+        monkeypatch.setattr(graph, "GitOps", _DummyGitOps)
+        monkeypatch.setattr(graph, "get_settings", lambda: _TrackingSettings(str(tmp_path)))
+        monkeypatch.setattr(graph, "resolve_github_token", lambda _settings: "token")
+        monkeypatch.setattr(graph, "SessionInstructionBuilder", lambda: captured_builder)
+        monkeypatch.setattr(graph, "build_session_runner", _build_runner)
+
+        state = WorkerState(
+            issue=_build_issue(),
+            issue_number=123,
+            agent_id="agent-1",
+            session_turn=2,
+            retry_count=1,
+            previous_output="Need to continue from prior output.",
+        )
+        state.metadata["repo_owner"] = "acme"
+        state.metadata["repo_name"] = "widget"
+        state.metadata["source"] = "linear"
+
+        result_state = await graph.run_agent(state)
+
+        assert result_state.agent_result is not None
+        assert result_state.agent_result.status == AgentStatus.FAILED
+        session_events = [
+            event for event in events if event["event_name"] == "session_lifecycle"
+        ]
+        stages = [event["fields"]["stage"] for event in session_events]
+        assert stages[:4] == [
+            "session_start",
+            "session_resume",
+            "session_turn_start",
+            "session_stall",
+        ]
+        assert stages[-1] == "session_turn_complete"
+        assert session_events[1]["fields"]["reason"] == "previous_output_detected"
+        assert session_events[-1]["fields"]["requested_input"] is True
+    finally:
+        graph.logger = old_logger

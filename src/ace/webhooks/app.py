@@ -172,6 +172,7 @@ async def github_webhooks(request: Request) -> dict[str, Any]:
             payload=payload,
             delivery=delivery,
             default_project=getattr(settings, "github_project_name", None),
+            source="github",
             repo_gcp_mapping=_get_repo_gcp_mapping(),
         )
     except Exception as exc:
@@ -184,6 +185,7 @@ async def github_webhooks(request: Request) -> dict[str, Any]:
             event=event,
             payload=payload,
             delivery=delivery,
+            source=context.source,
             workflow_id=context.workflow_id,
             issue_key=context.issue_key,
             project=context.project,
@@ -243,6 +245,7 @@ async def pubsub_worker(request: Request) -> dict[str, Any]:
             event=queued.event,
             payload=queued.payload,
             delivery=queued.delivery,
+            source=queued.source,
             workflow_id=queued.workflow_id,
             default_project=getattr(settings, "github_project_name", None),
             project=queued.project,

@@ -27,6 +27,8 @@ from ace.webhooks.lifecycle import (
     STAGE_PR_REVIEW_ERROR,
     STAGE_PR_REVIEW_SKIPPED,
     STAGE_PR_REVIEW_STARTED,
+    build_lifecycle_context,
+    log_lifecycle_event,
 )
 
 logger = structlog.get_logger(__name__)
@@ -87,6 +89,7 @@ class WebhookHandler:
             return await self._handle_pull_request_event(
                 payload,
                 delivery,
+                source=work_event.source,
                 workflow_id=workflow_id,
             )
 
@@ -314,6 +317,7 @@ class WebhookHandler:
         payload: dict[str, Any],
         delivery: str | None,
         *,
+        source: str = "github",
         workflow_id: str | None,
     ) -> dict[str, Any]:
         action = (payload.get("action") or "").strip()
@@ -325,34 +329,46 @@ class WebhookHandler:
         if pr is None:
             raise ValueError("❌ ERROR: pull_request payload missing metadata")
 
+        resolved_workflow_id = workflow_id or _generate_workflow_id()
+        pr_event_context = build_lifecycle_context(
+            event="pull_request",
+            payload=payload,
+            delivery=delivery,
+            source=source,
+            workflow_id=resolved_workflow_id,
+            default_project=self._default_project_name(),
+            issue_key=f"{pr.repo_owner}/{pr.repo_name}#{pr.number}",
+            action=action,
+        )
+
         if not self._pr_review_enabled():
-            logger.info(
-                "webhook_lifecycle",
+            log_lifecycle_event(
+                logger,
                 stage=STAGE_PR_REVIEW_SKIPPED,
+                context=pr_event_context,
                 reason="pr_review_disabled",
-                action="pr_review",
                 pr_number=pr.number,
                 repo=f"{pr.repo_owner}/{pr.repo_name}",
             )
             return {"status": "ignored", "reason": "pr_review_disabled"}
 
         if not self._is_pull_request_repo_allowed(pr.repo_owner, pr.repo_name):
-            logger.info(
-                "webhook_lifecycle",
+            log_lifecycle_event(
+                logger,
                 stage=STAGE_PR_REVIEW_SKIPPED,
+                context=pr_event_context,
                 reason="repo_not_allowed",
-                action="pr_review",
                 pr_number=pr.number,
                 repo=f"{pr.repo_owner}/{pr.repo_name}",
             )
             return {"status": "ignored", "reason": "repo_not_allowed"}
 
         if pr.is_draft:
-            logger.info(
-                "webhook_lifecycle",
+            log_lifecycle_event(
+                logger,
                 stage=STAGE_PR_REVIEW_SKIPPED,
+                context=pr_event_context,
                 reason="draft_pr",
-                action="pr_review",
                 pr_number=pr.number,
                 repo=f"{pr.repo_owner}/{pr.repo_name}",
             )
@@ -362,15 +378,13 @@ class WebhookHandler:
             logger.info("webhook_ignored", event="pull_request", reason="action_not_reviewable")
             return {"status": "ignored", "reason": "action_not_reviewable"}
 
-        resolved_workflow_id = workflow_id or _generate_workflow_id()
-        logger.info(
-            "webhook_lifecycle",
+        log_lifecycle_event(
+            logger,
             stage=STAGE_PR_REVIEW_STARTED,
-            action=action,
+            context=pr_event_context,
             pr_number=pr.number,
             repo=f"{pr.repo_owner}/{pr.repo_name}",
             workflow_id=resolved_workflow_id,
-            delivery_id=delivery,
         )
 
         store = self._get_pr_review_store()
@@ -399,11 +413,11 @@ class WebhookHandler:
         claim = await store.claim_job(record)
         if not claim.claimed:
             if claim.reason == "review_in_progress":
-                logger.info(
-                    "webhook_lifecycle",
+                log_lifecycle_event(
+                    logger,
                     stage=STAGE_PR_REVIEW_SKIPPED,
+                    context=pr_event_context,
                     reason=claim.reason,
-                    action="pr_review",
                     pr_number=pr.number,
                     repo=f"{pr.repo_owner}/{pr.repo_name}",
                     head_sha=pr.head_sha,
@@ -443,10 +457,10 @@ class WebhookHandler:
                 pubsub_message_id=message_id,
                 queued_at=queued_at,
             )
-            logger.info(
-                "webhook_lifecycle",
+            log_lifecycle_event(
+                logger,
                 stage=STAGE_PR_REVIEW_ENQUEUED,
-                action="pr_review",
+                context=pr_event_context,
                 pubsub_message_id=message_id,
                 pr_number=pr.number,
                 repo=f"{pr.repo_owner}/{pr.repo_name}",
@@ -463,10 +477,10 @@ class WebhookHandler:
                 "message_id": message_id,
             }
         except Exception as exc:
-            logger.info(
-                "webhook_lifecycle",
+            log_lifecycle_event(
+                logger,
                 stage=STAGE_PR_REVIEW_ERROR,
-                action="pr_review",
+                context=pr_event_context,
                 reason="pr_review_publish_failed",
                 error=str(exc),
                 pr_number=pr.number,

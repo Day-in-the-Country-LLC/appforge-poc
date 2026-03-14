@@ -33,7 +33,15 @@ STAGE_PR_REVIEW_CONSENSUS = "pr_review_consensus"
 STAGE_PR_REVIEW_APPROVAL_SUBMITTED = "pr_review_approval_submitted"
 STAGE_PR_REVIEW_MERGED = "pr_review_merged"
 STAGE_PR_REVIEW_REJECTED = "pr_review_rejected"
+STAGE_PR_REVIEW_ENQUEUED = "pr_review_enqueued"
+STAGE_PR_REVIEW_SKIPPED = "pr_review_skipped"
 STAGE_PR_REVIEW_ERROR = "pr_review_error"
+
+STAGE_SESSION_START = "session_start"
+STAGE_SESSION_TURN_START = "session_turn_start"
+STAGE_SESSION_TURN_COMPLETE = "session_turn_complete"
+STAGE_SESSION_STALL = "session_stall"
+STAGE_SESSION_RESUME = "session_resume"
 
 RESOLUTION_SUCCESS = "success"
 RESOLUTION_BLOCKED = "blocked"
@@ -51,6 +59,7 @@ class WebhookLifecycleContext:
     target_gcp_project: str | None
     delivery_id: str | None
     workflow_id: str
+    source: str
 
 
 @dataclass(frozen=True)
@@ -64,6 +73,27 @@ class PlanningLifecycleContext:
     request_id: str | None
 
 
+@dataclass(frozen=True)
+class SessionLifecycleContext:
+    """Structured context for session-based runtime telemetry."""
+
+    source: str
+    issue_key: str | None
+    session_id: str
+    turn_number: int
+    workflow_id: str
+    project: str | None = None
+    target_gcp_project: str | None = None
+    action: str | None = None
+    stage_total: int | None = None
+    stage_index: int | None = None
+
+
+def _normalize_source(source: str | None) -> str:
+    normalized = (source or "").strip().lower()
+    return normalized or "github"
+
+
 def build_lifecycle_context(
     *,
     event: str,
@@ -74,6 +104,7 @@ def build_lifecycle_context(
     project: str | None = None,
     issue_key: str | None = None,
     target_gcp_project: str | None = None,
+    source: str | None = None,
     repo_gcp_mapping: Mapping[str, str] | None = None,
     action: str | None = None,
 ) -> WebhookLifecycleContext:
@@ -118,6 +149,50 @@ def build_lifecycle_context(
         target_gcp_project=resolved_target_gcp_project,
         delivery_id=normalized_delivery,
         workflow_id=resolved_workflow_id,
+        source=_normalize_source(source),
+    )
+
+
+def build_session_lifecycle_context(
+    *,
+    session_id: str,
+    turn_number: int,
+    workflow_id: str,
+    source: str | None = None,
+    issue_key: str | None = None,
+    project: str | None = None,
+    target_gcp_project: str | None = None,
+    action: str | None = None,
+    stage_total: int | None = None,
+    stage_index: int | None = None,
+) -> SessionLifecycleContext:
+    """Build a normalized session context for runtime lifecycle telemetry."""
+    session_value = (session_id or "").strip()
+    if not session_value:
+        raise ValueError("❌ ERROR: session_id is required for session telemetry")
+
+    if not isinstance(turn_number, int) or turn_number < 1:
+        raise ValueError(
+            "❌ ERROR: turn_number is required for session telemetry and must be > 0"
+        )
+
+    workflow_value = (workflow_id or "").strip()
+    if not workflow_value:
+        raise ValueError("❌ ERROR: workflow_id is required for session telemetry")
+
+    issue_value = issue_key.strip() if isinstance(issue_key, str) and issue_key.strip() else None
+
+    return SessionLifecycleContext(
+        source=_normalize_source(source),
+        issue_key=issue_value,
+        session_id=session_value,
+        turn_number=turn_number,
+        workflow_id=workflow_value,
+        project=project,
+        target_gcp_project=target_gcp_project,
+        action=action,
+        stage_total=stage_total,
+        stage_index=stage_index,
     )
 
 
@@ -192,6 +267,7 @@ def log_lifecycle_event(
 ) -> None:
     """Emit a structured lifecycle log entry with canonical correlation fields."""
     bound_logger = logger.bind(
+        source=context.source,
         event=context.event,
         action=context.action,
         project=context.project,
@@ -205,6 +281,35 @@ def log_lifecycle_event(
         data["resolution"] = resolution
     data.update(fields)
     bound_logger.info("webhook_lifecycle", **data)
+
+
+def log_session_lifecycle_event(
+    logger: structlog.BoundLogger,
+    stage: str,
+    context: SessionLifecycleContext,
+    *,
+    resolution: str | None = None,
+    **fields: Any,
+) -> None:
+    """Emit a structured session lifecycle event."""
+    bound_logger = logger.bind(
+        source=context.source,
+        workflow_id=context.workflow_id,
+        issue_key=context.issue_key,
+        project=context.project,
+        target_gcp_project=context.target_gcp_project,
+        session_id=context.session_id,
+        turn_number=context.turn_number,
+        action=context.action,
+        stage_total=context.stage_total,
+        stage_index=context.stage_index,
+    )
+
+    data = {"stage": stage}
+    if resolution is not None:
+        data["resolution"] = resolution
+    data.update(fields)
+    bound_logger.info("session_lifecycle", **data)
 
 
 def normalize_result_resolution(result: dict[str, Any]) -> str:

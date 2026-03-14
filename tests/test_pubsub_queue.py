@@ -41,6 +41,7 @@ async def test_publish_includes_correlation_payload_and_attributes():
         target_gcp_project="widget-prod-123456",
         action="created",
         queued_at="2026-02-12T18:00:00+00:00",
+        source="linear",
     )
 
     assert message_id == "pubsub-123"
@@ -52,6 +53,7 @@ async def test_publish_includes_correlation_payload_and_attributes():
     assert call["attrs"]["project"] == "Acme Platform"
     assert call["attrs"]["target_gcp_project"] == "widget-prod-123456"
     assert call["attrs"]["queued_at"] == "2026-02-12T18:00:00+00:00"
+    assert call["attrs"]["source"] == "linear"
 
     envelope = json.loads(call["body"].decode("utf-8"))
     assert envelope["schema_version"] == "2"
@@ -62,6 +64,7 @@ async def test_publish_includes_correlation_payload_and_attributes():
     assert envelope["correlation"]["project"] == "Acme Platform"
     assert envelope["correlation"]["target_gcp_project"] == "widget-prod-123456"
     assert envelope["correlation"]["action"] == "created"
+    assert envelope["source"] == "linear"
 
 
 def test_decode_pubsub_push_reads_correlation_fields():
@@ -89,6 +92,7 @@ def test_decode_pubsub_push_reads_correlation_fields():
                 "project": "Acme Platform",
                 "target_gcp_project": "widget-prod-123456",
                 "queued_at": "2026-02-12T18:00:00+00:00",
+                "source": "linear",
             },
         }
     }
@@ -100,6 +104,7 @@ def test_decode_pubsub_push_reads_correlation_fields():
     assert queued.issue_key == "Acme-Corp/widget-api#99"
     assert queued.project == "Acme Platform"
     assert queued.target_gcp_project == "widget-prod-123456"
+    assert queued.source == "linear"
     assert queued.action == "edited"
     assert queued.queued_at == "2026-02-12T18:00:00+00:00"
 
