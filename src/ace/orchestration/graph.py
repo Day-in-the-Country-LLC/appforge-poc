@@ -20,6 +20,15 @@ from ace.github.api_client import GitHubAPIClient
 from ace.github.status_manager import StatusManager
 from ace.issue_tracking import build_work_item_enricher, build_work_item_tracker
 from ace.logging_utils import log_key_event
+from ace.webhooks.lifecycle import (
+    STAGE_SESSION_RESUME,
+    STAGE_SESSION_START,
+    STAGE_SESSION_STALL,
+    STAGE_SESSION_TURN_COMPLETE,
+    STAGE_SESSION_TURN_START,
+    build_session_lifecycle_context,
+    log_session_lifecycle_event,
+)
 from ace.notifications.slack_client import SlackNotifier, format_completion_message
 from ace.orchestration.session_runtime import (
     SessionContext,
@@ -151,6 +160,7 @@ async def run_agent(state: WorkerState) -> WorkerState:
         "repo_owner": state.metadata.get("repo_owner", "unknown"),
         "issue_number": state.issue_number,
         "labels": state.issue.labels,
+        "source": state.metadata.get("source", "worker"),
     }
 
     repo_owner = state.metadata.get("repo_owner") or state.issue.repo_owner
@@ -199,6 +209,33 @@ async def run_agent(state: WorkerState) -> WorkerState:
     run_context["done_filename"] = done_filename
     run_context["session_turn"] = state.session_turn
     run_context["retry_count"] = state.retry_count
+    run_context["workflow_id"] = state.metadata.get("workflow_id", state.session_id)
+    session_workflow_id = run_context["workflow_id"]
+    state.metadata["source"] = run_context["source"]
+    session_issue_key = f"{state.issue.repo_owner}/{state.issue.repo_name}#{state.issue.number}"
+    session_lifecycle_context = build_session_lifecycle_context(
+        session_id=state.session_id,
+        turn_number=state.session_turn,
+        workflow_id=session_workflow_id,
+        source=run_context["source"],
+        issue_key=session_issue_key,
+        project=run_context["repo_name"],
+    )
+    log_session_lifecycle_event(logger, STAGE_SESSION_START, session_lifecycle_context)
+    if state.previous_output:
+        log_session_lifecycle_event(
+            logger,
+            STAGE_SESSION_RESUME,
+            session_lifecycle_context,
+            reason="previous_output_detected",
+        )
+    log_session_lifecycle_event(
+        logger,
+        STAGE_SESSION_TURN_START,
+        session_lifecycle_context,
+        labels=state.issue.labels,
+    )
+
     previous_output = state.previous_output or None
     if state.retry_count:
         turn_type = SessionTurnType.RETRY
@@ -276,9 +313,18 @@ async def run_agent(state: WorkerState) -> WorkerState:
     result = await runner.run_turn(session_context, instructions, previous_result=previous_result)
     state.agent_result = result
 
+    requested_input = False
     if result.status == AgentStatus.FAILED:
         state.error = result.error or result.output or "agent_failed"
         if await runner.request_input(result):
+            requested_input = True
+            log_session_lifecycle_event(
+                logger,
+                STAGE_SESSION_STALL,
+                session_lifecycle_context,
+                reason="runner_request_input",
+                error=state.error,
+            )
             state.previous_output = state.previous_output or result.output or result.error or ""
             state.session_turn += 1
             state.retry_count += 1
@@ -289,6 +335,15 @@ async def run_agent(state: WorkerState) -> WorkerState:
     else:
         await runner.stop(session_context, reason="completed")
 
+    log_session_lifecycle_event(
+        logger,
+        STAGE_SESSION_TURN_COMPLETE,
+        session_lifecycle_context,
+        turn_result=result.status.value,
+        requested_input=requested_input,
+        output_length=len(result.output),
+        error=state.error,
+    )
     logger.info(
         "agent_execution_complete",
         issue=state.issue_number,

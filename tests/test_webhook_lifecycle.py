@@ -7,6 +7,9 @@ from ace.webhooks.lifecycle import (
     RESOLUTION_SUCCESS,
     RESOLUTION_TIMEOUT,
     build_lifecycle_context,
+    build_session_lifecycle_context,
+    log_session_lifecycle_event,
+    STAGE_SESSION_START,
     normalize_error_resolution,
     normalize_result_resolution,
 )
@@ -61,6 +64,16 @@ def test_build_lifecycle_context_uses_explicit_correlation_overrides():
     assert context.action == "edited"
 
 
+def test_build_lifecycle_context_normalizes_source():
+    context = build_lifecycle_context(
+        event="issue_comment",
+        payload={},
+        delivery="delivery-1",
+        source="LINEAR",
+    )
+    assert context.source == "linear"
+
+
 def test_build_lifecycle_context_fails_for_unmapped_repo():
     with pytest.raises(ValueError, match="❌ ERROR: repo_gcp_project_mapping_missing"):
         build_lifecycle_context(
@@ -75,6 +88,64 @@ def test_build_lifecycle_context_fails_for_unmapped_repo():
             delivery="delivery-123",
             repo_gcp_mapping={"acme-corp/widget-api": "widget-prod-123456"},
         )
+
+
+def test_build_session_lifecycle_context_requires_turn_number_and_workflow():
+    with pytest.raises(ValueError, match="turn_number"):
+        build_session_lifecycle_context(
+            session_id="run-123",
+            turn_number=0,
+            workflow_id="wf-1",
+            source="github",
+            issue_key="acme/widget#123",
+        )
+    with pytest.raises(ValueError, match="workflow_id"):
+        build_session_lifecycle_context(
+            session_id="run-123",
+            turn_number=1,
+            workflow_id="",
+            source="github",
+            issue_key="acme/widget#123",
+        )
+
+
+def test_build_session_lifecycle_context_normalizes_source_and_emits_fields():
+    context = build_session_lifecycle_context(
+        session_id="run-123",
+        turn_number=1,
+        workflow_id="wf-1",
+        source="LINEAR",
+        issue_key="acme/widget#123",
+    )
+    assert context.source == "linear"
+
+    events: list[dict[str, object]] = []
+
+    class _BoundLogger:
+        def __init__(self) -> None:
+            self._events = events
+            self._bound = {}
+
+        def bind(self, **kwargs):
+            child = _BoundLogger()
+            child._events = self._events
+            child._bound = {**self._bound, **kwargs}
+            return child
+
+        def info(self, event_name: str, **fields: object) -> None:
+            merged = {**self._bound}
+            merged.update(fields)
+            self._events.append({"event_name": event_name, "fields": merged})
+
+    logger = _BoundLogger()
+    log_session_lifecycle_event(logger, STAGE_SESSION_START, context)
+    assert events and events[0]["event_name"] == "session_lifecycle"
+    fields = events[0]["fields"]
+    assert fields["source"] == "linear"
+    assert fields["session_id"] == "run-123"
+    assert fields["turn_number"] == 1
+    assert fields["issue_key"] == "acme/widget#123"
+    assert fields["stage"] == STAGE_SESSION_START
 
 
 def test_normalize_result_resolution():

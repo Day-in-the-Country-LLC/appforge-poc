@@ -18,6 +18,7 @@ class QueuedWebhookEvent:
     event: str
     payload: dict[str, Any]
     delivery: str | None
+    source: str = "github"
     workflow_id: str | None = None
     issue_key: str | None = None
     project: str | None = None
@@ -53,6 +54,7 @@ class PubSubWebhookQueue:
         event: str,
         payload: dict[str, Any],
         delivery: str | None,
+        source: str = "github",
         workflow_id: str | None = None,
         issue_key: str | None = None,
         project: str | None = None,
@@ -62,6 +64,7 @@ class PubSubWebhookQueue:
     ) -> str:
         correlation = {
             "delivery_id": delivery,
+            "source": source,
             "workflow_id": workflow_id,
             "issue_key": issue_key,
             "project": project,
@@ -73,6 +76,7 @@ class PubSubWebhookQueue:
             "event": event,
             "payload": payload,
             "delivery": delivery,
+            "source": source,
             "workflow_id": workflow_id,
             "queued_at": queued_at,
             "correlation": correlation,
@@ -88,6 +92,8 @@ class PubSubWebhookQueue:
             attrs["issue_key"] = issue_key
         if project:
             attrs["project"] = project
+        if source:
+            attrs["source"] = source
         if target_gcp_project:
             attrs["target_gcp_project"] = target_gcp_project
         if action:
@@ -137,6 +143,14 @@ def decode_pubsub_push(body: dict[str, Any]) -> QueuedWebhookEvent:
     if not isinstance(correlation, dict):
         raise ValueError("❌ ERROR: invalid_pubsub_push: correlation must be an object")
 
+    source = _first_string(
+        envelope.get("source"),
+        correlation.get("source"),
+        attrs.get("source"),
+    )
+    if source is None:
+        source = "github"
+
     delivery = _first_string(
         envelope.get("delivery"),
         correlation.get("delivery_id"),
@@ -182,6 +196,7 @@ def decode_pubsub_push(body: dict[str, Any]) -> QueuedWebhookEvent:
         event=event,
         payload=payload,
         delivery=delivery,
+        source=source,
         workflow_id=workflow_id,
         issue_key=issue_key,
         project=project,
