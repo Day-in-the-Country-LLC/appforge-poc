@@ -13,6 +13,8 @@ from fastapi import FastAPI, HTTPException, Request
 
 from ace.config.logging import configure_logging
 from ace.config.settings import Settings, get_settings
+from ace.github.api_client import GitHubAPIClient
+from ace.github.issue_queue import IssueQueue
 from ace.notifications.slack_client import (
     SlackNotifier,
     format_error_message,
@@ -33,6 +35,9 @@ from ace.webhooks.lifecycle import (
     normalize_error_resolution,
     normalize_result_resolution,
 )
+from ace.pr_review.job_store import build_pr_review_session_store
+from ace.pr_review.pubsub_queue import decode_pubsub_push as decode_pr_review_job
+from ace.pr_review.runtime import PRReviewRuntime
 from ace.webhooks.pubsub_queue import PubSubWebhookQueue, decode_pubsub_push
 from ace.webhooks.repo_gcp_mapping import load_repo_gcp_mapping
 
@@ -44,6 +49,8 @@ _notifier: SlackNotifier | None = None
 _queue: PubSubWebhookQueue | None = None
 _settings: Settings | None = None
 _repo_gcp_mapping: dict[str, str] | None = None
+_pr_review_session_store = None
+_pr_review_app_auth: object | None = None
 app.include_router(planning_router)
 app.include_router(planning_worker_router)
 
@@ -92,6 +99,20 @@ def _get_repo_gcp_mapping() -> dict[str, str]:
     path = getattr(settings, "repo_gcp_mapping_path", "docs/repo-gcp-mapping.json")
     _repo_gcp_mapping = load_repo_gcp_mapping(path)
     return _repo_gcp_mapping
+
+
+def _get_pr_review_session_store():
+    global _pr_review_session_store
+    if _pr_review_session_store is None:
+        _pr_review_session_store = build_pr_review_session_store(_get_settings())
+    return _pr_review_session_store
+
+
+def _get_pr_review_app_auth() -> object:
+    global _pr_review_app_auth
+    if _pr_review_app_auth is None:
+        _pr_review_app_auth = _get_handler().app_auth
+    return _pr_review_app_auth
 
 
 def _get_handler() -> WebhookHandler:
@@ -282,7 +303,12 @@ async def pubsub_worker(request: Request) -> dict[str, Any]:
     handler = _get_handler()
     log_lifecycle_event(logger, STAGE_AGENT_STARTED, context)
     try:
-        result = await handler.handle(queued.event, queued.payload, queued.delivery)
+        result = await handler.handle(
+            queued.event,
+            queued.payload,
+            queued.delivery,
+            workflow_id=queued.workflow_id,
+        )
         log_lifecycle_event(
             logger,
             STAGE_AGENT_FINISHED,
@@ -326,6 +352,150 @@ async def pubsub_worker(request: Request) -> dict[str, Any]:
         "queue_delay_ms": queue_delay_ms,
         "message_id": queued.message_id,
         "pubsub_message_id": queued.message_id,
+        "resolution": resolution,
+        "result": result,
+    }
+
+
+@app.post("/internal/pubsub/pr-review")
+async def pr_review_worker(request: Request) -> dict[str, Any]:
+    if not _worker_enabled():
+        raise HTTPException(status_code=404, detail="❌ ERROR: worker endpoint disabled")
+
+    try:
+        body = await request.json()
+        job = decode_pr_review_job(body)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{exc}") from exc
+
+    settings = _get_settings()
+    issue_key = f"{job.repo_owner}/{job.repo_name}#{job.pr_number}"
+    try:
+        context = build_lifecycle_context(
+            event="pull_request",
+            payload={
+                "action": job.action,
+                "number": job.pr_number,
+                "repository": {
+                    "name": job.repo_name,
+                    "owner": {"login": job.repo_owner},
+                },
+            },
+            delivery=job.delivery_id,
+            source="github",
+            workflow_id=job.workflow_id,
+            default_project=getattr(settings, "github_project_name", None),
+            project=job.project,
+            issue_key=issue_key,
+            target_gcp_project=job.target_gcp_project,
+            action=job.action,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"{exc}") from exc
+
+    dequeued_at = _utc_now_iso()
+    queue_delay_ms = _queue_delay_ms(queued_at=job.queued_at, dequeued_at=dequeued_at)
+    log_lifecycle_event(
+        logger,
+        STAGE_WORKER_DEQUEUED,
+        context,
+        message_id=job.message_id,
+        pubsub_message_id=job.message_id,
+        queued_at=job.queued_at,
+        dequeued_at=dequeued_at,
+        queue_delay_ms=queue_delay_ms,
+        pr_number=job.pr_number,
+        head_sha=job.head_sha,
+    )
+    log_lifecycle_event(
+        logger,
+        STAGE_WORKER_STARTED,
+        context,
+        message_id=job.message_id,
+        pubsub_message_id=job.message_id,
+        queued_at=job.queued_at,
+        queue_delay_ms=queue_delay_ms,
+        pr_number=job.pr_number,
+        head_sha=job.head_sha,
+    )
+
+    log_lifecycle_event(logger, STAGE_AGENT_STARTED, context, pr_number=job.pr_number)
+    try:
+        app_auth = _get_pr_review_app_auth()
+        app_auth_token = await app_auth.get_installation_token(job.installation_id)
+        async with GitHubAPIClient(app_auth_token.token) as api_client:
+            issue_queue = IssueQueue(
+                api_client=api_client,
+                owner=job.repo_owner,
+                repo=job.repo_name,
+            )
+            runtime = PRReviewRuntime(
+                settings=settings,
+                store=_get_pr_review_session_store(),
+                issue_queue=issue_queue,
+            )
+            session = await runtime.run_review(
+                repo_owner=job.repo_owner,
+                repo_name=job.repo_name,
+                pr_number=job.pr_number,
+                head_sha=job.head_sha,
+                base_branch=job.base_ref,
+                action=job.action,
+                workflow_id=context.workflow_id,
+                session_id=job.idempotency_key,
+            )
+
+        result = session.to_dict()
+        resolution = normalize_result_resolution(result)
+        log_lifecycle_event(
+            logger,
+            STAGE_AGENT_FINISHED,
+            context,
+            handler_status=result.get("status"),
+            handler_action=result.get("action"),
+            pr_number=job.pr_number,
+            head_sha=job.head_sha,
+        )
+        log_lifecycle_event(
+            logger,
+            STAGE_FINAL_RESOLUTION,
+            context,
+            resolution=resolution,
+            handler_status=result.get("status"),
+            handler_action=result.get("action"),
+            pr_number=job.pr_number,
+            head_sha=job.head_sha,
+        )
+    except Exception as exc:
+        resolution = normalize_error_resolution(exc)
+        log_lifecycle_event(
+            logger,
+            STAGE_FINAL_RESOLUTION,
+            context,
+            resolution=resolution,
+            error=f"❌ ERROR: {exc}",
+            pr_number=job.pr_number,
+            head_sha=job.head_sha,
+        )
+        if _notifier is not None:
+            await _notifier.safe_post(format_error_message("pull_request", job.delivery_id, exc))
+        raise
+
+    if _notifier is not None:
+        message = format_webhook_message("pull_request", job.delivery_id, result)
+        if message is not None:
+            await _notifier.safe_post(message)
+
+    return {
+        "status": "ok",
+        "event": "pull_request",
+        "delivery": job.delivery_id,
+        "workflow_id": context.workflow_id,
+        "session_id": session.session_id,
+        "queued_at": job.queued_at,
+        "queue_delay_ms": queue_delay_ms,
+        "message_id": job.message_id,
+        "pubsub_message_id": job.message_id,
         "resolution": resolution,
         "result": result,
     }

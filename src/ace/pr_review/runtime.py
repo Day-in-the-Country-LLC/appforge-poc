@@ -27,7 +27,6 @@ from ace.pr_review.models import (
     PRReviewStatus,
     ReviewVerdict,
     ReviewerVerdict,
-    parse_reviewer_verdict,
 )
 from ace.pr_review.prompts import (
     CROSS_FEEDBACK_PROMPT_TEMPLATE,
@@ -310,7 +309,8 @@ class PRReviewRuntime:
                 max_tokens=self.settings.pr_review_claude_max_tokens,
             )
 
-        verdict = parse_reviewer_verdict(response)
+        verdict_payload = _parse_verdict_payload(response)
+        verdict = ReviewerVerdict.from_dict(verdict_payload)
         verdict.reviewer_model = reviewer_model
         verdict.round_number = round_number
         return verdict
@@ -465,3 +465,16 @@ def _resolve_consensus(
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
+
+def _parse_verdict_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        verdict_payload: dict[str, Any] = payload
+    elif isinstance(payload, str):
+        verdict_payload = json.loads(payload)
+    else:
+        raise PRReviewRuntimeError(
+            "❌ ERROR: PR review verdict payload must be JSON text or dictionary"
+        )
+    if not isinstance(verdict_payload, dict):
+        raise PRReviewRuntimeError("❌ ERROR: PR review verdict payload must be an object")
+    return verdict_payload

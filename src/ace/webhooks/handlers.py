@@ -89,7 +89,6 @@ class WebhookHandler:
             return await self._handle_pull_request_event(
                 payload,
                 delivery,
-                source=work_event.source,
                 workflow_id=workflow_id,
             )
 
@@ -514,7 +513,8 @@ class WebhookHandler:
         return self.pr_review_store
 
     def _default_project_name(self) -> str:
-        if self.settings.issue_tracker_backend.lower() == "linear":
+        backend = getattr(self.settings, "issue_tracker_backend", "github") or "github"
+        if backend.lower() == "linear":
             return self.settings.linear_default_project_name or self.settings.github_project_name
         return self.settings.github_project_name
 
