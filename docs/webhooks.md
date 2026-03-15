@@ -12,6 +12,7 @@ This file documents how to create the org-level webhook for the Project V2 board
 
 - `projects_v2_item`
 - `issue_comment`
+- `pull_request`
 
 ## Create The Org Webhook (CLI)
 

@@ -124,7 +124,8 @@ Worker resumes with answer
 Production webhook flow is split:
 
 1. **Listener service** (`/github/webhooks`) validates GitHub signature and enqueues Pub/Sub.
-2. **Worker service** (`/internal/pubsub/worker`) receives Pub/Sub push and runs webhook processing.
+2. **Worker service** (`/internal/pubsub/worker`) receives Pub/Sub push for issue/project events.
+3. **PR review worker** (`/internal/pubsub/pr-review`) receives pull request Pub/Sub push and runs `PRReviewRuntime`.
 
 Recommended Cloud Run settings:
 

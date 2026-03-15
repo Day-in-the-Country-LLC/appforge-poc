@@ -127,6 +127,153 @@ class IssueQueue:
         )
         return comments or []
 
+    async def get_pull_request(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        pr_number: int,
+    ) -> dict[str, Any]:
+        """Get a pull request object."""
+        logger.info("getting_pull_request", repo=f"{repo_owner}/{repo_name}", pr=pr_number)
+        return await self.api_client.rest_get(
+            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_number}"
+        )
+
+    async def get_pull_request_diff(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        pr_number: int,
+    ) -> str:
+        """Build a textual diff from pull request file patches."""
+        files = await self.list_pull_request_files(
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            pr_number=pr_number,
+        )
+        sections: list[str] = []
+        for file_payload in files:
+            if not isinstance(file_payload, dict):
+                continue
+            filename = file_payload.get("filename") or "unknown"
+            patch = file_payload.get("patch") or ""
+            if patch:
+                sections.append(f"@@ {filename} @@\n{patch}")
+            else:
+                sections.append(f"@@ {filename} @@\n(no patch available)")
+        return "\n\n".join(sections)
+
+    async def list_pull_request_files(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        pr_number: int,
+    ) -> list[dict[str, Any]]:
+        """List files changed by a pull request."""
+        logger.info("listing_pull_request_files", repo=f"{repo_owner}/{repo_name}", pr=pr_number)
+        result = await self.api_client.rest_get(
+            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_number}/files"
+        )
+        return result or []
+
+    async def list_pull_request_commits(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        pr_number: int,
+    ) -> list[dict[str, Any]]:
+        """List commits included in a pull request."""
+        logger.info("listing_pull_request_commits", repo=f"{repo_owner}/{repo_name}", pr=pr_number)
+        result = await self.api_client.rest_get(
+            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_number}/commits"
+        )
+        return result or []
+
+    async def get_pr_check_runs(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        ref: str,
+    ) -> list[dict[str, Any]]:
+        """Fetch check-runs for a commit or ref."""
+        logger.info("getting_pull_request_check_runs", repo=f"{repo_owner}/{repo_name}", ref=ref)
+        result = await self.api_client.rest_get(
+            f"/repos/{repo_owner}/{repo_name}/commits/{ref}/check-runs"
+        )
+        if isinstance(result, dict):
+            return result.get("check_runs", [])
+        return []
+
+    async def get_pull_request_status(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        pr_number: int,
+    ) -> dict[str, Any]:
+        """Get high-level pull-request status payload."""
+        logger.info("getting_pull_request_status", repo=f"{repo_owner}/{repo_name}", pr=pr_number)
+        return await self.api_client.rest_get(
+            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_number}"
+        )
+
+    async def get_combined_status_for_ref(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        ref: str,
+    ) -> str:
+        """Return combined CI status for a commit ref."""
+        logger.info("getting_ref_status", repo=f"{repo_owner}/{repo_name}", ref=ref)
+        payload = await self.api_client.rest_get(
+            f"/repos/{repo_owner}/{repo_name}/commits/{ref}/status"
+        )
+        if isinstance(payload, dict):
+            return str(payload.get("state", "unknown"))
+        return "unknown"
+
+    async def submit_pull_request_review(
+        self,
+        *,
+        repo_owner: str,
+        repo_name: str,
+        pr_number: int,
+        event: str,
+        body: str,
+    ) -> dict[str, Any]:
+        """Submit a PR review verdict."""
+        logger.info(
+            "submitting_pull_request_review",
+            repo=f"{repo_owner}/{repo_name}",
+            pr=pr_number,
+            event=event,
+        )
+        return await self.api_client.rest_post(
+            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_number}/reviews",
+            json={"event": event, "body": body},
+        )
+
+    async def merge_pull_request(
+        self,
+        *,
+        repo_owner: str,
+        repo_name: str,
+        pr_number: int,
+        sha: str,
+        merge_method: str = "squash",
+    ) -> dict[str, Any]:
+        """Merge a pull request."""
+        logger.info(
+            "merging_pull_request",
+            repo=f"{repo_owner}/{repo_name}",
+            pr=pr_number,
+            sha=sha,
+            merge_method=merge_method,
+        )
+        return await self.api_client.rest_put(
+            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_number}/merge",
+            json={"sha": sha, "merge_method": merge_method},
+        )
+
     async def list_issues_by_project_status(
         self,
         project_name: str,

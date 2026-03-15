@@ -34,6 +34,7 @@ Create a GitHub App (org or user account) with:
 - **Subscribe to events**:
   - `Projects v2 item`
   - `Issue comment`
+  - `Pull request`
 
 Install the app on the org or specific repos that map to your Project V2 board.
 
@@ -92,6 +93,7 @@ Use the same value in:
 - `GITHUB_ORG`
 - `GITHUB_PROJECT_NAME`
 - `WEBHOOK_PUBSUB_TOPIC` (`projects/<project>/topics/<topic>`)
+- `PR_REVIEW_PUBSUB_TOPIC` (`projects/<project>/topics/<topic>`)
 - `REPO_GCP_MAPPING_PATH` (default: `docs/repo-gcp-mapping.json`)
 - `ACE_LOG_FORMAT=json` (required on Cloud Run)
 
@@ -157,6 +159,7 @@ Use this to confirm the app is configured correctly.
 3. Under **Subscribe to events**, ensure these are checked:
    - `Issue comment`
    - `Projects v2 item`
+   - `Pull request`
 
 ### Permissions
 
@@ -202,6 +205,13 @@ If the board is org‑level, org installation is recommended.
   - `issue.pull_request` exists
 - Ignore all other issue comment events.
 
+### 3) PR review events
+
+- Event: `pull_request`
+- All `pull_request` payloads are accepted and routed to the PR review worker queue.
+- PR review messages are published to `PR_REVIEW_PUBSUB_TOPIC`.
+- Default issue/worker pipeline handling is skipped for pull request events.
+
 ## Expected Handler Behavior
 
 - **Validate signature**: reject any request without a valid signature.
@@ -222,8 +232,15 @@ Worker service:
 
 - Framework: FastAPI (`src/ace/webhooks/app.py`)
 - Endpoint: `/internal/pubsub/worker` (Pub/Sub push subscription target)
+- Endpoint: `/internal/pubsub/pr-review` (PR review worker push target)
 - Deployment target: Cloud Run
 - Behavior: decodes Pub/Sub push payload, runs `WebhookHandler.handle(...)`, sends Slack status/error notifications
+
+The PR review endpoint (`/internal/pubsub/pr-review`) dispatches to:
+
+- `PRReviewRuntime.run_review(...)`
+- PR review sessions managed by `InMemoryPRReviewSessionStore` (tests) or Firestore in production
+- Optional PR review status notifications when Slack is configured
 
 Pub/Sub payload/envelope schema (v2):
 
@@ -258,6 +275,7 @@ Worker lifecycle logs include:
 - `project`
 - `target_gcp_project`
 - `queued_at`
+- `pr_number` (PR review path)
 - `dequeued_at`
 - `queue_delay_ms`
 

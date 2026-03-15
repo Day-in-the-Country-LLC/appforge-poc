@@ -160,6 +160,24 @@ class Settings(BaseSettings):
         os.getenv("PLANNING_INTAKE_MAX_REPO_SCOUTS_PER_TURN", "2")
     )
     planning_intake_max_repo_reports: int = int(os.getenv("PLANNING_INTAKE_MAX_REPO_REPORTS", "6"))
+    pr_review_pubsub_topic: str = os.getenv("PR_REVIEW_PUBSUB_TOPIC", "")
+    pr_review_max_rounds: int = int(os.getenv("PR_REVIEW_MAX_ROUNDS", "2"))
+    pr_review_consensus_mode: str = (
+        os.getenv("PR_REVIEW_CONSENSUS_MODE", "strict").strip().lower()
+    )
+    pr_review_target_branch: str = os.getenv("PR_REVIEW_TARGET_BRANCH", "main")
+    pr_review_require_checks: bool = (
+        os.getenv("PR_REVIEW_REQUIRE_CHECKS", "true").lower() == "true"
+    )
+    pr_review_merge_method: str = os.getenv("PR_REVIEW_MERGE_METHOD", "squash")
+    pr_review_codex_model: str = os.getenv("PR_REVIEW_CODEX_MODEL", "gpt-5.1-codex")
+    pr_review_codex_max_tokens: int = int(os.getenv("PR_REVIEW_CODEX_MAX_TOKENS", "2500"))
+    pr_review_codex_reasoning_effort: str = (
+        os.getenv("PR_REVIEW_CODEX_REASONING_EFFORT", "high").strip().lower()
+    )
+    pr_review_claude_model: str = os.getenv("PR_REVIEW_CLAUDE_MODEL", "claude-haiku-4-5")
+    pr_review_claude_max_tokens: int = int(os.getenv("PR_REVIEW_CLAUDE_MAX_TOKENS", "3000"))
+    pr_review_diff_max_chars: int = int(os.getenv("PR_REVIEW_DIFF_MAX_CHARS", "8000"))
 
     # CLI agent commands
     codex_cli_command: str = os.getenv(

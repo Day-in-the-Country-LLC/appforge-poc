@@ -91,6 +91,24 @@ class GitHubAPIClient:
         response.raise_for_status()
         return response.json()
 
+    async def rest_put(self, endpoint: str, json: dict[str, Any]) -> Any:
+        """Make a PUT request to GitHub REST API.
+
+        Args:
+            endpoint: API endpoint
+            json: Request body
+
+        Returns:
+            JSON response
+        """
+        url = f"{GITHUB_API_URL}{endpoint}"
+        logger.debug("github_rest_put", endpoint=endpoint)
+        response = await self._request("PUT", url, json=json)
+        response.raise_for_status()
+        if response.status_code == 204:
+            return {}
+        return response.json()
+
     async def rest_delete(self, endpoint: str) -> None:
         """Make a DELETE request to GitHub REST API.
 
