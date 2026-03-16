@@ -1,6 +1,7 @@
 """Configuration and settings management."""
 
 import os
+import threading
 
 from pydantic_settings import BaseSettings
 
@@ -252,13 +253,23 @@ class Settings(BaseSettings):
 
 
 _SETTINGS_OVERRIDES: dict[str, object] = {}
+_SETTINGS: Settings | None = None
+_SETTINGS_LOCK = threading.Lock()
 
 
 def set_settings_overrides(**kwargs: object) -> None:
     """Override settings via CLI args (preferred over env for flags)."""
-    _SETTINGS_OVERRIDES.update(kwargs)
+    global _SETTINGS
+    with _SETTINGS_LOCK:
+        _SETTINGS_OVERRIDES.update(kwargs)
+        _SETTINGS = None
 
 
 def get_settings() -> Settings:
     """Get or create the global settings instance."""
-    return Settings(**_SETTINGS_OVERRIDES)
+    global _SETTINGS
+    if _SETTINGS is None:
+        with _SETTINGS_LOCK:
+            if _SETTINGS is None:
+                _SETTINGS = Settings(**_SETTINGS_OVERRIDES)
+    return _SETTINGS
