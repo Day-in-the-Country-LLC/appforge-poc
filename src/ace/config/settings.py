@@ -84,6 +84,7 @@ class Settings(BaseSettings):
     gcp_credentials_path: str = os.getenv(
         "GCP_CREDENTIALS_FILE", os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
     )
+    secret_cache_ttl_seconds: int = int(os.getenv("SECRET_CACHE_TTL_SECONDS", "300"))
 
     # Agent workspace
     agent_workspace_root: str = os.getenv("AGENT_WORKSPACE_ROOT", "/tmp/agent-hq")
