@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shlex
@@ -100,7 +101,7 @@ class CliAgent:
 
             timeout = self.settings.task_wait_timeout_seconds
             timeout_seconds = timeout if timeout > 0 else None
-            return_code, stdout_text, stderr_text, terminated_on_done = self._run_cli_until_done(
+            return_code, stdout_text, stderr_text, terminated_on_done = await self._run_cli_until_done(
                 command=command,
                 workdir=workdir,
                 env={**os.environ, **env_exports},
@@ -312,7 +313,7 @@ class CliAgent:
             # Fail loudly; no fallbacks in this repo.
             raise RuntimeError(f"❌ ERROR: task_prompt_read_failed ({path}): {exc}") from exc
 
-    def _run_cli_until_done(
+    async def _run_cli_until_done(
         self,
         *,
         command: list[str],
@@ -361,7 +362,7 @@ class CliAgent:
                         self._terminate_process(proc)
                         raise subprocess.TimeoutExpired(command, timeout_seconds)
 
-                    time.sleep(1.0)
+                    await asyncio.sleep(1.0)
             finally:
                 if proc.poll() is None:
                     self._terminate_process(proc)

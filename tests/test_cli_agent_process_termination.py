@@ -1,5 +1,6 @@
 import signal
 import subprocess
+import pytest
 
 from ace.agents.cli_agent import CliAgent
 
@@ -90,7 +91,8 @@ def test_terminate_process_falls_back_to_parent_process(monkeypatch):
     assert proc.kill_called is True
 
 
-def test_run_cli_until_done_uses_new_process_session(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_run_cli_until_done_uses_new_process_session(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
     done_path = tmp_path / "ACE_TASK_DONE.json"
     done_path.write_text("{}", encoding="utf-8")
@@ -109,7 +111,7 @@ def test_run_cli_until_done_uses_new_process_session(monkeypatch, tmp_path):
         lambda proc, grace_seconds=5.0: setattr(proc, "returncode", 0),
     )
 
-    _return_code, _stdout, _stderr, terminated_on_done = agent._run_cli_until_done(
+    _return_code, _stdout, _stderr, terminated_on_done = await agent._run_cli_until_done(
         command=["echo", "hello"],
         workdir=tmp_path,
         env={},
