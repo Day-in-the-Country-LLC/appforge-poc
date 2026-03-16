@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from uuid import uuid4
 from typing import Any
 
 import structlog
@@ -738,7 +739,7 @@ def _utc_now_iso() -> str:
 
 
 def _generate_workflow_id() -> str:
-    return f"wf-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{int(datetime.now(UTC).timestamp())}"
+    return f"wf-{uuid4().hex}"
 
 
 async def _trigger_project_issue(
