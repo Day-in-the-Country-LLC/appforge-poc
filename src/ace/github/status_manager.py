@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from enum import Enum
 
 import structlog
@@ -344,6 +345,4 @@ Status: Blocked - Please review and re-add the `agent` label to retry.
 
     def _get_timestamp(self) -> str:
         """Get current timestamp in ISO format."""
-        from datetime import datetime
-
-        return datetime.utcnow().isoformat()
+        return datetime.now(UTC).isoformat()
