@@ -246,3 +246,81 @@ def test_build_session_runner_rejects_unknown_backend() -> None:
 def test_build_session_runner_rejects_unknown_session_mode() -> None:
     with pytest.raises(ValueError, match="unsupported session mode"):
         session_runtime.build_session_runner("codex", session_mode="unsupported")
+
+
+@pytest.mark.asyncio
+async def test_legacy_instruction_builder_calls_openai_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Settings:
+        instruction_backend = "openai"
+        instruction_model = "gpt-5.1-codex"
+        codex_model = "gpt-5.2-codex"
+        claude_model = "claude-haiku-4-5"
+
+    captured: dict[str, object] = {}
+
+    async def fake_call_openai(
+        prompt: str,
+        model: str,
+        api_key: str,
+        max_tokens: int = 1200,
+        *,
+        trace_name: str,
+        metadata: dict[str, object] | None = None,
+    ) -> str:
+        del max_tokens, trace_name, metadata
+        captured["provider"] = "openai"
+        captured["prompt"] = prompt
+        captured["model"] = model
+        captured["api_key"] = api_key
+        return "openai-instructions"
+
+    monkeypatch.setattr(session_runtime, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(session_runtime, "resolve_openai_api_key", lambda _settings: "openai-key")
+    monkeypatch.setattr(session_runtime, "call_openai", fake_call_openai)
+
+    builder = session_runtime._LegacyInstructionBuilder()
+    instructions = await builder._call_model("make changes", trace_name="issue_instructions", metadata=None)
+
+    assert instructions == "openai-instructions"
+    assert captured["provider"] == "openai"
+    assert captured["model"] == "gpt-5.1-codex"
+    assert captured["api_key"] == "openai-key"
+
+
+@pytest.mark.asyncio
+async def test_legacy_instruction_builder_calls_claude_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Settings:
+        instruction_backend = "claude"
+        instruction_model = ""
+        codex_model = "gpt-5.2-codex"
+        claude_model = "claude-haiku-4-5"
+
+    captured: dict[str, object] = {}
+
+    async def fake_call_claude(
+        prompt: str,
+        model: str,
+        api_key: str,
+        max_tokens: int = 1200,
+        *,
+        trace_name: str,
+        metadata: dict[str, object] | None = None,
+    ) -> str:
+        del max_tokens, trace_name, metadata
+        captured["provider"] = "claude"
+        captured["prompt"] = prompt
+        captured["model"] = model
+        captured["api_key"] = api_key
+        return "claude-instructions"
+
+    monkeypatch.setattr(session_runtime, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(session_runtime, "resolve_claude_api_key", lambda _settings: "claude-key")
+    monkeypatch.setattr(session_runtime, "call_claude", fake_call_claude)
+
+    builder = session_runtime._LegacyInstructionBuilder()
+    instructions = await builder._call_model("make changes", trace_name="issue_instructions", metadata=None)
+
+    assert instructions == "claude-instructions"
+    assert captured["provider"] == "claude"
+    assert captured["model"] == "claude-haiku-4-5"
+    assert captured["api_key"] == "claude-key"

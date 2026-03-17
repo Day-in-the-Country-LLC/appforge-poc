@@ -12,9 +12,9 @@ from uuid import uuid4
 import structlog
 
 from ace.agents.cli_agent import CliAgent
-from ace.agents.llm_client import call_openai
+from ace.agents.llm_client import call_claude, call_openai
 from ace.agents.types import AgentResult, AgentStatus
-from ace.config.secrets import resolve_openai_api_key
+from ace.config.secrets import resolve_claude_api_key, resolve_openai_api_key
 from ace.config.settings import get_settings
 
 logger = structlog.get_logger(__name__)
@@ -375,9 +375,21 @@ class _LegacyInstructionBuilder:
 
     def __init__(self) -> None:
         self.settings = get_settings()
-        self._openai_key = resolve_openai_api_key(self.settings)
         self.instruction_backend = self.settings.instruction_backend.lower()
-        self.instruction_model = self.settings.instruction_model or self.settings.codex_model
+        if self.instruction_backend == "claude":
+            self._claude_key = resolve_claude_api_key(self.settings)
+            self._openai_key = ""
+            self.instruction_model = (
+                self.settings.instruction_model or self.settings.claude_model
+            )
+        elif self.instruction_backend == "openai":
+            self._openai_key = resolve_openai_api_key(self.settings)
+            self._claude_key = ""
+            self.instruction_model = self.settings.instruction_model or self.settings.codex_model
+        else:
+            self._openai_key = ""
+            self._claude_key = ""
+            self.instruction_model = self.settings.instruction_model or self.settings.codex_model
 
     async def build_initial(
         self,
@@ -483,15 +495,24 @@ When finished:
         trace_name: str,
         metadata: dict[str, Any] | None,
     ) -> str:
-        if self.instruction_backend != "openai":
-            raise ValueError(
-                f"❌ ERROR: Unsupported instruction backend: {self.instruction_backend}"
+        if self.instruction_backend == "openai":
+            return await call_openai(
+                prompt,
+                self.instruction_model,
+                self._openai_key,
+                max_tokens=1200,
+                trace_name=trace_name,
+                metadata=metadata,
             )
-        return await call_openai(
-            prompt,
-            self.instruction_model,
-            self._openai_key,
-            max_tokens=1200,
-            trace_name=trace_name,
-            metadata=metadata,
+        if self.instruction_backend == "claude":
+            return await call_claude(
+                prompt,
+                self.instruction_model,
+                self._claude_key,
+                max_tokens=1200,
+                trace_name=trace_name,
+                metadata=metadata,
+            )
+        raise ValueError(
+            f"❌ ERROR: Unsupported instruction backend: {self.instruction_backend}"
         )
