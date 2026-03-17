@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ace.pr_review import InMemoryPRReviewSessionStore, PRReviewStatus
-from ace.pr_review.job_store import InMemoryPRReviewJobStore
+from ace.pr_review.job_store import PRReviewClaimResult, InMemoryPRReviewJobStore
 from ace.pr_review.pubsub_queue import PRReviewJob
 from ace.webhooks.handlers import WebhookHandler
 from ace.webhooks.event_router import WorkEvent
@@ -73,12 +73,50 @@ class _StubPRReviewQueue:
         return f"pr-msg-{len(self.jobs)}"
 
 
+class _StubWorkItemTracker:
+    def __init__(self, project_id: str = "pid", project_item=None) -> None:
+        self.project_id = project_id
+        self.project_item = project_item
+
+    async def get_project_id(self, *_: str) -> str:
+        return self.project_id
+
+    async def get_project_item_by_id(self, *_: str):
+        return self.project_item
+
+
+class _StubAppAuth:
+    async def get_installation_token(self, _installation_id: int) -> Any:
+        return type("InstallToken", (), {"token": "test-token"})()
+
+
+class _ClaimDeniedPRReviewStore:
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    async def claim_job(self, record):
+        return PRReviewClaimResult(claimed=False, record=record, reason=self.reason)
+
+    async def mark_enqueued(
+        self,
+        *,
+        idempotency_key: str,
+        pubsub_message_id: str,
+        queued_at: str,
+    ) -> None:
+        raise AssertionError("mark_enqueued should not be called when claim is denied")
+
+    async def release_claim(self, idempotency_key: str) -> None:
+        return None
+
+
 class _SettingsStub:
     pr_review_enabled = True
     pr_review_allowed_repos = ""
     pr_review_pubsub_topic = "projects/test/topics/pr-review-jobs"
     github_project_name = "Acme Platform"
     github_org = "Acme-Corp"
+    issue_tracker_backend = "github"
 
 
 class _SettingsDisabledStub(_SettingsStub):
@@ -437,6 +475,159 @@ async def test_pull_request_handler_ignores_draft_and_non_reviewable_actions(mon
     assert draft_result == {"status": "ignored", "reason": "draft_pr"}
     assert closed_result == {"status": "ignored", "reason": "action_not_reviewable"}
     assert queue.jobs == []
+
+
+@pytest.mark.asyncio
+async def test_pull_request_handler_ignores_when_installation_missing(monkeypatch):
+    from ace.webhooks import handlers as handler_module
+
+    logger = _StubLogger()
+    queue = _StubPRReviewQueue()
+    store = InMemoryPRReviewJobStore()
+    handler = WebhookHandler(
+        settings=_SettingsStub(),
+        app_auth=object(),
+        pr_review_queue=queue,
+        pr_review_store=store,
+    )
+    monkeypatch.setattr(handler_module, "logger", logger)
+
+    payload = _build_pull_request_payload(action="opened", head_sha="abc123")
+    payload.pop("installation")
+
+    result = await handler.handle(
+        "pull_request",
+        payload,
+        "delivery-missing-install",
+        workflow_id="wf-missing-install",
+    )
+
+    assert result == {"status": "ignored", "reason": "missing_installation_id"}
+    assert queue.jobs == []
+
+
+@pytest.mark.asyncio
+async def test_pull_request_handler_skips_when_claim_not_in_progress(monkeypatch):
+    from ace.webhooks import handlers as handler_module
+
+    logger = _StubLogger()
+    queue = _StubPRReviewQueue()
+    store = _ClaimDeniedPRReviewStore(reason="review_already_recorded")
+    handler = WebhookHandler(
+        settings=_SettingsStub(),
+        app_auth=object(),
+        pr_review_queue=queue,
+        pr_review_store=store,
+    )
+    monkeypatch.setattr(handler_module, "logger", logger)
+
+    result = await handler.handle(
+        "pull_request",
+        _build_pull_request_payload(action="opened", head_sha="abc123"),
+        "delivery-declined",
+        workflow_id="wf-declined",
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "review_already_recorded"
+    assert result["pr_number"] == 42
+    assert result["repo"] == "Acme-Corp/widget-api"
+    assert queue.jobs == []
+
+
+@pytest.mark.asyncio
+async def test_projects_v2_item_without_payload_is_ignored():
+    handler = WebhookHandler(settings=_SettingsStub(), app_auth=_StubAppAuth())
+
+    result = await handler.handle(
+        "projects_v2_item",
+        {"installation": {"id": 999}},
+        "delivery-project-missing-item",
+    )
+
+    assert result == {
+        "status": "ignored",
+        "reason": "missing_projects_v2_item",
+    }
+
+
+@pytest.mark.asyncio
+async def test_projects_v2_item_missing_content_node_is_ignored(monkeypatch):
+    from ace.webhooks import handlers as handler_module
+
+    tracker = _StubWorkItemTracker()
+    monkeypatch.setattr(handler_module, "build_work_item_tracker", lambda *_, **__: tracker)
+
+    handler = WebhookHandler(settings=_SettingsStub(), app_auth=_StubAppAuth())
+    work_event = WorkEvent(
+        source="github",
+        event_type="projects_v2_item",
+        action="updated",
+    )
+
+    result = await handler.handle(
+        work_event,
+        {
+            "installation": {"id": 999},
+            "projects_v2_item": {"node_id": "item-1"},
+            "project": {"title": "Acme Platform"},
+        },
+        "delivery-missing-content",
+    )
+
+    assert result == {"status": "ignored", "reason": "missing_content_node_id"}
+
+
+@pytest.mark.asyncio
+async def test_issue_comment_event_missing_issue_metadata_is_ignored():
+    handler = WebhookHandler(settings=_SettingsStub(), app_auth=object())
+
+    result = await handler.handle(
+        "issue_comment",
+        {
+            "action": "created",
+            "issue": {"pull_request": {"url": "https://api.github.com/repos/acme/widget/pulls/1"}},
+            "installation": {"id": 999},
+            "repository": {"name": "widget-api", "owner": {"login": "Acme-Corp"}},
+        },
+        "delivery-issue-metadata",
+    )
+
+    assert result == {"status": "ignored", "reason": "missing_issue_metadata"}
+
+
+@pytest.mark.asyncio
+async def test_issues_event_missing_issue_metadata_is_ignored():
+    handler = WebhookHandler(settings=_SettingsStub(), app_auth=object())
+
+    result = await handler.handle(
+        "issues",
+        {
+            "action": "closed",
+            "issue": {},
+            "installation": {"id": 999},
+        },
+        "delivery-issues-metadata",
+    )
+
+    assert result == {"status": "ignored", "reason": "missing_issue_metadata"}
+
+
+@pytest.mark.asyncio
+async def test_pull_request_handler_missing_payload_is_ignored():
+    handler = WebhookHandler(settings=_SettingsStub(), app_auth=object())
+
+    result = await handler.handle(
+        "pull_request",
+        {
+            "action": "opened",
+            "installation": {"id": 999},
+            "repository": {"name": "widget-api", "owner": {"login": "Acme-Corp"}},
+        },
+        "delivery-pr-metadata",
+    )
+
+    assert result == {"status": "ignored", "reason": "missing_pr_metadata"}
 
 
 @pytest.mark.asyncio

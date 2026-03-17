@@ -59,12 +59,24 @@ class WebhookHandler:
         delivery: str | None,
         workflow_id: str | None = None,
     ) -> dict[str, Any]:
-        work_event = event if isinstance(event, WorkEvent) else self.event_router.route(
-            source="github",
-            event=event,
-            payload=payload,
-            delivery=delivery,
-        )
+        try:
+            work_event = event if isinstance(event, WorkEvent) else self.event_router.route(
+                source="github",
+                event=event,
+                payload=payload,
+                delivery=delivery,
+            )
+        except ValueError as exc:
+            reason = _ignored_reason_from_expected_error(str(exc))
+            if reason is None:
+                raise
+            logger.info(
+                "webhook_ignored_invalid_payload",
+                event_name=str(event),
+                delivery=delivery,
+                reason=reason,
+            )
+            return {"status": "ignored", "reason": reason}
         if work_event is None:
             logger.info("webhook_ignored", event=event, delivery=delivery)
             return {"status": "ignored", "event": event}
@@ -98,7 +110,15 @@ class WebhookHandler:
     async def _handle_projects_v2_item(
         self, payload: dict[str, Any], delivery: str | None
     ) -> dict[str, Any]:
-        installation_id = _extract_installation_id(payload)
+        try:
+            installation_id = _extract_installation_id(payload)
+        except ValueError as exc:
+            logger.info(
+                "project_item_ignored_missing_installation",
+                error=str(exc),
+                delivery=delivery,
+            )
+            return {"status": "ignored", "reason": "missing_installation_id"}
         token = await self.app_auth.get_installation_token(installation_id)
 
         async with GitHubAPIClient(token.token) as api_client:
@@ -107,7 +127,15 @@ class WebhookHandler:
                 owner=self.settings.github_org,
                 repo="",
             )
-            item = _extract_projects_item(payload)
+            try:
+                item = _extract_projects_item(payload)
+            except ValueError as exc:
+                logger.info(
+                    "project_item_ignored_missing_payload",
+                    error=str(exc),
+                    delivery=delivery,
+                )
+                return {"status": "ignored", "reason": "missing_projects_v2_item"}
             item_node_id = _extract_item_node_id(item)
             project_name = (
                 _extract_project_name(payload)
@@ -115,7 +143,12 @@ class WebhookHandler:
             )
             project_id = await tracker.get_project_id(project_name)
             if not project_id:
-                raise ValueError("❌ ERROR: Project not found")
+                logger.info(
+                    "project_not_found",
+                    delivery=delivery,
+                    project_name=project_name,
+                )
+                return {"status": "ignored", "reason": "project_not_found"}
 
             event_project_id = _extract_project_node_id(payload)
             if (
@@ -138,12 +171,23 @@ class WebhookHandler:
             if project_item is None:
                 content_node_id = _extract_content_node_id(item)
                 if not content_node_id:
-                    raise ValueError("❌ ERROR: project item missing content node id")
+                    logger.info(
+                        "project_item_ignored_missing_content_node",
+                        item=item,
+                        delivery=delivery,
+                    )
+                    return {"status": "ignored", "reason": "missing_content_node_id"}
                 issue_info = await _fetch_issue_info(api_client, content_node_id)
                 if issue_info is None:
-                    raise ValueError(
-                        "❌ ERROR: unable to resolve issue from project item"
+                    logger.info(
+                        "project_item_ignored_unable_to_resolve_issue",
+                        content_node_id=content_node_id,
+                        delivery=delivery,
                     )
+                    return {
+                        "status": "ignored",
+                        "reason": "unable_to_resolve_issue",
+                    }
                 item_id = await tracker.get_item_id_for_issue(
                     project_id,
                     issue_info.number,
@@ -151,11 +195,21 @@ class WebhookHandler:
                     issue_info.repo_name,
                 )
                 if not item_id:
-                    raise ValueError("❌ ERROR: project item not found for issue")
+                    logger.info(
+                        "project_item_not_found_for_issue",
+                        issue_number=issue_info.number,
+                        repo=f"{issue_info.repo_owner}/{issue_info.repo_name}",
+                        delivery=delivery,
+                    )
+                    return {
+                        "status": "ignored",
+                        "reason": "project_item_not_found_for_issue",
+                    }
                 project_item = await tracker.get_project_item_by_id(item_id)
 
             if project_item is None:
-                raise ValueError("❌ ERROR: project item lookup failed")
+                logger.info("project_item_lookup_failed", delivery=delivery)
+                return {"status": "ignored", "reason": "project_item_lookup_failed"}
 
             transition = _extract_status_transition(payload)
             if not transition:
@@ -209,9 +263,18 @@ class WebhookHandler:
 
         issue_info = _extract_issue_from_payload(payload)
         if issue_info is None:
-            raise ValueError("❌ ERROR: issue_comment payload missing issue metadata")
+            logger.info("issue_comment_ignored_missing_issue_metadata", delivery=delivery)
+            return {"status": "ignored", "reason": "missing_issue_metadata"}
 
-        api_client = await self._get_github_api_client(payload)
+        try:
+            api_client = await self._get_github_api_client(payload)
+        except ValueError as exc:
+            logger.info(
+                "issue_comment_ignored_missing_installation",
+                error=str(exc),
+                delivery=delivery,
+            )
+            return {"status": "ignored", "reason": "missing_installation_id"}
         async with api_client:
             tracker = build_work_item_tracker(
                 api_client=api_client,
@@ -242,9 +305,18 @@ class WebhookHandler:
 
         closed_issue = _extract_issue_from_payload(payload)
         if closed_issue is None:
-            raise ValueError("❌ ERROR: issues payload missing issue metadata")
+            logger.info("issues_event_ignored_missing_issue_metadata", delivery=delivery)
+            return {"status": "ignored", "reason": "missing_issue_metadata"}
 
-        api_client = await self._get_github_api_client(payload)
+        try:
+            api_client = await self._get_github_api_client(payload)
+        except ValueError as exc:
+            logger.info(
+                "issues_event_ignored_missing_installation",
+                error=str(exc),
+                delivery=delivery,
+            )
+            return {"status": "ignored", "reason": "missing_installation_id"}
         async with api_client:
             tracker = build_work_item_tracker(
                 api_client=api_client,
@@ -327,8 +399,18 @@ class WebhookHandler:
 
         pr = _extract_pull_request_from_payload(payload)
         if pr is None:
-            raise ValueError("❌ ERROR: pull_request payload missing metadata")
+            logger.info("pr_review_ignored_missing_pr_metadata", delivery=delivery)
+            return {"status": "ignored", "reason": "missing_pr_metadata"}
 
+        try:
+            installation_id = _extract_installation_id(payload)
+        except ValueError as exc:
+            logger.info(
+                "pr_review_ignored_missing_installation",
+                error=str(exc),
+                delivery=delivery,
+            )
+            return {"status": "ignored", "reason": "missing_installation_id"}
         resolved_workflow_id = workflow_id or _generate_workflow_id()
         pr_event_context = build_lifecycle_context(
             event="pull_request",
@@ -388,7 +470,6 @@ class WebhookHandler:
         )
 
         store = self._get_pr_review_store()
-        installation_id = _extract_installation_id(payload)
         idempotency_key = _build_pr_review_idempotency_key(
             pr.repo_owner,
             pr.repo_name,
@@ -432,7 +513,25 @@ class WebhookHandler:
                     "head_sha": pr.head_sha,
                     "idempotency_key": idempotency_key,
                 }
-            raise ValueError(f"❌ ERROR: failed to claim PR review job ({claim.reason})")
+            log_lifecycle_event(
+                logger,
+                stage=STAGE_PR_REVIEW_SKIPPED,
+                context=pr_event_context,
+                reason=claim.reason or "review_not_allowed",
+                pr_number=pr.number,
+                repo=f"{pr.repo_owner}/{pr.repo_name}",
+                head_sha=pr.head_sha,
+                idempotency_key=idempotency_key,
+            )
+            return {
+                "status": "skipped",
+                "reason": claim.reason or "review_not_allowed",
+                "action": "pr_review",
+                "pr_number": pr.number,
+                "repo": f"{pr.repo_owner}/{pr.repo_name}",
+                "head_sha": pr.head_sha,
+                "idempotency_key": idempotency_key,
+            }
 
         job = PRReviewJob(
             repo_owner=pr.repo_owner,
@@ -742,6 +841,15 @@ def _generate_workflow_id() -> str:
     return f"wf-{uuid4().hex}"
 
 
+def _ignored_reason_from_expected_error(error_message: str) -> str | None:
+    lowered = error_message.lower()
+    if "webhook payload missing installation id" in lowered:
+        return "missing_installation_id"
+    if "webhook payload missing projects_v2_item" in lowered:
+        return "missing_projects_v2_item"
+    return None
+
+
 async def _trigger_project_issue(
     project_item: WorkBoardItem,
     tracker: WorkItemTracker,
@@ -771,7 +879,17 @@ async def _trigger_project_issue(
         return {"status": "ignored", "reason": "status_mismatch"}
 
     if not project_item.repo_owner or not project_item.repo_name:
-        raise ValueError("❌ ERROR: project item missing repository metadata")
+        logger.info(
+            "project_item_ignored_missing_repository_metadata",
+            issue=project_item.number,
+            item_id=project_item.item_id,
+        )
+        return {
+            "status": "ignored",
+            "reason": "missing_repository_metadata",
+            "issue": project_item.number,
+            "item": project_item.item_id,
+        }
 
     if check_blockers:
         blockers = await tracker.get_issue_blockers(
