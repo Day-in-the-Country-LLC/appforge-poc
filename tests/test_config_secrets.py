@@ -6,8 +6,11 @@ from typing import Any
 
 import pytest
 
-from ace.config.secrets import clear_secret_cache, resolve_github_token, resolve_openai_api_key
+from ace.config.secrets import _load_credentials
 from ace.config.secrets import _secret_cache_key
+from ace.config.secrets import clear_secret_cache
+from ace.config.secrets import resolve_github_token
+from ace.config.secrets import resolve_openai_api_key
 from ace.config.settings import Settings
 
 
@@ -134,3 +137,34 @@ def test_env_backend_does_not_use_secret_manager_cache(monkeypatch):
     token = resolve_github_token(settings)
 
     assert token == "env-token"
+
+
+def test_load_credentials_none_path_does_not_fallback(monkeypatch):
+    def fail_if_called(_):
+        raise AssertionError("implicit fallback path should not be used")
+
+    monkeypatch.setattr(
+        "ace.config.secrets.service_account.Credentials.from_service_account_file",
+        fail_if_called,
+    )
+
+    assert _load_credentials(None) is None
+
+
+def test_load_credentials_uses_explicit_path(monkeypatch):
+    captured: dict[str, str] = {}
+
+    class DummyCredentials:
+        pass
+
+    def fake_from_service_account_file(path: str) -> DummyCredentials:
+        captured["path"] = path
+        return DummyCredentials()
+
+    monkeypatch.setattr(
+        "ace.config.secrets.service_account.Credentials.from_service_account_file",
+        fake_from_service_account_file,
+    )
+
+    assert isinstance(_load_credentials("/tmp/explicit-creds.json"), DummyCredentials)
+    assert captured["path"] == "/tmp/explicit-creds.json"

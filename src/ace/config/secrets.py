@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import threading
 import time
 
@@ -119,10 +118,6 @@ def load_secret(
 
 def _load_credentials(credentials_path: str | None) -> service_account.Credentials | None:
     path = credentials_path or ""
-    if not path:
-        fallback = Path("appforge-creds.json")
-        if fallback.exists():
-            path = str(fallback)
     if not path:
         return None
 
