@@ -191,3 +191,71 @@ async def test_schedule_refill_logs_errors_without_crashing(monkeypatch: pytest.
     await asyncio.sleep(0)
 
     assert events == ["refilled"]
+
+
+@pytest.mark.asyncio
+async def test_hydrate_issues_runs_concurrently(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ace.runners.agent_pool.get_settings", lambda: _PoolSettings())
+    monkeypatch.setattr(
+        "ace.runners.agent_pool.resolve_github_token",
+        lambda _: "test-github-token",
+    )
+
+    pool = AgentPool(target=AgentTarget.REMOTE)
+    active = 0
+    max_active = 0
+    lock = asyncio.Lock()
+
+    async def _hydrate_with_delay(issue: object) -> object:
+        nonlocal active, max_active
+        async with lock:
+            active += 1
+            if active > max_active:
+                max_active = active
+        await asyncio.sleep(0.05)
+        async with lock:
+            active -= 1
+        return issue
+
+    monkeypatch.setattr(pool, "_hydrate_issue", _hydrate_with_delay)
+
+    issues = [
+        _issue(number=1, owner="acme", repo="frontend", title="First"),
+        _issue(number=2, owner="acme", repo="frontend", title="Second"),
+        _issue(number=3, owner="acme", repo="frontend", title="Third"),
+    ]
+
+    await pool._hydrate_issues(issues)
+
+    assert max_active > 1
+
+
+@pytest.mark.asyncio
+async def test_hydrate_issues_preserves_other_issues_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ace.runners.agent_pool.get_settings", lambda: _PoolSettings())
+    monkeypatch.setattr(
+        "ace.runners.agent_pool.resolve_github_token",
+        lambda _: "test-github-token",
+    )
+
+    pool = AgentPool(target=AgentTarget.REMOTE)
+
+    async def _hydrate_with_error(issue: object) -> object:
+        if issue.number == 2:
+            raise RuntimeError("hydrate failed for issue 2")
+        return issue
+
+    monkeypatch.setattr(pool, "_hydrate_issue", _hydrate_with_error)
+
+    issues = [
+        _issue(number=1, owner="acme", repo="frontend", title="First"),
+        _issue(number=2, owner="acme", repo="frontend", title="Second"),
+        _issue(number=3, owner="acme", repo="frontend", title="Third"),
+    ]
+
+    result = await pool._hydrate_issues(issues)
+
+    assert len(result) == len(issues)
+    assert result[0].number == 1
+    assert result[1].number == 2
+    assert result[2].number == 3

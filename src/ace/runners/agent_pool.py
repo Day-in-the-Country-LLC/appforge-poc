@@ -284,9 +284,25 @@ class AgentPool:
             return issue
 
     async def _hydrate_issues(self, issues: list[Issue]) -> list[Issue]:
+        if not issues:
+            return []
+
+        hydrated_results = await asyncio.gather(
+            *[self._hydrate_issue(issue) for issue in issues],
+            return_exceptions=True,
+        )
+
         hydrated: list[Issue] = []
-        for issue in issues:
-            hydrated.append(await self._hydrate_issue(issue))
+        for issue, result in zip(issues, hydrated_results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "issue_hydration_failed",
+                    issue=issue.number,
+                    error=str(result),
+                )
+                hydrated.append(issue)
+            else:
+                hydrated.append(result)
         return hydrated
 
     def get_status(self) -> PoolStatus:
