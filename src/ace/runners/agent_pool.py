@@ -206,6 +206,24 @@ class AgentPool:
         self._fatal_error = self._format_fatal_error(error)
         self.stop()
 
+    @staticmethod
+    def _is_fatal_agent_pool_error(error: BaseException) -> bool:
+        """Return True when a pool-level condition should stop all processing."""
+        message = (str(error) or "").lower()
+        fatal_markers = (
+            "github token",
+            "openai api key",
+            "claude api key",
+            "linear api key",
+            "appforge_mcp_url",
+            "secret manager",
+            "unsupported secrets backend",
+            "secret fetch failed",
+        )
+        return message.startswith("❌ error") and any(
+            marker in message for marker in fatal_markers
+        )
+
     @property
     def api_client(self) -> GitHubAPIClient:
         """Get or create the GitHub API client."""
@@ -729,7 +747,28 @@ class AgentPool:
                     else:
                         error_message = agent_result.error or agent_result.output
                 error_message = error_message or "agent reported failure"
-                raise RuntimeError(self._format_fatal_error(error_message))
+                slot.state = AgentState.FAILED
+                slot.completed_at = datetime.now()
+                slot.error = error_message
+                self._failed_count += 1
+                self._session_processed += 1
+                duration_seconds = (slot.completed_at - slot.started_at).total_seconds()
+                metrics.observe_summary(
+                    "ace_agent_duration_seconds",
+                    duration_seconds,
+                    labels={"backend": backend},
+                )
+                metrics.inc_counter(
+                    "ace_agent_runs_total",
+                    labels={"status": "failed", "backend": backend},
+                )
+                logger.error(
+                    "agent_failed",
+                    slot=slot.slot_id,
+                    issue=issue.number,
+                    error=error_message,
+                )
+                return
 
             slot.state = AgentState.COMPLETED
             slot.completed_at = datetime.now()
@@ -778,7 +817,8 @@ class AgentPool:
                 issue=issue.number,
                 error=str(e),
             )
-            self._set_fatal_error(str(e))
+            if self._is_fatal_agent_pool_error(e):
+                self._set_fatal_error(str(e))
 
         finally:
             if slot.work_key:
