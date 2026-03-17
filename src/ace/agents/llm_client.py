@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import httpx
 import structlog
 
@@ -98,12 +99,15 @@ class _LangSmithTracer:
 
 
 _TRACER: _LangSmithTracer | None = None
+_TRACER_LOCK = threading.Lock()
 
 
 def _get_tracer() -> _LangSmithTracer:
     global _TRACER
     if _TRACER is None:
-        _TRACER = _LangSmithTracer()
+        with _TRACER_LOCK:
+            if _TRACER is None:
+                _TRACER = _LangSmithTracer()
     return _TRACER
 
 
