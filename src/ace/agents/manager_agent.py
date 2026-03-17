@@ -611,10 +611,13 @@ class ManagerAgent:
     async def _call_tool(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         try:
             if tool_name == "get_issue":
+                issue_number = _require_int_arg(args, "number", tool_name)
+                repo_owner = _require_str_arg(args, "repo_owner", tool_name)
+                repo_name = _require_str_arg(args, "repo_name", tool_name)
                 issue = await self._issue_queue.get_issue(
-                    int(args.get("number")),
-                    repo_owner=args.get("repo_owner"),
-                    repo_name=args.get("repo_name"),
+                    issue_number,
+                    repo_owner=repo_owner,
+                    repo_name=repo_name,
                 )
                 return {
                     "number": issue.number,
@@ -624,10 +627,13 @@ class ManagerAgent:
                     "state": issue.state,
                 }
             if tool_name == "list_blockers":
+                repo_owner = _require_str_arg(args, "repo_owner", tool_name)
+                repo_name = _require_str_arg(args, "repo_name", tool_name)
+                issue_number = _require_int_arg(args, "number", tool_name)
                 blockers = await self._projects_client.get_issue_blockers(
-                    args.get("repo_owner"),
-                    args.get("repo_name"),
-                    int(args.get("number")),
+                    repo_owner,
+                    repo_name,
+                    issue_number,
                 )
                 return [
                     {
@@ -640,12 +646,15 @@ class ManagerAgent:
                     for blocker in blockers
                 ]
             if tool_name == "get_project_status":
+                issue_number = _require_int_arg(args, "number", tool_name)
+                repo_owner = _require_str_arg(args, "repo_owner", tool_name)
+                repo_name = _require_str_arg(args, "repo_name", tool_name)
                 project_id = await self._get_project_id()
                 status = await self._projects_client.get_issue_project_status(
                     project_id,
-                    int(args.get("number")),
-                    args.get("repo_owner"),
-                    args.get("repo_name"),
+                    issue_number,
+                    repo_owner,
+                    repo_name,
                 )
                 return {"status": status}
         except Exception as exc:
@@ -668,6 +677,26 @@ class ManagerAgent:
         self._project_id = project_id
         return project_id
 
+
+def _require_int_arg(args: dict[str, Any], key: str, tool_name: str) -> int:
+    value = args.get(key)
+    if value is None:
+        raise ValueError(f"{tool_name} tool requires integer field '{key}'")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{tool_name} tool requires integer field '{key}', got {type(value).__name__}"
+        ) from None
+
+
+def _require_str_arg(args: dict[str, Any], key: str, tool_name: str) -> str:
+    value = args.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{tool_name} tool requires non-empty string field '{key}'"
+        )
+    return value
 
 def _safe_parse_int_list(raw: str) -> list[int]:
     """Parse a JSON-like list of ints without pulling in a full JSON parser."""

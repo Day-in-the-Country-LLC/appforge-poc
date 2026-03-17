@@ -36,6 +36,44 @@ def _issue(
     )
 
 
+class _IssueQueueStub:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, str, str]] = []
+
+    async def get_issue(self, number: int, repo_owner: str, repo_name: str) -> Issue:
+        self.calls.append((number, repo_owner, repo_name))
+        return _issue(
+            number=number,
+            owner=repo_owner,
+            repo=repo_name,
+            title=f"{repo_owner}/{repo_name}#{number}",
+            labels=["agent:remote"],
+        )
+
+
+class _ProjectsClientStub:
+    def __init__(self) -> None:
+        self.blocker_calls: list[tuple[str, str, int]] = []
+        self.status_calls: list[tuple[str, int, str, str]] = []
+
+    async def get_issue_blockers(self, repo_owner: str, repo_name: str, number: int) -> list[Issue]:
+        self.blocker_calls.append((repo_owner, repo_name, number))
+        return []
+
+    async def get_issue_project_status(
+        self,
+        project_id: str,
+        number: int,
+        repo_owner: str,
+        repo_name: str,
+    ) -> str:
+        self.status_calls.append((project_id, number, repo_owner, repo_name))
+        return "done"
+
+    async def get_org_project_id(self, _org: str, _project: str) -> str:
+        return "project-id"
+
+
 class _ManagerSettings(SimpleNamespace):
     openai_api_key = "openai"
     github_token = "github"
@@ -165,3 +203,70 @@ async def test_build_issue_context_pack_reuses_existing_session(monkeypatch: pyt
         "issue:acme/frontend#101",
         "issue:acme/backend#77",
     ]
+
+
+@pytest.mark.asyncio
+async def test_call_tool_get_issue_validates_number_argument(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(manager_agent_module, "get_settings", lambda: _ManagerSettings())
+    monkeypatch.setattr(manager_agent_module, "resolve_github_token", lambda _settings: "github")
+    monkeypatch.setattr(manager_agent_module, "resolve_openai_api_key", lambda _settings: "openai")
+
+    manager = ManagerAgent()
+    manager._issue_queue = _IssueQueueStub()
+
+    result = await manager._call_tool(
+        "get_issue",
+        {"repo_owner": "acme", "repo_name": "backend"},
+    )
+    assert result["error"] == "get_issue tool requires integer field 'number'"
+
+
+@pytest.mark.asyncio
+async def test_call_tool_get_issue_validates_repository_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(manager_agent_module, "get_settings", lambda: _ManagerSettings())
+    monkeypatch.setattr(manager_agent_module, "resolve_github_token", lambda _settings: "github")
+    monkeypatch.setattr(manager_agent_module, "resolve_openai_api_key", lambda _settings: "openai")
+
+    manager = ManagerAgent()
+    manager._issue_queue = _IssueQueueStub()
+
+    result = await manager._call_tool(
+        "get_issue",
+        {"number": 7, "repo_owner": "acme"},
+    )
+    assert result["error"] == "get_issue tool requires non-empty string field 'repo_name'"
+
+
+@pytest.mark.asyncio
+async def test_call_tool_list_blockers_validates_number_argument(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(manager_agent_module, "get_settings", lambda: _ManagerSettings())
+    monkeypatch.setattr(manager_agent_module, "resolve_github_token", lambda _settings: "github")
+    monkeypatch.setattr(manager_agent_module, "resolve_openai_api_key", lambda _settings: "openai")
+
+    manager = ManagerAgent()
+    projects_client = _ProjectsClientStub()
+    manager._projects_client = projects_client
+
+    result = await manager._call_tool(
+        "list_blockers",
+        {"repo_owner": "acme", "repo_name": "backend", "number": "not-a-number"},
+    )
+    assert result["error"] == (
+        "list_blockers tool requires integer field 'number', got str"
+    )
+
+
+@pytest.mark.asyncio
+async def test_call_tool_get_project_status_validates_number_argument(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(manager_agent_module, "get_settings", lambda: _ManagerSettings())
+    monkeypatch.setattr(manager_agent_module, "resolve_github_token", lambda _settings: "github")
+    monkeypatch.setattr(manager_agent_module, "resolve_openai_api_key", lambda _settings: "openai")
+
+    manager = ManagerAgent()
+    manager._projects_client = _ProjectsClientStub()
+
+    result = await manager._call_tool(
+        "get_project_status",
+        {"repo_owner": "acme", "repo_name": "backend", "number": None},
+    )
+    assert result["error"] == "get_project_status tool requires integer field 'number'"
