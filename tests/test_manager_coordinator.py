@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from ace.agents import manager_agent as manager_agent_module
-from ace.agents.manager_agent import ManagerAgent
+from ace.agents.manager_agent import ManagerAgent, _safe_parse_int_list
 from ace.github.issue_queue import Issue
 from ace.planning.store_firestore import InMemoryPlanningStore
 
@@ -270,3 +270,13 @@ async def test_call_tool_get_project_status_validates_number_argument(monkeypatc
         {"repo_owner": "acme", "repo_name": "backend", "number": None},
     )
     assert result["error"] == "get_project_status tool requires integer field 'number'"
+
+
+def test_safe_parse_int_list_parses_json_numbers_and_code_fences() -> None:
+    assert _safe_parse_int_list('[1, "2", 3, 4.7]') == [1, 2, 3, 4]
+    assert _safe_parse_int_list("```json\n[5, \"6\", 7]\n```") == [5, 6, 7]
+
+
+def test_safe_parse_int_list_ignores_invalid_items_and_bad_payload() -> None:
+    assert _safe_parse_int_list("[1, \"bad\", null, true]") == [1]
+    assert _safe_parse_int_list("not-json") == []

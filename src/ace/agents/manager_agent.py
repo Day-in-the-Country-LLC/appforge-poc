@@ -699,7 +699,7 @@ def _require_str_arg(args: dict[str, Any], key: str, tool_name: str) -> str:
     return value
 
 def _safe_parse_int_list(raw: str) -> list[int]:
-    """Parse a JSON-like list of ints without pulling in a full JSON parser."""
+    """Parse a JSON list into integers, ignoring invalid items."""
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`\n ")
@@ -707,17 +707,19 @@ def _safe_parse_int_list(raw: str) -> list[int]:
             cleaned = cleaned.split("\n", 1)[-1].strip()
     if not cleaned.startswith("[") or not cleaned.endswith("]"):
         return []
-    inner = cleaned[1:-1].strip()
-    if not inner:
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
         return []
-    values = []
-    for part in inner.split(","):
-        part = part.strip().strip('"')
-        if not part:
+    if not isinstance(parsed, list):
+        return []
+    values: list[int] = []
+    for item in parsed:
+        if isinstance(item, bool):
             continue
         try:
-            values.append(int(part))
-        except ValueError:
+            values.append(int(item))
+        except (TypeError, ValueError):
             continue
     return values
 
