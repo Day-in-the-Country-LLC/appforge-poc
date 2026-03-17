@@ -202,9 +202,47 @@ async def test_cli_batch_runner_start_and_run_turn(monkeypatch, tmp_path: Path) 
 )
 def test_build_session_runner_returns_cli_batch_runner_for_supported_backend(backend: str) -> None:
     runner = session_runtime.build_session_runner(backend)
-    assert isinstance(runner, session_runtime.CliBatchRunner)
+    if backend == "codex":
+        assert isinstance(runner, session_runtime.CodexBatchRunner)
+    else:
+        assert isinstance(runner, session_runtime.ClaudeBatchRunner)
+
+
+@pytest.mark.parametrize(
+    ("backend", "mode", "expected_type"),
+    [
+        ("codex", "persistent", session_runtime.CodexSessionRunner),
+        ("claude", "persistent", session_runtime.ClaudeSessionRunner),
+    ],
+)
+def test_build_session_runner_routes_persistent_backend_when_session_mode_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    mode: str,
+    expected_type: type[object],
+) -> None:
+    class _Settings:
+        agent_session_mode = mode
+
+    monkeypatch.setattr(session_runtime, "get_settings", lambda: _Settings())
+    runner = session_runtime.build_session_runner(backend)
+    assert isinstance(runner, expected_type)
+
+
+def test_build_session_runner_respects_explicit_session_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Settings:
+        agent_session_mode = "persistent"
+
+    monkeypatch.setattr(session_runtime, "get_settings", lambda: _Settings())
+    runner = session_runtime.build_session_runner("codex", session_mode="batch")
+    assert isinstance(runner, session_runtime.CodexBatchRunner)
 
 
 def test_build_session_runner_rejects_unknown_backend() -> None:
     with pytest.raises(ValueError, match="unsupported backend"):
         session_runtime.build_session_runner("unknown")
+
+
+def test_build_session_runner_rejects_unknown_session_mode() -> None:
+    with pytest.raises(ValueError, match="unsupported session mode"):
+        session_runtime.build_session_runner("codex", session_mode="unsupported")

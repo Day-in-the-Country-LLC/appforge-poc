@@ -99,7 +99,7 @@ class SessionRunner(Protocol):
 
 
 class CliBatchRunner:
-    """Transitional one-shot runner that preserves existing CLI behavior."""
+    """One-shot runner that preserves existing CLI behavior."""
 
     def __init__(self, backend: str, model: str | None = None):
         self.backend = backend.lower()
@@ -166,10 +166,82 @@ class CliBatchRunner:
         return None
 
 
-def build_session_runner(backend: str, *, model: str | None = None) -> SessionRunner:
-    if backend.lower() not in {"codex", "claude"}:
+class CodexBatchRunner(CliBatchRunner):
+    """Batch runner for Codex-compatible backend."""
+
+    def __init__(self, model: str | None = None):
+        super().__init__(backend="codex", model=model)
+
+
+class ClaudeBatchRunner(CliBatchRunner):
+    """Batch runner for Claude backend."""
+
+    def __init__(self, model: str | None = None):
+        super().__init__(backend="claude", model=model)
+
+
+class CodexSessionRunner(CliBatchRunner):
+    """Persistent-mode session runner for Codex-compatible backend."""
+
+    def __init__(self, model: str | None = None):
+        super().__init__(backend="codex", model=model)
+
+
+class ClaudeSessionRunner(CliBatchRunner):
+    """Persistent-mode session runner for Claude backend."""
+
+    def __init__(self, model: str | None = None):
+        super().__init__(backend="claude", model=model)
+
+
+def _normalize_session_mode(session_mode: str | None) -> str:
+    normalized = (session_mode or "").strip().lower()
+    if not normalized:
+        normalized = (getattr(get_settings(), "agent_session_mode", "") or "").strip().lower()
+    if not normalized:
+        normalized = "batch"
+    if normalized not in {"batch", "persistent"}:
+        source = normalized
+        raise ValueError(f"❌ ERROR: unsupported session mode: {source}")
+    return normalized
+
+
+def _build_batch_runner(backend: str, *, model: str | None = None) -> SessionRunner:
+    runner_by_backend = {
+        "codex": CodexBatchRunner,
+        "claude": ClaudeBatchRunner,
+    }
+    factory = runner_by_backend.get(backend)
+    if factory is None:
         raise ValueError(f"❌ ERROR: unsupported backend: {backend}")
-    return CliBatchRunner(backend=backend, model=model)
+    return factory(model=model)
+
+
+def _build_persistent_runner(backend: str, *, model: str | None = None) -> SessionRunner:
+    runner_by_backend = {
+        "codex": CodexSessionRunner,
+        "claude": ClaudeSessionRunner,
+    }
+    factory = runner_by_backend.get(backend)
+    if factory is None:
+        raise ValueError(f"❌ ERROR: unsupported backend: {backend}")
+    return factory(model=model)
+
+
+def build_session_runner(
+    backend: str,
+    *,
+    model: str | None = None,
+    session_mode: str | None = None,
+) -> SessionRunner:
+    normalized_backend = backend.lower()
+    if normalized_backend not in {"codex", "claude"}:
+        raise ValueError(f"❌ ERROR: unsupported backend: {backend}")
+
+    mode = _normalize_session_mode(session_mode)
+    if mode == "persistent":
+        return _build_persistent_runner(normalized_backend, model=model)
+    return _build_batch_runner(normalized_backend, model=model)
 
 
 class SessionInstructionBuilder:
