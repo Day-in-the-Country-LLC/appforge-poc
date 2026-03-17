@@ -161,6 +161,8 @@ class AgentPool:
         self._project_id: str | None = None
         self._running = False
         self._draining = False  # Drain mode: process until queue empty
+        self._mcp_client: McpClient | None = None
+        self._mcp_url: str | None = None
         self._completed_count = 0
         self._failed_count = 0
         self._fatal_error: str | None = None
@@ -168,6 +170,7 @@ class AgentPool:
         self._session_processed: int = 0  # Issues processed in current session
         self._work_meta_by_key: dict[str, dict[str, Any]] = {}
         self._resume_completed: bool = False
+        self._client_cleanup_task: asyncio.Task[Any] | None = None
         self._last_cleanup_at: datetime | None = None
         self._refill_lock = asyncio.Lock()
         self._refill_scheduled = False
@@ -348,24 +351,65 @@ class AgentPool:
         self._project_id = project_id
         return project_id
 
+    def _get_mcp_url(self) -> str:
+        if not self.settings.appforge_mcp_url:
+            raise ValueError("❌ ERROR: APPFORGE_MCP_URL is required for MCP calls")
+        url = self.settings.appforge_mcp_url.rstrip("/")
+        if not url.endswith("/mcp"):
+            url = f"{url}/mcp"
+        return url
+
+    async def _get_mcp_client(self) -> McpClient:
+        url = self._get_mcp_url()
+        if self._mcp_client is not None and self._mcp_url == url:
+            return self._mcp_client
+
+        if self._mcp_client is not None:
+            try:
+                await self._mcp_client.close()
+            except Exception as exc:
+                logger.warning("agent_pool_mcp_client_close_failed", error=str(exc))
+            self._mcp_client = None
+            self._mcp_url = None
+
+        self._mcp_url = url
+        self._mcp_client = McpClient(url)
+        return self._mcp_client
+
+    async def _cleanup_pool_clients(self) -> None:
+        if self._mcp_client is not None:
+            try:
+                await self._mcp_client.close()
+            except Exception as exc:
+                logger.warning("agent_pool_mcp_client_close_failed", error=str(exc))
+            self._mcp_client = None
+            self._mcp_url = None
+
+        if self._api_client is not None:
+            try:
+                await self._api_client.close()
+            except Exception as exc:
+                logger.warning("agent_pool_api_client_close_failed", error=str(exc))
+            self._api_client = None
+
+        self._projects_client = None
+        self._issue_queue = None
+        self._project_id = None
+
     async def _fetch_blockers_via_appforge_mcp(self, issue: Issue) -> list[Issue]:
         if not issue.repo_owner or not issue.repo_name:
             return []
 
-        url = self.settings.appforge_mcp_url.rstrip("/")
-        if not url.endswith("/mcp"):
-            url = f"{url}/mcp"
-
         try:
-            async with McpClient(url) as client:
-                resp = await client.call_tool(
-                    "list_issue_blockers",
-                    {
-                        "repo_owner": issue.repo_owner,
-                        "repo_name": issue.repo_name,
-                        "issue_number": issue.number,
-                    },
-                )
+            client = await self._get_mcp_client()
+            resp = await client.call_tool(
+                "list_issue_blockers",
+                {
+                    "repo_owner": issue.repo_owner,
+                    "repo_name": issue.repo_name,
+                    "issue_number": issue.number,
+                },
+            )
         except Exception as exc:
             raise ValueError(f"❌ ERROR: Failed to fetch issue blockers: {exc}") from exc
 
@@ -575,45 +619,41 @@ class AgentPool:
 
     async def _fetch_ready_issues_via_mcp(self) -> list[Issue]:
         """Fetch ready issues from appforge MCP (pre-filtered by status/label/blockers)."""
-        url = self.settings.appforge_mcp_url.rstrip("/")
-        if not url.endswith("/mcp"):
-            url = f"{url}/mcp"
-
         try:
-            async with McpClient(url) as client:
-                args = {
-                    "project_name": self.settings.github_project_name,
-                    "status": self.settings.github_ready_status,
-                    "remote_label": self.settings.github_remote_agent_label,
-                }
-                resp = await client.call_tool("list_ready_remote_items", args)
-                issues: list[Issue] = []
-                now = datetime.now(UTC)
-                for item in _extract_mcp_items(resp):
-                    try:
-                        issues.append(
-                            Issue(
-                                number=int(item["number"]),
-                                title=item.get("title", ""),
-                                body="",
-                                labels=item.get("labels", []),
-                                assignee=None,
-                                state="open",
-                                created_at=now,
-                                updated_at=now,
-                                html_url=item.get("html_url", ""),
-                                repo_owner=item.get("repo_owner"),
-                                repo_name=item.get("repo_name"),
-                            )
+            client = await self._get_mcp_client()
+            args = {
+                "project_name": self.settings.github_project_name,
+                "status": self.settings.github_ready_status,
+                "remote_label": self.settings.github_remote_agent_label,
+            }
+            resp = await client.call_tool("list_ready_remote_items", args)
+            issues: list[Issue] = []
+            now = datetime.now(UTC)
+            for item in _extract_mcp_items(resp):
+                try:
+                    issues.append(
+                        Issue(
+                            number=int(item["number"]),
+                            title=item.get("title", ""),
+                            body="",
+                            labels=item.get("labels", []),
+                            assignee=None,
+                            state="open",
+                            created_at=now,
+                            updated_at=now,
+                            html_url=item.get("html_url", ""),
+                            repo_owner=item.get("repo_owner"),
+                            repo_name=item.get("repo_name"),
                         )
-                    except Exception as exc:  # pragma: no cover - defensive
-                        logger.warning("mcp_issue_parse_failed", item=item, error=str(exc))
-                logger.info(
-                    "fetched_ready_issues_via_mcp",
-                    count=len(issues),
-                    target=self.target.value,
-                )
-                return issues
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("mcp_issue_parse_failed", item=item, error=str(exc))
+            logger.info(
+                "fetched_ready_issues_via_mcp",
+                count=len(issues),
+                target=self.target.value,
+            )
+            return issues
         except Exception as exc:
             error_message = f"❌ ERROR: fetch_ready_issues_via_mcp_failed: {exc}"
             logger.error("fetch_ready_issues_via_mcp_failed", error=error_message)
@@ -1185,6 +1225,9 @@ class AgentPool:
         except Exception as e:
             self._set_fatal_error(str(e))
             raise RuntimeError(self._fatal_error) from e
+        finally:
+            if self._client_cleanup_task is not None and not self._client_cleanup_task.done():
+                await self._client_cleanup_task
 
         logger.info("agent_pool_stopped")
 
@@ -1249,6 +1292,7 @@ class AgentPool:
             raise RuntimeError(self._fatal_error) from e
         finally:
             self._draining = False
+            await self._cleanup_pool_clients()
 
         return {
             "status": "complete",
@@ -1262,6 +1306,18 @@ class AgentPool:
         """Stop the continuous polling loop."""
         self._running = False
         self._draining = False
+
+        if (
+            self._client_cleanup_task is None
+            or self._client_cleanup_task.done()
+        ):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._client_cleanup_task = None
+            else:
+                self._client_cleanup_task = loop.create_task(self._cleanup_pool_clients())
+
         logger.info("agent_pool_stop_requested")
 
     async def _maybe_cleanup(self) -> None:
@@ -1367,8 +1423,10 @@ class AgentPool:
         """Gracefully shutdown the agent pool."""
         self.stop()
         await self.wait_for_completion(timeout=30)
-        if self._api_client:
-            await self._api_client.close()
+        if self._client_cleanup_task is not None and not self._client_cleanup_task.done():
+            await self._client_cleanup_task
+        else:
+            await self._cleanup_pool_clients()
         logger.info("agent_pool_shutdown_complete")
 
 

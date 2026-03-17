@@ -85,6 +85,55 @@ class _FakeAgentGraph:
         return self.final_state
 
 
+class _FakeMcpClient:
+    instances: list["_FakeMcpClient"] = []
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.call_history: list[tuple[str, dict[str, object]]] = []
+        self.closed = False
+        self.__class__.instances.append(self)
+
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+        self.call_history.append((name, arguments))
+        if name == "list_ready_remote_items":
+            return {
+                "result": [
+                    {
+                        "number": 101,
+                        "title": "Ready issue",
+                        "labels": ["agent:remote"],
+                        "repo_owner": "acme",
+                        "repo_name": "backend",
+                    }
+                ]
+            }
+        if name == "list_issue_blockers":
+            return {
+                "result": [
+                    {
+                        "number": 88,
+                        "title": "Blocked issue",
+                        "state": "open",
+                        "repo_owner": "acme",
+                        "repo_name": "backend",
+                    }
+                ]
+            }
+        return {"result": []}
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _FakeApiClient:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class _LogCapture:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, str]]] = []
@@ -259,3 +308,61 @@ async def test_hydrate_issues_preserves_other_issues_on_failure(monkeypatch: pyt
     assert result[0].number == 1
     assert result[1].number == 2
     assert result[2].number == 3
+
+
+@pytest.mark.asyncio
+async def test_fetching_via_appforge_mcp_reuses_single_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _PoolSettings()
+    settings.appforge_mcp_url = "https://example.com/mcp"
+    monkeypatch.setattr("ace.runners.agent_pool.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "ace.runners.agent_pool.resolve_github_token",
+        lambda _: "test-github-token",
+    )
+    monkeypatch.setattr("ace.runners.agent_pool.McpClient", _FakeMcpClient)
+
+    pool = AgentPool(target=AgentTarget.REMOTE)
+    _FakeMcpClient.instances.clear()
+
+    ready = await pool._fetch_ready_issues_via_mcp()
+    issue = _issue(number=11, owner="acme", repo="backend", title="Need blockers")
+    blockers = await pool._fetch_blockers_via_appforge_mcp(issue)
+
+    assert len(ready) == 1
+    assert len(blockers) == 1
+    assert ready[0].number == 101
+    assert blockers[0].number == 88
+    assert len(_FakeMcpClient.instances) == 1
+    assert len(_FakeMcpClient.instances[0].call_history) == 2
+    assert _FakeMcpClient.instances[0].call_history[0][0] == "list_ready_remote_items"
+    assert _FakeMcpClient.instances[0].call_history[1][0] == "list_issue_blockers"
+    assert pool._mcp_url == "https://example.com/mcp"
+
+
+@pytest.mark.asyncio
+async def test_pool_stop_closes_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _PoolSettings()
+    settings.appforge_mcp_url = "https://example.com/mcp"
+    monkeypatch.setattr("ace.runners.agent_pool.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "ace.runners.agent_pool.resolve_github_token",
+        lambda _: "test-github-token",
+    )
+    monkeypatch.setattr("ace.runners.agent_pool.McpClient", _FakeMcpClient)
+
+    pool = AgentPool(target=AgentTarget.REMOTE)
+    api_client = _FakeApiClient()
+    pool._api_client = api_client
+    mcp_client = _FakeMcpClient("https://example.com/mcp")
+    pool._mcp_client = mcp_client
+    pool._mcp_url = "https://example.com/mcp"
+
+    pool.stop()
+    await asyncio.sleep(0)
+
+    assert api_client.closed is True
+    assert mcp_client.closed is True
+    assert pool._api_client is None
+    assert pool._mcp_client is None
