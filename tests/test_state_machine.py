@@ -44,3 +44,22 @@ def test_state_to_dict():
     assert state_dict["issue_number"] == 456
     assert state_dict["agent_id"] == "test-agent"
     assert state_dict["pr_number"] == 789
+
+
+def test_state_to_dict_truncates_previous_output() -> None:
+    state = WorkerState(
+        issue_number=456,
+        agent_id="test-agent",
+        workspace_path="/tmp/test",
+        branch_name="agent/456-test",
+        pr_number=789,
+        previous_output="x" * 600,
+    )
+
+    state_dict = state.to_dict()
+
+    assert state.previous_output == "x" * 600
+    assert state_dict["previous_output"] != state.previous_output
+    assert state_dict["previous_output"].startswith("x" * 497)
+    assert state_dict["previous_output"].endswith("...")
+    assert len(state_dict["previous_output"]) == 500

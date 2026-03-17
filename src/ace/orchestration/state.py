@@ -7,6 +7,17 @@ from typing import Any
 from ace.agents.types import AgentResult
 from ace.github.issue_queue import Issue
 
+_MAX_PREVIOUS_OUTPUT_PREVIEW_CHARS = 500
+
+
+def _truncate_previous_output(text: str, max_chars: int = _MAX_PREVIOUS_OUTPUT_PREVIEW_CHARS) -> str:
+    """Truncate large output for logging with a consistent suffix."""
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return "..."
+    return f"{text[: max_chars - 3]}..."
+
 
 @dataclass
 class WorkerState:
@@ -62,5 +73,5 @@ class WorkerState:
             "retry_count": self.retry_count,
             "session_id": self.session_id,
             "session_turn": self.session_turn,
-            "previous_output": self.previous_output,
+            "previous_output": _truncate_previous_output(self.previous_output),
         }
