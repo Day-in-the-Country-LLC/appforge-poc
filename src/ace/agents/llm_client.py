@@ -221,6 +221,8 @@ async def call_claude(
 
 def _extract_openai_text(data: dict) -> str:
     """Extract text from OpenAI responses API payload."""
+    unknown_payload_msg = f"❌ ERROR: Unrecognized OpenAI response format: keys={sorted(data.keys())}"
+
     # Shortcut: some responses include a flat output_text field.
     if "output_text" in data and isinstance(data["output_text"], str):
         return data["output_text"]
@@ -241,12 +243,24 @@ def _extract_openai_text(data: dict) -> str:
                             return entry["output_text"]
                 if "text" in item:
                     return item["text"]
-            # Fallback: stringify the first item.
-            return str(output[0])
-        return str(output)
+            # Output exists but contains no extractable text.
+            raise ValueError(unknown_payload_msg)
+        raise ValueError(unknown_payload_msg)
 
     if "choices" in data:
-        return data["choices"][0]["message"]["content"]
+        choices = data["choices"]
+        if not isinstance(choices, list) or not choices:
+            raise ValueError(unknown_payload_msg)
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            raise ValueError(unknown_payload_msg)
+        message = first_choice.get("message")
+        if not isinstance(message, dict):
+            raise ValueError(unknown_payload_msg)
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        raise ValueError(unknown_payload_msg)
 
     logger.warning("openai_unrecognized_payload", keys=list(data.keys()))
-    return str(data)
+    raise ValueError(unknown_payload_msg)

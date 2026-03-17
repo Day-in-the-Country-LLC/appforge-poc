@@ -41,3 +41,33 @@ def test_get_tracer_singleton_initializes_once_under_thread_race(monkeypatch: py
     assert instances
     assert len({id(item) for item in instances}) == 1
     assert init_count["count"] == 1
+
+
+def test_extract_openai_text_parses_expected_formats() -> None:
+    assert (
+        llm_client._extract_openai_text({"output_text": "flat"})
+        == "flat"
+    )
+    assert (
+        llm_client._extract_openai_text(
+            {"output": [{"content": [{"text": "from_output"}]}]}
+        )
+        == "from_output"
+    )
+    assert (
+        llm_client._extract_openai_text({"choices": [{"message": {"content": "via_choices"}}]})
+        == "via_choices"
+    )
+
+
+def test_extract_openai_text_raises_for_unknown_payload() -> None:
+    with pytest.raises(ValueError, match="❌ ERROR: Unrecognized OpenAI response format"):
+        llm_client._extract_openai_text({"result": "n/a", "meta": {"state": "ok"}})
+
+    with pytest.raises(ValueError, match="keys=\\['output'\\]") as exc:
+        llm_client._extract_openai_text({"output": "bad-output-format"})
+    assert "output" in str(exc.value)
+
+    with pytest.raises(ValueError, match="keys=\\['choices'\\]") as exc:
+        llm_client._extract_openai_text({"choices": "bad-choices-format"})
+    assert "choices" in str(exc.value)
