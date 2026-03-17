@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import UTC, datetime
 
 import pytest
@@ -83,6 +85,14 @@ class _FakeAgentGraph:
         return self.final_state
 
 
+class _LogCapture:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, str]]] = []
+
+    def error(self, message: str, **kwargs: str) -> None:  # pragma: no cover
+        self.events.append((message, kwargs))
+
+
 @pytest.mark.asyncio
 async def test_failed_agent_result_does_not_stop_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("ace.runners.agent_pool.get_settings", lambda: _PoolSettings())
@@ -145,3 +155,39 @@ async def test_fatal_pool_error_bubbles_to_fatal_state(monkeypatch: pytest.Monke
     assert pool._fatal_error is not None
     assert "GitHub token missing from environment" in pool._fatal_error
     assert slot.state == AgentState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_schedule_refill_logs_errors_without_crashing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ace.runners.agent_pool.get_settings", lambda: _PoolSettings())
+    monkeypatch.setattr(
+        "ace.runners.agent_pool.resolve_github_token",
+        lambda _: "test-github-token",
+    )
+
+    pool = AgentPool(target=AgentTarget.REMOTE)
+    pool._running = True
+
+    events: list[str] = []
+    error_log = _LogCapture()
+    monkeypatch.setattr("ace.runners.agent_pool.logger", error_log)
+
+    async def failing_refill() -> None:
+        raise RuntimeError("intentional refill failure")
+
+    async def successful_refill() -> None:
+        events.append("refilled")
+
+    monkeypatch.setattr(pool, "_refill_slots", failing_refill)
+    pool._schedule_refill()
+    await asyncio.sleep(0)
+
+    assert not pool._refill_scheduled
+    assert len(error_log.events) == 1
+    assert "❌ ERROR: refill_task_failed" in error_log.events[0][0]
+
+    monkeypatch.setattr(pool, "_refill_slots", successful_refill)
+    pool._schedule_refill()
+    await asyncio.sleep(0)
+
+    assert events == ["refilled"]

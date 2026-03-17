@@ -189,6 +189,11 @@ class AgentPool:
         async def _run() -> None:
             try:
                 await self._refill_slots()
+            except Exception as exc:
+                logger.error(
+                    "❌ ERROR: refill_task_failed",
+                    error=str(exc),
+                )
             finally:
                 self._refill_scheduled = False
 
